@@ -112,7 +112,7 @@ LangGraph Coding/Natural CMS worker는 기존 `coding-runtime` 컨테이너 안�
 
 ### 자동 시작
 
-부모 워크스페이스에서 기존 공식 시작 명령을 사용한다. 별도 Runner 실행 요청은 필요 없다.
+부모 워크스페이스에서 기존 공식 시작 명령을 사용한다. 별도 Runner 실행 요청은 필요 없다. 공식 full 재빌드에서는 Flyway와 전체 서비스 Health가 통과한 뒤 Runner가 시작된다.
 
 ```powershell
 .\urizo-final-master\scripts\start-local-cms.ps1 -Profile full -ApproveLocalMutation

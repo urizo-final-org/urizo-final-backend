@@ -17,11 +17,13 @@ AX-Module-Studio-Workspace/           # .git 생성 금지
 └── urizo-final-orchestrator/         # Python LangGraph Coding Orchestrator
 ```
 
-2026-08-10 GitHub 확인 시 세 Repository는 모두 Public, 기본 Branch `main`, Source가 없는 빈 Repository다.
+2026-08-10 GitHub 확인 시 세 Repository는 모두 Public이며, 기존 개인 소유 Repository를 `urizo-final-org`로 정식 Transfer한 Canonical Repository다. Governance Bootstrap으로 `main`과 `dev`가 생성되었지만 Product Source는 아직 없다.
 
-- Frontend: `https://github.com/tmdwns0531/urizo-final-frontend.git`
-- Backend: `https://github.com/tmdwns0531/urizo-final-backend.git`
-- Orchestrator: `https://github.com/tmdwns0531/urizo-final-orchestrator.git`
+- Frontend: `https://github.com/urizo-final-org/urizo-final-frontend.git`
+- Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
+- Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
+
+Transfer 전에 조직에 존재했던 동명 Fork는 독립 Backup Repository로 전환하고 Archive했다. 해당 Backup은 Canonical Remote나 실행 가능한 Source Backup이 아니다.
 
 Repository가 세 개여도 하나의 기능 Slice를 함께 읽고 수정할 수 있다. 그러나 Commit·Push·PR·Merge는 각 `.git` 경계에서 독립적으로 수행한다.
 
@@ -104,6 +106,14 @@ Contract·Migration·Compose 영향
 ```
 
 로컬 Branch의 내용을 원격 `dev`에 직접 Push하는 방식은 기본 흐름이 아니다. `dev`·`main` 직접 Push와 자동 Merge는 최초 Bootstrap 또는 별도 승인된 긴급복구 외에는 금지한다.
+
+현재 조직 운영 기준은 다음과 같다.
+
+- `tmdwns0531`: Organization Owner·세 Canonical Repository Admin
+- `HaveOffDuty`, `LEEJAEWOOK1`, `emilyjjang-jpg`, `jcy644542`: Organization Member·세 Repository Write
+- `protect-dev-main`: `main/dev` 대상, PR 승인 1개, stale approval 해제, 대화 해결, update·delete 제한, force push 차단
+- Repository Admin `Always allow` Bypass: Bootstrap·긴급복구 전용
+- Code Owner Review·Required Status Check: CI·CODEOWNERS 도입 전까지 비활성
 
 하나의 Vertical Slice가 세 Repository를 바꾸는 예:
 
@@ -284,7 +294,7 @@ FastAPI Baseline으로 전환할 때도 Repository를 삭제하지 않는다. �
 
 ## 9. 정식 문서 반영 시점
 
-현재 최상위 `GIT-WORKFLOW.md`와 `# AX Module Studio 팀 작업 단위·Git 운영 가이드.md`는 FastAPI 기준선의 2-Repository 규칙이므로 원본 그대로 보존한다. Spring 후보의 구현 전환이 승인되면 이 Addendum을 기준으로 두 문서의 v0.2를 발행하고 다음 Bootstrap 문서도 함께 3-Repository로 갱신한다.
+최상위 FastAPI 기준선의 2-Repository 문서와 Snapshot은 원본 그대로 보존한다. Spring 구현은 이 Addendum과 발행된 `GIT-WORKFLOW_v0.2.md`, `TEAM_DEV_SETUP_v0.2.md`, Implementation Handoff v0.2를 Canonical 운영 문서로 사용한다.
 
 - 상위 `AGENTS.md`·`CLAUDE.md` Template
 - `TEAM_DEV_SETUP.md`
@@ -292,4 +302,4 @@ FastAPI Baseline으로 전환할 때도 Repository를 삭제하지 않는다. �
 - Dev·Prod Bootstrap Spec
 - Coding Agent Harness의 Repository Job 규칙
 
-문서 갱신만으로 원격 Repository·Branch·Ruleset이 변경되지는 않는다. 최초 Commit, `dev` 생성, Branch Protection, 팀원 권한은 별도 승인과 Git Preflight 뒤 수행한다.
+조직 Transfer, `main/dev` 생성, Ruleset과 팀원 권한 설정은 별도 승인과 Git Preflight를 거쳐 완료되었다. 이후 문서 변경도 일반 Feature Branch → `dev` PR 흐름으로 검증하며, 문서 내용만으로 원격 설정을 변경하지 않는다.

@@ -8,6 +8,14 @@ This is the governance-only owner bootstrap. Spring source, Maven Wrapper, Compo
 
 The implementation target is Spring API and Batch, PostgreSQL/pgvector, Valkey, a Flyway one-shot migration process, and integration with the sibling React and LangGraph repositories.
 
+## Canonical repositories
+
+- Frontend: `https://github.com/urizo-final-org/urizo-final-frontend.git`
+- Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
+- Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
+
+The three repositories were transferred to the `urizo-final-org` organization and are the only canonical development remotes. Normal work uses a feature branch and a pull request to `dev`; direct `main` or `dev` pushes are not the normal workflow.
+
 ## Canonical documents
 
 - Start with `docs/architecture-variants/spring-ai-primary-langgraph-coding-v0.2/README.md` and follow its reading order.

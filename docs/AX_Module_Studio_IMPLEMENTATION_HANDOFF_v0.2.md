@@ -25,11 +25,21 @@ AX-Module-Studio-Workspace/           # .git 금지
 └── urizo-final-backend/              # Spring Platform·Flyway·통합 실행 Root
 ```
 
-- Frontend: `https://github.com/tmdwns0531/urizo-final-frontend.git`
-- Orchestrator: `https://github.com/tmdwns0531/urizo-final-orchestrator.git`
-- Backend: `https://github.com/tmdwns0531/urizo-final-backend.git`
+- Frontend: `https://github.com/urizo-final-org/urizo-final-frontend.git`
+- Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
+- Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
 
 각 Repository는 별도 Branch·Commit·Push·PR을 사용한다. 하나의 Slice가 여러 Repository를 바꾸면 같은 `work-slug`를 사용하고 PR을 상호 링크한다.
+
+### 2.1 GitHub 조직 운영 상태
+
+- 기존 개인 소유 Repository는 `urizo-final-org`로 정식 Transfer되어 위 URL이 Canonical이다.
+- Transfer 전에 조직에 있던 동명 Fork는 독립 Backup Repository로 전환·이름 변경·Archive했으며 개발 Remote로 사용하지 않는다.
+- `tmdwns0531`은 Organization Owner이자 세 Canonical Repository의 Admin이다.
+- `HaveOffDuty`, `LEEJAEWOOK1`, `emilyjjang-jpg`, `jcy644542`은 Organization Member이며 세 Repository에 Write 권한을 가진다.
+- `main`과 `dev`에는 `protect-dev-main` Ruleset이 적용된다. Pull Request 1개 승인, stale approval 해제, 대화 해결, update·delete 제한과 force push 차단이 활성화되어 있다.
+- Repository Admin은 Bootstrap·긴급복구에만 `Always allow` Bypass를 사용한다. Owner의 일반 개발도 Feature Branch에서 `dev` PR을 사용한다.
+- Code Owner Review와 Required Status Check는 CI·CODEOWNERS 도입 PR에서 활성화한다. 현재 활성화된 것으로 오인하지 않는다.
 
 ## 3. 확정 Runtime
 
@@ -54,7 +64,7 @@ Flyway Migration One-shot
 
 - 기획·Spring 목표 아키텍처·3-Repository 경계 문서화 완료
 - Windows Dev 기반환경 Bootstrap 진행
-- 세 원격 Repository는 최초 Source Commit 전 상태
+- 세 원격 Repository의 조직 Transfer, `main/dev` Governance Bootstrap과 Ruleset 설정 완료
 - Product Source, Maven Wrapper, Python Lock, Dockerfile, Compose, Flyway SQL은 아직 없음
 - Source Scaffold와 Migration 실행은 Stage 0·1 착수 승인 전 금지
 

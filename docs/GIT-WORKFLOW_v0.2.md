@@ -5,10 +5,12 @@
 
 ## 1. Repository
 
-- `urizo-final-frontend`: React·Public OpenAPI Consumer
-- `urizo-final-backend`: Spring·Flyway·Public/Internal Contract·통합 실행 Root
-- `urizo-final-orchestrator`: Python LangGraph Coding Runtime
+- `https://github.com/urizo-final-org/urizo-final-frontend.git`: React·Public OpenAPI Consumer
+- `https://github.com/urizo-final-org/urizo-final-backend.git`: Spring·Flyway·Public/Internal Contract·통합 실행 Root
+- `https://github.com/urizo-final-org/urizo-final-orchestrator.git`: Python LangGraph Coding Runtime
 - 공통 상위 Workspace: 비-Git
+
+위 세 URL만 Canonical Development Remote다. `tmdwns0531`은 Organization Owner·Repository Admin이고, `HaveOffDuty`, `LEEJAEWOOK1`, `emilyjjang-jpg`, `jcy644542`은 Organization Member·Repository Write 권한 사용자다.
 
 ## 2. Branch
 
@@ -38,6 +40,8 @@ origin/dev 최신화
 4. Collaborator 권한 확인
 
 이후 Owner도 일반 개발에는 Feature PR을 사용한다. Bootstrap·긴급복구 Bypass는 사유와 SHA를 기록한다.
+
+현재 `protect-dev-main` Ruleset은 `main/dev`에 적용되며 PR 승인 1개, stale approval 해제, 대화 해결, update·delete 제한, force push 차단을 요구한다. Repository Admin의 `Always allow` Bypass는 Bootstrap·긴급복구에만 사용한다. Code Owner Review와 Required Status Check는 CI·CODEOWNERS 도입 전까지 비활성 상태이며, 활성화 여부를 PR 본문에서 사실대로 기록한다.
 
 ## 4. Slice와 PR 수
 

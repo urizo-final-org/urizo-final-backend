@@ -21,6 +21,14 @@ AX-Module-Studio-Workspace/           # .git 없음
 
 Backend가 통합 Compose·Bootstrap Script Root다. 상위 Workspace와 sibling Repository를 한 Git으로 합치지 않는다.
 
+Canonical Clone URL은 다음과 같다.
+
+- Frontend: `https://github.com/urizo-final-org/urizo-final-frontend.git`
+- Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
+- Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
+
+개인 계정 아래의 이전 URL이나 Archive된 Fork Backup을 Clone Remote로 사용하지 않는다. 일반 팀원은 조직 Member·Repository Write 권한으로 Feature Branch를 Push하고 `dev` 대상 PR을 생성한다.
+
 ## 3. 읽기 전용 Preflight
 
 - Windows Version·Architecture·Virtualization·SLAT

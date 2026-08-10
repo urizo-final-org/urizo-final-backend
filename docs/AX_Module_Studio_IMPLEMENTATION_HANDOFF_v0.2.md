@@ -34,7 +34,7 @@ AX-Module-Studio-Workspace/           # .git 금지
 ### 2.1 GitHub 조직 운영 상태
 
 - 기존 개인 소유 Repository는 `urizo-final-org`로 정식 Transfer되어 위 URL이 Canonical이다.
-- Transfer 전에 조직에 있던 동명 Fork는 독립 Backup Repository로 전환·이름 변경·Archive했으며 개발 Remote로 사용하지 않는다.
+- Transfer 전에 조직에 있던 동명 Fork는 독립 Backup Repository로 전환·이름 변경한 뒤 Canonical `main`과 Commit SHA가 동일하고 별도 Branch·Tag·Release·PR·Issue·Local 참조가 없음을 검증했다. 검증된 Backup 3개는 2026-08-10 영구 삭제 완료했으며 개발 Remote로 사용하지 않는다.
 - `tmdwns0531`은 Organization Owner이자 세 Canonical Repository의 Admin이다.
 - `HaveOffDuty`, `LEEJAEWOOK1`, `emilyjjang-jpg`, `jcy644542`은 Organization Member이며 세 Repository에 Write 권한을 가진다.
 - `main`과 `dev`에는 `protect-dev-main` Ruleset이 적용된다. Pull Request 1개 승인, stale approval 해제, 대화 해결, update·delete 제한과 force push 차단이 활성화되어 있다.

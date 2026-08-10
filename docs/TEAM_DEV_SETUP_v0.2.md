@@ -27,7 +27,7 @@ Canonical Clone URL은 다음과 같다.
 - Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
 - Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
 
-개인 계정 아래의 이전 URL이나 Archive된 Fork Backup을 Clone Remote로 사용하지 않는다. 일반 팀원은 조직 Member·Repository Write 권한으로 Feature Branch를 Push하고 `dev` 대상 PR을 생성한다.
+개인 계정 아래의 이전 URL을 Clone Remote로 사용하지 않는다. Transfer 과정에서 생성된 Fork Backup 3개는 Canonical `main`과 동일함을 검증한 뒤 2026-08-10 영구 삭제 완료했다. 일반 팀원은 조직 Member·Repository Write 권한으로 Feature Branch를 Push하고 `dev` 대상 PR을 생성한다.
 
 ## 3. 읽기 전용 Preflight
 

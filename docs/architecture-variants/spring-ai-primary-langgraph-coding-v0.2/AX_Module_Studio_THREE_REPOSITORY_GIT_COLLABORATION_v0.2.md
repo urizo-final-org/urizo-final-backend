@@ -23,7 +23,7 @@ AX-Module-Studio-Workspace/           # .git 생성 금지
 - Backend: `https://github.com/urizo-final-org/urizo-final-backend.git`
 - Orchestrator: `https://github.com/urizo-final-org/urizo-final-orchestrator.git`
 
-Transfer 전에 조직에 존재했던 동명 Fork는 독립 Backup Repository로 전환하고 Archive했다. 해당 Backup은 Canonical Remote나 실행 가능한 Source Backup이 아니다.
+Transfer 전에 조직에 존재했던 동명 Fork는 독립 Backup Repository로 전환했다. Canonical `main`과 Commit SHA가 동일하고 별도 Branch·Tag·Release·PR·Issue·Local 참조가 없음을 검증한 뒤 Backup 3개를 2026-08-10 영구 삭제 완료했다.
 
 Repository가 세 개여도 하나의 기능 Slice를 함께 읽고 수정할 수 있다. 그러나 Commit·Push·PR·Merge는 각 `.git` 경계에서 독립적으로 수행한다.
 

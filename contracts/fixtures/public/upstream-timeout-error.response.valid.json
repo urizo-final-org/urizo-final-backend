@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "error": {
+    "code": "UPSTREAM_TIMEOUT",
+    "message": "The upstream operation exceeded its bounded timeout.",
+    "retryable": true,
+    "retryAfterMs": 1000
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "requestFixture": "coding-agent/model-turn.structured.request.valid.json",
+  "responseFixture": "coding-agent/model-turn.structured.response.bad-digest.valid.json"
+}

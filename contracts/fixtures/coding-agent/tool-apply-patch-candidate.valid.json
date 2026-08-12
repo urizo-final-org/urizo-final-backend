@@ -1,0 +1,6 @@
+{
+  "name": "apply_patch",
+  "arguments": {
+    "patch": "--- a/contracts/README.md\n+++ b/contracts/README.md\n@@ -1 +1 @@\n-old\n+new"
+  }
+}

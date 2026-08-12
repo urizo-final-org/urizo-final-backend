@@ -1,0 +1,43 @@
+spring:
+  application:
+    name: ax-module-studio-backend
+  main:
+    banner-mode: "off"
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration
+  batch:
+    job:
+      enabled: false
+    jdbc:
+      initialize-schema: never
+  flyway:
+    enabled: false
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 0.0
+
+ax:
+  ai:
+    provider-lane: ${AX_AI_PROVIDER_LANE:PRODUCT}
+  coding:
+    job-lifecycle:
+      enabled: false
+    model-turn-bridge:
+      enabled: false

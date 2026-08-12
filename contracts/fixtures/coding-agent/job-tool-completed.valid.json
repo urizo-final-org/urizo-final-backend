@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "77777777-7777-4777-8777-777777777778",
+  "eventType": "TOOL_EXECUTION_COMPLETED",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.tool.result.0001",
+  "attempt": 1,
+  "expectedStateVersion": 6,
+  "occurredAt": "2026-08-10T09:12:01Z",
+  "payload": {
+    "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "outcome": "SUCCEEDED",
+    "result": {
+      "mediaType": "text/plain",
+      "resultRef": "/internal/coding/tool-executions/dddddddd-dddd-4ddd-8ddd-dddddddddddd/result",
+      "sizeBytes": 42,
+      "digest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  }
+}

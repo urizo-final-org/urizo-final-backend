@@ -1,0 +1,5 @@
+{
+  "code": "VALIDATION_FAILED",
+  "message": "The request did not satisfy the public contract.",
+  "retryable": false
+}

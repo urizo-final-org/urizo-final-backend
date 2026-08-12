@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "jobType": "KNOWLEDGE_BUILD",
+  "status": "QUEUED",
+  "statusUrl": "/api/agent-jobs/55555555-5555-4555-8555-555555555555",
+  "acceptedAt": "2026-08-10T09:01:00Z",
+  "knowledgeVersionId": "34343434-3434-4434-8434-343434343434",
+  "connectorVersionId": "23232323-2323-4232-8232-232323232323",
+  "configDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}

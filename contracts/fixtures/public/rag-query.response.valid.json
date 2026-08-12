@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "queryId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "conversationId": "44444444-4444-4444-8444-444444444444",
+  "outcome": "ANSWERED",
+  "answer": "The event is held beside the river.",
+  "citations": [
+    {
+      "documentId": "TOUR-1001",
+      "title": "River Night Festival",
+      "sourceUrl": "https://example.invalid/events/1001",
+      "excerpt": "The event is held beside the river.",
+      "score": 0.93
+    }
+  ],
+  "knowledgeVersionId": "34343434-3434-4434-8434-343434343434",
+  "generatedAt": "2026-08-10T09:02:00Z"
+}

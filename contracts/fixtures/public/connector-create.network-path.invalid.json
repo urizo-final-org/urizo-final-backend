@@ -1,0 +1,27 @@
+{
+  "schemaVersion": "1.0",
+  "name": "TOUR_CONTENT_API",
+  "baseUrl": "https://api.example.invalid",
+  "endpoint": "//evil.example.invalid/records",
+  "method": "GET",
+  "authentication": {
+    "type": "API_KEY",
+    "location": "QUERY",
+    "name": "serviceKey",
+    "secretRef": "cms-secret://tour-api"
+  },
+  "requestParameters": [],
+  "response": { "itemsPath": "$.data" },
+  "pagination": {
+    "type": "PAGE",
+    "pageParameter": "page",
+    "pageSizeParameter": "perPage",
+    "startPage": 1,
+    "pageSize": 100
+  },
+  "documentMapping": {
+    "documentId": "$.contentId",
+    "title": "$.title",
+    "content": "$.description"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "outcome": "TIMED_OUT",
+  "error": {
+    "code": "PATH_POLICY_DENIED",
+    "message": "A timeout must use the ambiguous timeout error.",
+    "retryable": false,
+    "executionState": "NOT_STARTED",
+    "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  }
+}

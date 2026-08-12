@@ -1,0 +1,6 @@
+{
+  "code": "MODEL_RESPONSE_INVALID",
+  "message": "A terminal error cannot advertise retry delay.",
+  "retryable": false,
+  "retryAfterMs": 1000
+}

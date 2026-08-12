@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "actorId": "11111111-1111-4111-8111-111111111111",
+  "projectId": "22222222-2222-4222-8222-222222222222",
+  "repositoryId": "33333333-3333-4333-8333-333333333333",
+  "graphStep": "plan",
+  "baseSha": "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policyHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "promptVersion": "coding-plan-v1",
+  "allowedCapabilities": ["CHAT"],
+  "allowedNodes": ["plan"],
+  "expiresAt": "2026-08-11T12:00:00Z"
+}

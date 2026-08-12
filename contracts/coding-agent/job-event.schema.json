@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ax-module-studio.local/coding-agent/1.0/job-event.schema.json",
+  "title": "AX Module Studio coding job events",
+  "description": "Strict at-least-once event payloads. eventId deduplicates delivery; idempotencyKey deduplicates a logical side effect.",
+  "oneOf": [
+    { "$ref": "#/$defs/CodingJobRequested" },
+    { "$ref": "#/$defs/ToolExecutionCompleted" },
+    { "$ref": "#/$defs/ApprovalRecorded" }
+  ],
+  "$defs": {
+    "SchemaVersion": { "type": "string", "const": "1.0" },
+    "Uuid": { "type": "string", "format": "uuid" },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "GitObjectId": {
+      "type": "string",
+      "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+    },
+    "CodingJobRequested": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "eventId", "eventType", "jobId", "traceId", "idempotencyKey", "attempt", "expectedStateVersion", "occurredAt", "payload"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "eventId": { "$ref": "#/$defs/Uuid" },
+        "eventType": { "type": "string", "const": "CODING_JOB_REQUESTED" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "expectedStateVersion": { "type": "integer", "minimum": 1 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "#/$defs/CodingJobRequestedPayload" }
+      }
+    },
+    "CodingJobRequestedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actorId", "projectId", "repositoryId", "graphStep", "baseSha", "contextDigest", "policyHash", "expiresAt"],
+      "properties": {
+        "actorId": { "$ref": "#/$defs/Uuid" },
+        "projectId": { "$ref": "#/$defs/Uuid" },
+        "repositoryId": { "$ref": "#/$defs/Uuid" },
+        "graphStep": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "baseSha": { "$ref": "#/$defs/GitObjectId" },
+        "contextDigest": { "$ref": "#/$defs/Sha256Digest" },
+        "policyHash": { "$ref": "#/$defs/Sha256Digest" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolExecutionCompleted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "eventId", "eventType", "jobId", "traceId", "idempotencyKey", "attempt", "expectedStateVersion", "occurredAt", "payload"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "eventId": { "$ref": "#/$defs/Uuid" },
+        "eventType": { "type": "string", "const": "TOOL_EXECUTION_COMPLETED" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "expectedStateVersion": { "type": "integer", "minimum": 1 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "#/$defs/ToolCompletionPayload" }
+      }
+    },
+    "ToolCompletionPayload": {
+      "oneOf": [
+        { "$ref": "#/$defs/SuccessfulToolCompletion" },
+        { "$ref": "#/$defs/UnsuccessfulToolCompletion" }
+      ]
+    },
+    "SuccessfulToolCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "toolCallId", "outcome", "result"],
+      "properties": {
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "outcome": { "type": "string", "const": "SUCCEEDED" },
+        "result": { "$ref": "tool-request.schema.json#/$defs/ResultReference" },
+        "candidateSha": { "$ref": "#/$defs/GitObjectId" }
+      }
+    },
+    "UnsuccessfulToolCompletion": {
+      "oneOf": [
+        { "$ref": "#/$defs/FailedToolCompletion" },
+        { "$ref": "#/$defs/DeniedToolCompletion" },
+        { "$ref": "#/$defs/TimedOutToolCompletion" }
+      ]
+    },
+    "FailedToolCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "toolCallId", "outcome", "error"],
+      "properties": {
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "outcome": { "type": "string", "const": "FAILED" },
+        "error": { "$ref": "tool-request.schema.json#/$defs/ToolFailedError" }
+      }
+    },
+    "DeniedToolCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "toolCallId", "outcome", "error"],
+      "properties": {
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "outcome": { "type": "string", "const": "DENIED" },
+        "error": { "$ref": "tool-request.schema.json#/$defs/ToolDeniedError" }
+      }
+    },
+    "TimedOutToolCompletion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["executionId", "toolCallId", "outcome", "error"],
+      "properties": {
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "outcome": { "type": "string", "const": "TIMED_OUT" },
+        "error": { "$ref": "error-code.schema.json#/$defs/AmbiguousToolTimeoutError" }
+      }
+    },
+    "ApprovalRecorded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "eventId", "eventType", "jobId", "traceId", "idempotencyKey", "attempt", "expectedStateVersion", "occurredAt", "payload"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "eventId": { "$ref": "#/$defs/Uuid" },
+        "eventType": { "type": "string", "const": "APPROVAL_RECORDED" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "expectedStateVersion": { "type": "integer", "minimum": 1 },
+        "occurredAt": { "type": "string", "format": "date-time" },
+        "payload": { "$ref": "#/$defs/ApprovalRecordedPayload" }
+      }
+    },
+    "ApprovalRecordedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": { "decision": { "const": "APPROVED" } },
+            "required": ["decision"]
+          },
+          "then": { "required": ["expiresAt"] }
+        }
+      ],
+      "required": ["approvalId", "decision", "subjectCandidateSha", "policyHash", "validationHash"],
+      "properties": {
+        "approvalId": { "$ref": "#/$defs/Uuid" },
+        "decision": { "type": "string", "enum": ["APPROVED", "DENIED"] },
+        "subjectCandidateSha": { "$ref": "#/$defs/GitObjectId" },
+        "policyHash": { "$ref": "#/$defs/Sha256Digest" },
+        "validationHash": { "$ref": "#/$defs/Sha256Digest" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

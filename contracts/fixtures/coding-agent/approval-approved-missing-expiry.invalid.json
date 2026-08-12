@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "77777777-7777-4777-8777-777777777779",
+  "eventType": "APPROVAL_RECORDED",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.approval.recorded.0002",
+  "attempt": 1,
+  "expectedStateVersion": 7,
+  "occurredAt": "2026-08-10T09:13:00Z",
+  "payload": {
+    "approvalId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "decision": "APPROVED",
+    "subjectCandidateSha": "sha1:2222222222222222222222222222222222222222",
+    "policyHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "validationHash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  }
+}

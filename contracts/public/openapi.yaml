@@ -1,0 +1,1796 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "AX Module Studio Public API",
+    "version": "1.0.0",
+    "description": "Runtime-neutral Stage 0 contract. Spring is the primary implementation; a future approved fallback must preserve this boundary."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Same-origin API through the frontend gateway"
+    }
+  ],
+  "tags": [
+    { "name": "Health" },
+    { "name": "Projects" },
+    { "name": "Connectors" },
+    { "name": "Knowledge" },
+    { "name": "RAG" },
+    { "name": "Jobs" }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": ["Health"],
+        "summary": "Return process liveness",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The public API process is alive",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/readiness": {
+      "get": {
+        "operationId": "getReadiness",
+        "tags": ["Health"],
+        "summary": "Return readiness of required P0 dependencies",
+        "description": "Missing model keys, LangGraph, or optional observability do not make the P0 API unready.",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Required dependencies are ready",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReadinessReadyResponse" }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one required P0 dependency is not ready",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ReadinessNotReadyResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "tags": ["Projects"],
+        "summary": "List projects visible to the current actor",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/TraceIdHeader" }],
+        "responses": {
+          "200": {
+            "description": "Project collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "tags": ["Projects"],
+        "summary": "Create a project",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateProjectRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Project created",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+              "Location": { "$ref": "#/components/headers/Location" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProjectResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/projects/{projectId}/connectors": {
+      "get": {
+        "operationId": "listConnectors",
+        "tags": ["Connectors"],
+        "summary": "List project connectors",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectorListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "operationId": "createConnector",
+        "tags": ["Connectors"],
+        "summary": "Create a validated connector draft and immutable version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateConnectorRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Connector draft and immutable version created",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+              "Location": { "$ref": "#/components/headers/Location" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ConnectorResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" }
+        }
+      }
+    },
+    "/api/connectors/{connectorId}/preview": {
+      "post": {
+        "operationId": "previewConnector",
+        "tags": ["Connectors"],
+        "summary": "Fetch and map a bounded connector sample",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ConnectorIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ConnectorPreviewRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Sanitized preview",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ConnectorPreviewResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "422": { "$ref": "#/components/responses/UnprocessableEntity" },
+          "502": { "$ref": "#/components/responses/BadGateway" },
+          "504": { "$ref": "#/components/responses/GatewayTimeout" }
+        }
+      }
+    },
+    "/api/connectors/{connectorId}/sync": {
+      "post": {
+        "operationId": "syncConnector",
+        "tags": ["Connectors"],
+        "summary": "Start an asynchronous connector synchronization",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ConnectorIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ConnectorSyncRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": { "$ref": "#/components/responses/ConnectorSyncAccepted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/knowledge-bases": {
+      "get": {
+        "operationId": "listKnowledgeBases",
+        "tags": ["Knowledge"],
+        "summary": "List project knowledge bases",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdQuery" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge base collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      },
+      "post": {
+        "operationId": "createKnowledgeBase",
+        "tags": ["Knowledge"],
+        "summary": "Create a knowledge base without activating a version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateKnowledgeBaseRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Knowledge base created",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+              "Location": { "$ref": "#/components/headers/Location" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KnowledgeBaseResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/knowledge-bases/{knowledgeBaseId}/versions": {
+      "get": {
+        "operationId": "listKnowledgeVersions",
+        "tags": ["Knowledge"],
+        "summary": "List immutable knowledge versions",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeBaseIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge version collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeVersionListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "operationId": "startKnowledgeBuild",
+        "tags": ["Knowledge"],
+        "summary": "Create an inactive knowledge version and start its build",
+        "description": "Build success never activates the version automatically.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeBaseIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/StartKnowledgeBuildRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Knowledge build accepted",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+              "Location": { "$ref": "#/components/headers/Location" },
+              "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/KnowledgeBuildAcceptedResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/projects/{projectId}": {
+      "get": {
+        "operationId": "getProject",
+        "tags": ["Projects"],
+        "summary": "Get a project",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ProjectResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/connectors/{connectorId}": {
+      "get": {
+        "operationId": "getConnector",
+        "tags": ["Connectors"],
+        "summary": "Get a connector and selected immutable version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ConnectorIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Connector",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectorResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/connectors/{connectorId}/versions/{connectorVersionId}/activate": {
+      "post": {
+        "operationId": "activateConnectorVersion",
+        "tags": ["Connectors"],
+        "summary": "Approve and activate an immutable connector version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ConnectorIdPath" },
+          { "$ref": "#/components/parameters/ConnectorVersionIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateMutationRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Active connector version",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ConnectorResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/knowledge-bases/{knowledgeBaseId}": {
+      "get": {
+        "operationId": "getKnowledgeBase",
+        "tags": ["Knowledge"],
+        "summary": "Get a knowledge base and active pointer",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeBaseIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge base",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeBaseResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/knowledge-versions/{knowledgeVersionId}": {
+      "get": {
+        "operationId": "getKnowledgeVersion",
+        "tags": ["Knowledge"],
+        "summary": "Get immutable knowledge version state",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeVersionIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Knowledge version",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeVersionResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/knowledge-versions/{knowledgeVersionId}/activate": {
+      "post": {
+        "operationId": "activateKnowledgeVersion",
+        "tags": ["Knowledge"],
+        "summary": "Approve and activate a built knowledge version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeVersionIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateMutationRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Active knowledge version",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeVersionResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/knowledge-bases/{knowledgeBaseId}/rollback": {
+      "post": {
+        "operationId": "rollbackKnowledgeVersion",
+        "tags": ["Knowledge"],
+        "summary": "Roll back the active pointer to a previously active version",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/KnowledgeBaseIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RollbackKnowledgeRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Restored knowledge version",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/KnowledgeVersionResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/projects/{projectId}/chatbots": {
+      "get": {
+        "operationId": "listChatbots",
+        "tags": ["RAG"],
+        "summary": "List project chatbot bindings",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chatbot binding collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatbotListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "operationId": "createChatbot",
+        "tags": ["RAG"],
+        "summary": "Create a project chatbot binding",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateChatbotRequest" } } }
+        },
+        "responses": {
+          "201": {
+            "description": "Chatbot binding created",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+              "Location": { "$ref": "#/components/headers/Location" }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatbotResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/chatbots/{chatbotId}": {
+      "get": {
+        "operationId": "getChatbot",
+        "tags": ["RAG"],
+        "summary": "Get a chatbot binding",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ChatbotIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Chatbot binding",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatbotResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/chatbots/{chatbotId}/query": {
+      "post": {
+        "operationId": "queryChatbot",
+        "tags": ["RAG"],
+        "summary": "Query the server-selected active knowledge version",
+        "description": "The request intentionally has no projectId or knowledgeVersionId. Authorization context and the active pointer are enforced by the server.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ChatbotIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/RagQueryRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Grounded answer or explicit refusal",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/RagQueryResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "429": { "$ref": "#/components/responses/TooManyRequests" },
+          "503": { "$ref": "#/components/responses/ServiceUnavailable" },
+          "504": { "$ref": "#/components/responses/GatewayTimeout" }
+        }
+      }
+    },
+    "/api/agent-jobs": {
+      "get": {
+        "operationId": "listAgentJobs",
+        "tags": ["Jobs"],
+        "summary": "List authoritative project jobs",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/ProjectIdQuery" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Product job collection",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentJobListResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/api/agent-jobs/{jobId}": {
+      "get": {
+        "operationId": "getAgentJob",
+        "tags": ["Jobs"],
+        "summary": "Get product job state",
+        "description": "Product job state is authoritative; queue leases and framework execution state are not.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/JobIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current product job state",
+            "headers": {
+              "X-Trace-Id": { "$ref": "#/components/headers/TraceId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/AgentJobResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/api/agent-jobs/{jobId}/cancel": {
+      "post": {
+        "operationId": "cancelAgentJob",
+        "tags": ["Jobs"],
+        "summary": "Cancel a non-terminal product job",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/JobIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateMutationRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Cancelled or already terminal job",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentJobResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/api/agent-jobs/{jobId}/retry": {
+      "post": {
+        "operationId": "retryAgentJob",
+        "tags": ["Jobs"],
+        "summary": "Retry an explicitly retryable failed product job",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/JobIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StateMutationRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Requeued product job",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AgentJobResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque"
+      }
+    },
+    "parameters": {
+      "TraceIdHeader": {
+        "name": "X-Trace-Id",
+        "in": "header",
+        "required": false,
+        "description": "Existing RFC 4122 trace identifier. Invalid supplied values are rejected rather than silently replaced.",
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "IdempotencyKeyHeader": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "Reuse for transport retries of the same semantic request.",
+        "schema": { "$ref": "#/components/schemas/IdempotencyKey" }
+      },
+      "ProjectIdPath": {
+        "name": "projectId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ProjectIdQuery": {
+        "name": "projectId",
+        "in": "query",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ConnectorIdPath": {
+        "name": "connectorId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ConnectorVersionIdPath": {
+        "name": "connectorVersionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "KnowledgeBaseIdPath": {
+        "name": "knowledgeBaseId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "KnowledgeVersionIdPath": {
+        "name": "knowledgeVersionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "ChatbotIdPath": {
+        "name": "chatbotId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "JobIdPath": {
+        "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      }
+    },
+    "headers": {
+      "TraceId": {
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "Location": {
+        "required": true,
+        "schema": { "type": "string", "format": "uri-reference", "minLength": 1 }
+      },
+      "RetryAfter": {
+        "required": true,
+        "schema": { "type": "integer", "minimum": 1 }
+      },
+      "BearerChallenge": {
+        "required": true,
+        "schema": { "type": "string", "const": "Bearer" }
+      }
+    },
+    "responses": {
+      "ConnectorSyncAccepted": {
+        "description": "Connector sync job accepted",
+        "headers": {
+          "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+          "Location": { "$ref": "#/components/headers/Location" },
+          "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ConnectorSyncAcceptedResponse" }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Malformed request, invalid trace, or unsupported schema version",
+        "x-error-codes": ["VALIDATION_FAILED", "SCHEMA_VERSION_UNSUPPORTED", "INVALID_TRACE_ID", "IDEMPOTENCY_KEY_REQUIRED"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Unauthorized": {
+        "description": "Authentication required",
+        "x-error-codes": ["AUTHENTICATION_REQUIRED"],
+        "headers": {
+          "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+          "WWW-Authenticate": { "$ref": "#/components/headers/BearerChallenge" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Forbidden": {
+        "description": "Operation is not permitted",
+        "x-error-codes": ["FORBIDDEN"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "NotFound": {
+        "description": "Resource not found in the authorized scope",
+        "x-error-codes": ["RESOURCE_NOT_FOUND"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "Conflict": {
+        "description": "State or idempotency conflict",
+        "x-error-codes": ["IDEMPOTENCY_KEY_REUSED", "IDEMPOTENCY_REQUEST_IN_PROGRESS", "JOB_STATE_CONFLICT", "KNOWLEDGE_VERSION_NOT_ACTIVE"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "UnprocessableEntity": {
+        "description": "Syntactically valid request that violates connector or response policy",
+        "x-error-codes": ["CONNECTOR_SPEC_INVALID", "CONNECTOR_RESPONSE_INVALID"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "TooManyRequests": {
+        "description": "Rate limited",
+        "x-error-codes": ["RATE_LIMITED"],
+        "headers": {
+          "X-Trace-Id": { "$ref": "#/components/headers/TraceId" },
+          "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "InternalError": {
+        "description": "Internal non-secret error",
+        "x-error-codes": ["INTERNAL_ERROR"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "BadGateway": {
+        "description": "Upstream connector or model failure",
+        "x-error-codes": ["UPSTREAM_SERVICE_ERROR"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "ServiceUnavailable": {
+        "description": "Required service or provider unavailable",
+        "x-error-codes": ["SERVICE_NOT_READY", "PROVIDER_UNAVAILABLE", "LLM_NOT_CONFIGURED"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      },
+      "GatewayTimeout": {
+        "description": "Upstream operation exceeded its bounded timeout",
+        "x-error-codes": ["UPSTREAM_TIMEOUT"],
+        "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    },
+    "schemas": {
+      "SchemaVersion": { "type": "string", "const": "1.0" },
+      "Uuid": { "type": "string", "format": "uuid" },
+      "IdempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      },
+      "Sha256Digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "HealthResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "status", "checkedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "type": "string", "const": "UP" },
+          "checkedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ReadinessResponse": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/ReadinessReadyResponse" },
+          { "$ref": "#/components/schemas/ReadinessNotReadyResponse" }
+        ]
+      },
+      "ReadinessReadyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "status", "checkedAt", "checks"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "type": "string", "const": "READY" },
+          "checkedAt": { "type": "string", "format": "date-time" },
+          "checks": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/ReadinessCheck" },
+            "allOf": [
+              { "contains": { "const": { "name": "core-database", "status": "UP", "required": true } }, "minContains": 1, "maxContains": 1 },
+              { "contains": { "const": { "name": "queue", "status": "UP", "required": true } }, "minContains": 1, "maxContains": 1 },
+              { "contains": { "const": { "name": "migrations", "status": "UP", "required": true } }, "minContains": 1, "maxContains": 1 }
+            ],
+            "not": {
+              "contains": {
+                "enum": [
+                  { "name": "core-database", "status": "DOWN", "required": true },
+                  { "name": "queue", "status": "DOWN", "required": true },
+                  { "name": "migrations", "status": "DOWN", "required": true }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "ReadinessNotReadyResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "status", "checkedAt", "checks"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "status": { "type": "string", "const": "NOT_READY" },
+          "checkedAt": { "type": "string", "format": "date-time" },
+          "checks": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/ReadinessCheck" },
+            "contains": {
+              "enum": [
+                { "name": "core-database", "status": "DOWN", "required": true },
+                { "name": "queue", "status": "DOWN", "required": true },
+                { "name": "migrations", "status": "DOWN", "required": true }
+              ]
+            },
+            "minContains": 1
+          }
+        }
+      },
+      "ReadinessCheck": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/RequiredReadinessCheck" },
+          { "$ref": "#/components/schemas/OptionalReadinessCheck" }
+        ]
+      },
+      "RequiredReadinessCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "required"],
+        "properties": {
+          "name": { "type": "string", "enum": ["core-database", "queue", "migrations"] },
+          "status": { "type": "string", "enum": ["UP", "DOWN"] },
+          "required": { "type": "boolean", "const": true }
+        }
+      },
+      "OptionalReadinessCheck": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "status", "required"],
+        "properties": {
+          "name": { "type": "string", "enum": ["coding-agent", "model-provider", "observability"] },
+          "status": { "type": "string", "enum": ["UP", "DOWN", "NOT_CONFIGURED"] },
+          "required": { "type": "boolean", "const": false }
+        }
+      },
+      "CreateProjectRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "name"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 }
+        }
+      },
+      "ProjectResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "projectId", "name", "status", "createdAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 },
+          "status": { "type": "string", "const": "ACTIVE" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ProjectListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ProjectResponse" } }
+        }
+      },
+      "CreateConnectorRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "name", "baseUrl", "endpoint", "method", "authentication", "requestParameters", "response", "pagination", "documentMapping"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "baseUrl": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 500,
+            "pattern": "^https://[^/?#@]+(?:/(?!/)[^?#]*)?$",
+            "description": "Canonical HTTPS base URL with an optional path (for example https://api.odcloud.kr/api), but no userinfo, query, or fragment. Spring normalizes path dot segments, re-resolves DNS, rejects authority overrides after endpoint resolution and redirects, and enforces the project host/IP allowlist at preview and sync time."
+          },
+          "endpoint": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^/(?!/)",
+            "description": "Origin-relative path only; network-path references and authority overrides are forbidden."
+          },
+          "method": { "type": "string", "const": "GET" },
+          "authentication": { "$ref": "#/components/schemas/ConnectorAuthentication" },
+          "requestParameters": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/ConnectorRequestParameter" }
+          },
+          "response": { "$ref": "#/components/schemas/ConnectorResponseMapping" },
+          "pagination": { "$ref": "#/components/schemas/PagePagination" },
+          "documentMapping": { "$ref": "#/components/schemas/DocumentMapping" }
+        }
+      },
+      "ConnectorAuthentication": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "location", "name", "secretRef"],
+        "properties": {
+          "type": { "type": "string", "const": "API_KEY" },
+          "location": { "type": "string", "enum": ["QUERY", "HEADER"] },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "secretRef": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^[A-Za-z][A-Za-z0-9+.-]*://" }
+        }
+      },
+      "ConnectorRequestParameter": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "required"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "type": { "type": "string", "enum": ["STRING", "INTEGER", "NUMBER", "BOOLEAN"] },
+          "required": { "type": "boolean" },
+          "description": { "type": "string", "maxLength": 500 },
+          "defaultValue": { "type": ["string", "integer", "number", "boolean"] }
+        }
+      },
+      "ConnectorResponseMapping": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["itemsPath"],
+        "properties": {
+          "successCodePath": { "$ref": "#/components/schemas/JsonPath" },
+          "successValues": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": { "type": ["string", "integer"] }
+          },
+          "itemsPath": { "$ref": "#/components/schemas/JsonPath" },
+          "totalCountPath": { "$ref": "#/components/schemas/JsonPath" }
+        }
+      },
+      "PagePagination": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "pageParameter", "pageSizeParameter", "startPage", "pageSize"],
+        "properties": {
+          "type": { "type": "string", "const": "PAGE" },
+          "pageParameter": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "pageSizeParameter": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "startPage": { "type": "integer", "minimum": 0 },
+          "pageSize": { "type": "integer", "minimum": 1, "maximum": 1000 }
+        }
+      },
+      "DocumentMapping": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentId", "title", "content"],
+        "properties": {
+          "documentId": { "$ref": "#/components/schemas/JsonPath" },
+          "title": { "$ref": "#/components/schemas/JsonPath" },
+          "content": { "$ref": "#/components/schemas/JsonPath" },
+          "category": { "$ref": "#/components/schemas/JsonPath" },
+          "sourceUpdatedAt": { "$ref": "#/components/schemas/JsonPath" },
+          "sourceUrl": { "$ref": "#/components/schemas/JsonPath" },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/components/schemas/JsonPath" }
+          }
+        }
+      },
+      "JsonPath": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500,
+        "pattern": "^\\$"
+      },
+      "ConnectorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "projectId", "connectorId", "connectorVersionId", "name", "status", "configDigest", "createdAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "connectorId": { "$ref": "#/components/schemas/Uuid" },
+          "connectorVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "status": { "type": "string", "enum": ["DRAFT", "ACTIVE", "ARCHIVED"] },
+          "configDigest": { "$ref": "#/components/schemas/Sha256Digest" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ConnectorListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ConnectorResponse" } }
+        }
+      },
+      "StateMutationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "expectedStateVersion": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "ConnectorPreviewRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "maxItems"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "maxItems": { "type": "integer", "minimum": 1, "maximum": 20 },
+          "parameters": {
+            "type": "object",
+            "maxProperties": 100,
+            "additionalProperties": { "type": ["string", "integer", "number", "boolean"] }
+          }
+        }
+      },
+      "ConnectorPreviewResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "connectorId", "itemCount", "documents", "truncated", "checkedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "connectorId": { "$ref": "#/components/schemas/Uuid" },
+          "itemCount": { "type": "integer", "minimum": 0, "maximum": 20 },
+          "totalCount": { "type": "integer", "minimum": 0 },
+          "documents": {
+            "type": "array",
+            "maxItems": 20,
+            "items": { "$ref": "#/components/schemas/PreviewDocument" }
+          },
+          "truncated": { "type": "boolean" },
+          "checkedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "PreviewDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentId", "title", "content"],
+        "properties": {
+          "documentId": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "content": { "type": "string", "minLength": 1, "maxLength": 20000 },
+          "category": {
+            "type": "array",
+            "maxItems": 50,
+            "items": { "type": "string", "maxLength": 200 }
+          },
+          "sourceUrl": { "type": "string", "format": "uri" },
+          "sourceUpdatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ConnectorSyncRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "connectorVersionId"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "connectorVersionId": {
+            "allOf": [{ "$ref": "#/components/schemas/Uuid" }],
+            "description": "An approved ACTIVE immutable version belonging to the connectorId path resource."
+          }
+        }
+      },
+      "CreateKnowledgeBaseRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "projectId", "name"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 }
+        }
+      },
+      "KnowledgeBaseResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "knowledgeBaseId", "projectId", "name", "activeVersionId", "createdAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "knowledgeBaseId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "description": { "type": "string", "maxLength": 2000 },
+          "activeVersionId": { "type": ["string", "null"], "format": "uuid" },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "KnowledgeBaseListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeBaseResponse" } }
+        }
+      },
+      "StartKnowledgeBuildRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "connectorVersionId"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "connectorVersionId": {
+            "allOf": [{ "$ref": "#/components/schemas/Uuid" }],
+            "description": "An approved ACTIVE immutable connector version snapshotted for reproducible build input."
+          },
+          "label": { "type": "string", "minLength": 1, "maxLength": 120 }
+        }
+      },
+      "ConnectorSyncAcceptedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "jobId", "jobType", "status", "statusUrl", "acceptedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "jobType": { "type": "string", "const": "CONNECTOR_SYNC" },
+          "status": { "type": "string", "const": "QUEUED" },
+          "statusUrl": { "type": "string", "format": "uri-reference", "pattern": "^/api/agent-jobs/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "acceptedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "KnowledgeBuildAcceptedResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "jobId", "jobType", "status", "statusUrl", "acceptedAt", "knowledgeVersionId", "connectorVersionId", "configDigest"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "jobType": { "type": "string", "const": "KNOWLEDGE_BUILD" },
+          "status": { "type": "string", "const": "QUEUED" },
+          "statusUrl": { "type": "string", "format": "uri-reference", "pattern": "^/api/agent-jobs/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+          "acceptedAt": { "type": "string", "format": "date-time" },
+          "knowledgeVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "connectorVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "configDigest": { "$ref": "#/components/schemas/Sha256Digest" }
+        }
+      },
+      "KnowledgeVersionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "knowledgeVersionId", "knowledgeBaseId", "connectorVersionId", "versionNumber", "status", "configDigest", "documentCount", "chunkCount", "createdAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "knowledgeVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "knowledgeBaseId": { "$ref": "#/components/schemas/Uuid" },
+          "connectorVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "buildJobId": { "type": ["string", "null"], "format": "uuid" },
+          "versionNumber": { "type": "integer", "minimum": 1 },
+          "label": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "status": { "type": "string", "enum": ["BUILD_REQUESTED", "BUILDING", "APPROVAL_PENDING", "ACTIVE", "ARCHIVED", "FAILED"] },
+          "configDigest": { "$ref": "#/components/schemas/Sha256Digest" },
+          "documentCount": { "type": "integer", "minimum": 0 },
+          "chunkCount": { "type": "integer", "minimum": 0 },
+          "score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "readyAt": { "type": "string", "format": "date-time" },
+          "activatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "KnowledgeVersionListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/KnowledgeVersionResponse" } }
+        }
+      },
+      "RollbackKnowledgeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "targetKnowledgeVersionId"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "targetKnowledgeVersionId": { "$ref": "#/components/schemas/Uuid" }
+        }
+      },
+      "CreateChatbotRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "name", "knowledgeBaseId"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "knowledgeBaseId": { "$ref": "#/components/schemas/Uuid" }
+        }
+      },
+      "ChatbotResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "chatbotId", "projectId", "knowledgeBaseId", "name", "status", "createdAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "chatbotId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "knowledgeBaseId": { "$ref": "#/components/schemas/Uuid" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "status": { "type": "string", "enum": ["ACTIVE", "DISABLED"] },
+          "createdAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ChatbotListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/ChatbotResponse" } }
+        }
+      },
+      "RagQueryRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "query"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "query": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "conversationId": { "$ref": "#/components/schemas/Uuid" },
+          "topK": { "type": "integer", "minimum": 1, "maximum": 20 }
+        }
+      },
+      "RagQueryResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "outcome": { "const": "ANSWERED" } },
+              "required": ["outcome"]
+            },
+            "then": {
+              "properties": {
+                "answer": { "minLength": 1 },
+                "citations": { "minItems": 1 }
+              }
+            },
+            "else": {
+              "properties": {
+                "answer": { "minLength": 1 },
+                "citations": { "maxItems": 0 }
+              }
+            }
+          }
+        ],
+        "required": ["schemaVersion", "traceId", "queryId", "outcome", "answer", "citations", "knowledgeVersionId", "generatedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "queryId": { "$ref": "#/components/schemas/Uuid" },
+          "conversationId": { "$ref": "#/components/schemas/Uuid" },
+          "outcome": { "type": "string", "enum": ["ANSWERED", "REFUSED"] },
+          "answer": { "type": "string", "maxLength": 20000 },
+          "citations": {
+            "type": "array",
+            "maxItems": 20,
+            "items": { "$ref": "#/components/schemas/Citation" }
+          },
+          "knowledgeVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "generatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Citation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentId", "title", "sourceUrl"],
+        "properties": {
+          "documentId": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "sourceUrl": { "type": "string", "format": "uri", "pattern": "^https?://" },
+          "excerpt": { "type": "string", "maxLength": 2000 },
+          "score": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      },
+      "AgentJobResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "status": { "const": "QUEUED" } },
+              "required": ["status"]
+            },
+            "then": {
+              "properties": {
+                "progress": {
+                  "properties": { "percent": { "const": 0 } },
+                  "required": ["percent"]
+                }
+              },
+              "not": {
+                "anyOf": [
+                  { "required": ["startedAt"] },
+                  { "required": ["finishedAt"] },
+                  { "required": ["failure"] }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "status": { "enum": ["RUNNING", "WAITING_APPROVAL"] } },
+              "required": ["status"]
+            },
+            "then": {
+              "required": ["startedAt"],
+              "not": {
+                "anyOf": [
+                  { "required": ["finishedAt"] },
+                  { "required": ["failure"] }
+                ]
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "status": { "const": "SUCCEEDED" } },
+              "required": ["status"]
+            },
+            "then": {
+              "required": ["startedAt", "finishedAt"],
+              "properties": {
+                "progress": {
+                  "properties": { "percent": { "const": 100 } },
+                  "required": ["percent"]
+                }
+              },
+              "not": { "required": ["failure"] }
+            }
+          },
+          {
+            "if": {
+              "properties": { "status": { "const": "WAITING_APPROVAL" } },
+              "required": ["status"]
+            },
+            "then": {
+              "properties": {
+                "progress": {
+                  "properties": { "phase": { "const": "APPROVAL_PENDING" } },
+                  "required": ["phase"]
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": { "status": { "const": "FAILED" } },
+              "required": ["status"]
+            },
+            "then": { "required": ["finishedAt", "failure"] }
+          },
+          {
+            "if": {
+              "properties": { "status": { "const": "CANCELLED" } },
+              "required": ["status"]
+            },
+            "then": {
+              "required": ["finishedAt"],
+              "not": { "required": ["failure"] }
+            }
+          }
+        ],
+        "required": ["schemaVersion", "traceId", "jobId", "projectId", "jobType", "status", "stateVersion", "progress", "createdAt", "updatedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "jobType": { "$ref": "#/components/schemas/JobType" },
+          "status": { "$ref": "#/components/schemas/JobStatus" },
+          "stateVersion": { "type": "integer", "minimum": 1 },
+          "progress": { "$ref": "#/components/schemas/JobProgress" },
+          "resourceRefs": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/ResourceRef" }
+          },
+          "failure": { "$ref": "#/components/schemas/JobFailure" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "finishedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "AgentJobListResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "items"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/AgentJobResponse" } }
+        }
+      },
+      "JobType": { "type": "string", "enum": ["CONNECTOR_SYNC", "KNOWLEDGE_BUILD"] },
+      "JobStatus": { "type": "string", "enum": ["QUEUED", "RUNNING", "WAITING_APPROVAL", "SUCCEEDED", "FAILED", "CANCELLED"] },
+      "JobProgress": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["percent"],
+        "properties": {
+          "phase": { "type": "string", "enum": ["COLLECT", "NORMALIZE", "CHUNK", "EMBED", "INDEX", "EVALUATE", "APPROVAL_PENDING"] },
+          "percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+          "targetCount": { "type": "integer", "minimum": 0 },
+          "successCount": { "type": "integer", "minimum": 0 },
+          "failedCount": { "type": "integer", "minimum": 0 }
+        }
+      },
+      "ResourceRef": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "id"],
+        "properties": {
+          "type": { "type": "string", "enum": ["CONNECTOR", "CONNECTOR_VERSION", "KNOWLEDGE_BASE", "KNOWLEDGE_VERSION"] },
+          "id": { "$ref": "#/components/schemas/Uuid" },
+          "digest": { "$ref": "#/components/schemas/Sha256Digest" }
+        }
+      },
+      "JobFailure": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/NonRetryableJobFailure" },
+          { "$ref": "#/components/schemas/RetryableJobFailure" }
+        ]
+      },
+      "NonRetryableJobFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["VALIDATION_FAILED", "CONNECTOR_SPEC_INVALID", "CONNECTOR_RESPONSE_INVALID", "LLM_NOT_CONFIGURED", "INTERNAL_ERROR"]
+          },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean", "const": false }
+        }
+      },
+      "RetryableJobFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable", "retryAfterMs"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["RATE_LIMITED", "UPSTREAM_SERVICE_ERROR", "PROVIDER_UNAVAILABLE", "SERVICE_NOT_READY", "UPSTREAM_TIMEOUT"]
+          },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean", "const": true },
+          "retryAfterMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "error"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "error": { "$ref": "#/components/schemas/PublicError" }
+        }
+      },
+      "PublicError": {
+        "oneOf": [
+          { "$ref": "#/components/schemas/NonRetryablePublicError" },
+          { "$ref": "#/components/schemas/RetryablePublicError" }
+        ]
+      },
+      "NonRetryablePublicError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["VALIDATION_FAILED", "SCHEMA_VERSION_UNSUPPORTED", "INVALID_TRACE_ID", "IDEMPOTENCY_KEY_REQUIRED", "IDEMPOTENCY_KEY_REUSED", "AUTHENTICATION_REQUIRED", "FORBIDDEN", "RESOURCE_NOT_FOUND", "JOB_STATE_CONFLICT", "KNOWLEDGE_VERSION_NOT_ACTIVE", "CONNECTOR_SPEC_INVALID", "CONNECTOR_RESPONSE_INVALID", "LLM_NOT_CONFIGURED", "INTERNAL_ERROR"]
+          },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean", "const": false },
+          "details": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/ValidationDetail" }
+          }
+        }
+      },
+      "RetryablePublicError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable", "retryAfterMs"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["IDEMPOTENCY_REQUEST_IN_PROGRESS", "RATE_LIMITED", "UPSTREAM_SERVICE_ERROR", "PROVIDER_UNAVAILABLE", "SERVICE_NOT_READY", "UPSTREAM_TIMEOUT"]
+          },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean", "const": true },
+          "retryAfterMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+          "details": {
+            "type": "array",
+            "maxItems": 100,
+            "items": { "$ref": "#/components/schemas/ValidationDetail" }
+          }
+        }
+      },
+      "ValidationDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "reason"],
+        "properties": {
+          "field": { "type": "string", "maxLength": 500, "pattern": "^/" },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    }
+  }
+}

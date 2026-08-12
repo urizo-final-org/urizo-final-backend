@@ -1,0 +1,12 @@
+{
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "outcome": "TIMED_OUT",
+  "error": {
+    "code": "TOOL_EXECUTION_TIMEOUT",
+    "message": "Execution status is unknown; inspect the original execution before any retry.",
+    "retryable": false,
+    "executionState": "UNKNOWN",
+    "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+  }
+}

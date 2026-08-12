@@ -1,0 +1,5 @@
+{
+  "code": "UNREGISTERED_ERROR",
+  "message": "Unknown error codes are rejected.",
+  "retryable": false
+}

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "The request does not satisfy the contract.",
+    "retryable": false,
+    "details": [
+      {
+        "field": "/name",
+        "reason": "must not be blank"
+      }
+    ]
+  }
+}

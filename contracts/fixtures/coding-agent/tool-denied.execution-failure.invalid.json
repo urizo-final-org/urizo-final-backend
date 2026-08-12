@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "1.0",
+  "messageType": "TOOL_RESULT",
+  "requestId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.tool.denied.0002",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "status": "DENIED",
+  "error": {
+    "code": "TOOL_EXECUTION_FAILED",
+    "message": "A denial must never report a completed execution failure.",
+    "retryable": false,
+    "executionState": "COMPLETED"
+  },
+  "completedAt": "2026-08-10T09:12:01Z"
+}

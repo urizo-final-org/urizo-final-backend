@@ -1,0 +1,14 @@
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+.local
+.env
+.env.*
+target
+*.iml
+*.log
+docs
+README.md
+compose*.yaml

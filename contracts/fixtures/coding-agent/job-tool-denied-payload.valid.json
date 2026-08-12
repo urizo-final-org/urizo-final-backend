@@ -1,0 +1,11 @@
+{
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "outcome": "DENIED",
+  "error": {
+    "code": "PATH_POLICY_DENIED",
+    "message": "The requested path is outside the approved repository scope.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

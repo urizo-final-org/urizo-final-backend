@@ -1,0 +1,5 @@
+{
+  "code": "MODEL_RATE_LIMITED",
+  "message": "A retry delay is required.",
+  "retryable": true
+}

@@ -1,0 +1,6 @@
+{
+  "code": "MODEL_RESPONSE_INVALID",
+  "message": "The normalized response remains invalid after one repair.",
+  "retryable": false,
+  "executionState": "COMPLETED"
+}

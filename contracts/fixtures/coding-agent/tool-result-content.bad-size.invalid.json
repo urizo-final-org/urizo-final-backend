@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.tool.read.0001",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "mediaType": "text/plain",
+  "sizeBytes": 35,
+  "digest": "sha256:dedafe29e9fcef22a39e620229205e268bc1d085ce92abdc2e3c0b918a4c161b",
+  "content": "Stage 0 contract boundary summary."
+}

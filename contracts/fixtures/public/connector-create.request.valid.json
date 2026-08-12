@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.0",
+  "name": "TOUR_CONTENT_API",
+  "baseUrl": "https://api.example.invalid/api",
+  "endpoint": "/datasets/{datasetId}/records",
+  "method": "GET",
+  "authentication": {
+    "type": "API_KEY",
+    "location": "QUERY",
+    "name": "serviceKey",
+    "secretRef": "cms-secret://tour-api"
+  },
+  "requestParameters": [
+    {
+      "name": "datasetId",
+      "type": "STRING",
+      "required": true,
+      "description": "Approved dataset identifier"
+    }
+  ],
+  "response": {
+    "itemsPath": "$.data",
+    "totalCountPath": "$.totalCount"
+  },
+  "pagination": {
+    "type": "PAGE",
+    "pageParameter": "page",
+    "pageSizeParameter": "perPage",
+    "startPage": 1,
+    "pageSize": 100
+  },
+  "documentMapping": {
+    "documentId": "$.contentId",
+    "title": "$.title",
+    "content": "$.description",
+    "category": "$.category",
+    "sourceUpdatedAt": "$.updatedAt",
+    "sourceUrl": "$.sourceUrl"
+  }
+}

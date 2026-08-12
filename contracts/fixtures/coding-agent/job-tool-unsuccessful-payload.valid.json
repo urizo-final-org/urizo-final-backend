@@ -1,0 +1,11 @@
+{
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "outcome": "DENIED",
+  "error": {
+    "code": "TOOL_APPROVAL_DENIED",
+    "message": "The recorded approval denies this candidate change.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

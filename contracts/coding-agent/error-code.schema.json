@@ -1,0 +1,221 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ax-module-studio.local/coding-agent/1.0/error-code.schema.json",
+  "title": "AX Module Studio coding-agent error envelope",
+  "description": "Canonical internal error codes and retry semantics. Messages and violations are sanitized and never contain secrets, prompts, raw provider bodies, or raw tool arguments/results.",
+  "$ref": "#/$defs/ErrorEnvelope",
+  "$defs": {
+    "SchemaVersion": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "Uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "Violation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["field", "reason"],
+      "properties": {
+        "field": {
+          "type": "string",
+          "maxLength": 500,
+          "pattern": "^/"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        }
+      }
+    },
+    "NonRetryableCode": {
+      "type": "string",
+      "enum": [
+        "CONTRACT_VALIDATION_FAILED",
+        "UNSUPPORTED_SCHEMA_VERSION",
+        "UNKNOWN_FIELD",
+        "SERVICE_AUTHENTICATION_FAILED",
+        "SERVICE_AUTHORIZATION_DENIED",
+        "IDEMPOTENCY_KEY_REUSED",
+        "JOB_NOT_FOUND",
+        "JOB_EXPIRED",
+        "JOB_STATE_VERSION_CONFLICT",
+        "MODEL_NOT_CONFIGURED",
+        "MODEL_CAPABILITY_UNSUPPORTED",
+        "MODEL_RESPONSE_INVALID",
+        "TOOL_ARGUMENTS_INVALID",
+        "TOOL_NOT_ALLOWED",
+        "PATH_POLICY_DENIED",
+        "REPOSITORY_SCOPE_DENIED",
+        "CANDIDATE_SHA_MISMATCH",
+        "CONTEXT_DIGEST_MISMATCH",
+        "TOOL_APPROVAL_REQUIRED",
+        "TOOL_APPROVAL_DENIED",
+        "TOOL_APPROVAL_EXPIRED",
+        "TOOL_EXECUTION_FAILED",
+        "TOOL_EXECUTION_NOT_FOUND",
+        "CODING_AGENT_NOT_AVAILABLE"
+      ]
+    },
+    "RetryableCode": {
+      "type": "string",
+      "enum": [
+        "IDEMPOTENCY_IN_PROGRESS",
+        "MODEL_RATE_LIMITED",
+        "MODEL_TIMEOUT",
+        "MODEL_PROVIDER_UNAVAILABLE",
+        "TOOL_RESULT_NOT_READY",
+        "TOOL_EXECUTOR_UNAVAILABLE",
+        "INTERNAL_TRANSIENT_ERROR"
+      ]
+    },
+    "NonRetryableError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable"],
+      "properties": {
+        "code": { "$ref": "#/$defs/NonRetryableCode" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        },
+        "executionState": {
+          "type": "string",
+          "enum": ["NOT_STARTED", "COMPLETED"]
+        },
+        "violations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/Violation" }
+        }
+      }
+    },
+    "RetryableError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "retryAfterMs"],
+      "properties": {
+        "code": { "$ref": "#/$defs/RetryableCode" },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": true
+        },
+        "retryAfterMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600000
+        },
+        "executionState": {
+          "type": "string",
+          "enum": ["NOT_STARTED", "IN_PROGRESS"]
+        },
+        "violations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/Violation" }
+        }
+      }
+    },
+    "AmbiguousToolTimeoutError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "executionState", "executionId"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "const": "TOOL_EXECUTION_TIMEOUT"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "retryable": {
+          "type": "boolean",
+          "const": false
+        },
+        "executionState": {
+          "type": "string",
+          "const": "UNKNOWN"
+        },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "violations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/Violation" }
+        }
+      }
+    },
+    "Error": {
+      "oneOf": [
+        { "$ref": "#/$defs/NonRetryableError" },
+        { "$ref": "#/$defs/RetryableError" },
+        { "$ref": "#/$defs/AmbiguousToolTimeoutError" }
+      ]
+    },
+    "PreContextErrorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "not": { "required": ["jobId", "idempotencyKey"] },
+      "required": ["schemaVersion", "requestId", "traceId", "error"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "error": { "$ref": "#/$defs/Error" }
+      }
+    },
+    "JobScopedErrorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "traceId", "jobId", "idempotencyKey", "error"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "error": { "$ref": "#/$defs/Error" }
+      }
+    },
+    "ExecutionContextErrorEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "traceId", "executionId", "error"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "error": { "$ref": "#/$defs/Error" }
+      }
+    },
+    "ErrorEnvelope": {
+      "oneOf": [
+        { "$ref": "#/$defs/PreContextErrorEnvelope" },
+        { "$ref": "#/$defs/JobScopedErrorEnvelope" },
+        { "$ref": "#/$defs/ExecutionContextErrorEnvelope" }
+      ]
+    }
+  }
+}

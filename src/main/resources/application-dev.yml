@@ -1,0 +1,29 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+server:
+  address: 127.0.0.1
+
+logging:
+  level:
+    org.urizo.axmodulestudio: INFO
+
+ax:
+  coding:
+    job-lifecycle:
+      enabled: ${AXMS_CODING_JOB_LIFECYCLE_ENABLED:false}
+    job-database:
+      jdbc-url: ${AXMS_CODING_JOB_DB_URL:jdbc:postgresql://127.0.0.1:15432/ax_module_studio}
+      password-file: ${AXMS_CODING_JOB_DB_PASSWORD_FILE:.local/secrets/dev_operator_password}
+    model-turn-bridge:
+      enabled: ${AXMS_CODING_MODEL_TURN_BRIDGE_ENABLED:false}
+    model-turn-database:
+      jdbc-url: ${AXMS_CODING_DB_URL:jdbc:postgresql://127.0.0.1:15432/ax_module_studio}
+      password-file: ${AXMS_CODING_DB_PASSWORD_FILE:.local/secrets/ai_workspace_password}
+      lease-duration: 30s
+  local-provider-secrets:
+    jdbc-url: ${AXMS_CMS_DB_URL:jdbc:postgresql://127.0.0.1:15432/ax_module_studio}
+    database-password-file: ${AXMS_CMS_DB_PASSWORD_FILE:.local/secrets/cms_app_password}
+    master-key-file: ${AXMS_CMS_MASTER_KEY_FILE:.local/secrets/cms_master_key}

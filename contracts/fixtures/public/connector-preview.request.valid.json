@@ -1,0 +1,7 @@
+{
+  "schemaVersion": "1.0",
+  "maxItems": 2,
+  "parameters": {
+    "datasetId": "tourism"
+  }
+}

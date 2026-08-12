@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "77777777-7777-4777-8777-777777777777",
+  "eventType": "CODING_JOB_REQUESTED",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.job.requested.0001",
+  "attempt": 1,
+  "expectedStateVersion": 4,
+  "occurredAt": "2026-08-10T09:10:00Z",
+  "unexpectedField": "must be rejected",
+  "payload": {
+    "actorId": "88888888-8888-4888-8888-888888888888",
+    "projectId": "11111111-1111-4111-8111-111111111111",
+    "repositoryId": "99999999-9999-4999-8999-999999999999",
+    "graphStep": "plan",
+    "baseSha": "sha1:1111111111111111111111111111111111111111",
+    "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policyHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "expiresAt": "2026-08-10T10:10:00Z"
+  }
+}

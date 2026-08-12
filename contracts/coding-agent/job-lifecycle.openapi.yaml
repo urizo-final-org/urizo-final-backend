@@ -1,0 +1,366 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "AX Module Studio Local Authoritative Coding Job Lifecycle",
+    "version": "1.0.0",
+    "description": "Opt-in dev/local fixture API backed by the Spring Control Plane coding_job owner. It is disabled by default and is not a Python runtime authority boundary."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8080",
+      "description": "Loopback dev fixture only"
+    }
+  ],
+  "paths": {
+    "/internal/dev/coding-jobs/session": {
+      "get": {
+        "operationId": "getLocalCodingJobSession",
+        "summary": "Get the boot-random local mutation token",
+        "security": [],
+        "parameters": [{ "$ref": "#/components/parameters/TraceIdHeader" }],
+        "responses": {
+          "200": {
+            "description": "Local lifecycle fixture is enabled",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractError" },
+          "403": { "$ref": "#/components/responses/AccessDenied" }
+        }
+      }
+    },
+    "/internal/dev/coding-jobs": {
+      "post": {
+        "operationId": "createLocalCodingJob",
+        "summary": "Create one authoritative PENDING coding job",
+        "security": [{ "localCsrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CreateCodingJobRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Authoritative coding job created or idempotently replayed",
+            "headers": {
+              "Location": {
+                "required": true,
+                "schema": { "type": "string", "format": "uri-reference" }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodingJobResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractError" },
+          "403": { "$ref": "#/components/responses/AccessDenied" },
+          "409": { "$ref": "#/components/responses/StateConflict" },
+          "503": { "$ref": "#/components/responses/StoreUnavailable" }
+        }
+      }
+    },
+    "/internal/dev/coding-jobs/{jobId}": {
+      "get": {
+        "operationId": "getLocalCodingJob",
+        "summary": "Read the authoritative coding job in its trace scope",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/JobIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Current authoritative state",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodingJobResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractError" },
+          "403": { "$ref": "#/components/responses/AccessDenied" },
+          "404": { "$ref": "#/components/responses/JobNotFound" },
+          "503": { "$ref": "#/components/responses/StoreUnavailable" }
+        }
+      }
+    },
+    "/internal/dev/coding-jobs/{jobId}/transitions": {
+      "post": {
+        "operationId": "transitionLocalCodingJob",
+        "summary": "Apply one idempotent expected-version state transition",
+        "security": [{ "localCsrf": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/JobIdPath" },
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/TransitionCodingJobRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Transition applied or idempotently replayed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CodingJobResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractError" },
+          "403": { "$ref": "#/components/responses/AccessDenied" },
+          "404": { "$ref": "#/components/responses/JobNotFound" },
+          "409": { "$ref": "#/components/responses/StateConflict" },
+          "503": { "$ref": "#/components/responses/StoreUnavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "localCsrf": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-AXMS-CSRF",
+        "description": "Boot-random loopback mutation token. It is never persisted or committed."
+      }
+    },
+    "parameters": {
+      "JobIdPath": {
+        "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "TraceIdHeader": {
+        "name": "X-Trace-Id",
+        "in": "header",
+        "required": false,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
+      "IdempotencyKeyHeader": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/IdempotencyKey" }
+      }
+    },
+    "responses": {
+      "ContractError": {
+        "description": "Request contract validation failed",
+        "x-error-codes": ["CONTRACT_VALIDATION_FAILED", "IDEMPOTENCY_KEY_INVALID", "JOB_EXPIRY_INVALID"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "AccessDenied": {
+        "description": "The request is not an approved loopback mutation",
+        "x-error-codes": ["LOCAL_CODING_JOB_ACCESS_DENIED"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "JobNotFound": {
+        "description": "No authoritative job exists in the supplied trace scope",
+        "x-error-codes": ["JOB_NOT_FOUND"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "StateConflict": {
+        "description": "Idempotency, expiry, version, or state transition conflict",
+        "x-error-codes": ["IDEMPOTENCY_KEY_REUSED", "JOB_STATE_VERSION_CONFLICT", "JOB_STATE_TRANSITION_DENIED", "JOB_TERMINAL", "JOB_NOT_EXPIRED", "JOB_EXPIRED"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      },
+      "StoreUnavailable": {
+        "description": "The local authoritative store is unavailable",
+        "x-error-codes": ["CODING_JOB_STORE_UNAVAILABLE"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SchemaVersion": { "type": "string", "const": "1.0" },
+      "Uuid": { "type": "string", "format": "uuid" },
+      "IdempotencyKey": {
+        "type": "string",
+        "minLength": 8,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+      },
+      "Sha256Digest": {
+        "type": "string",
+        "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "GitObjectId": {
+        "type": "string",
+        "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+      },
+      "CodingJobStatus": {
+        "type": "string",
+        "enum": ["PENDING", "RUNNING", "WAITING_APPROVAL", "COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]
+      },
+      "CreateCodingJobRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "actorId", "projectId", "repositoryId", "graphStep", "baseSha", "contextDigest", "policyHash", "promptVersion", "allowedCapabilities", "allowedNodes", "expiresAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "actorId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "repositoryId": { "$ref": "#/components/schemas/Uuid" },
+          "graphStep": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z][a-z0-9_-]*$" },
+          "baseSha": { "$ref": "#/components/schemas/GitObjectId" },
+          "contextDigest": { "$ref": "#/components/schemas/Sha256Digest" },
+          "policyHash": { "$ref": "#/components/schemas/Sha256Digest" },
+          "promptVersion": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[A-Za-z0-9._-]+$" },
+          "allowedCapabilities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["CHAT", "STRUCTURED_OUTPUT", "TOOL_CALLING"] }
+          },
+          "allowedNodes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z][a-z0-9_-]*$" }
+          },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "TransitionCodingJobRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "targetStatus": { "const": "FAILED" } },
+              "required": ["targetStatus"]
+            },
+            "then": { "required": ["failure"] },
+            "else": { "not": { "required": ["failure"] } }
+          }
+        ],
+        "required": ["schemaVersion", "expectedStateVersion", "targetStatus"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "expectedStateVersion": { "type": "integer", "minimum": 1 },
+          "targetStatus": { "$ref": "#/components/schemas/CodingJobStatus" },
+          "failure": { "$ref": "#/components/schemas/JobFailure" }
+        }
+      },
+      "JobFailure": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "retryable"],
+        "properties": {
+          "code": { "type": "string", "minLength": 3, "maxLength": 120, "pattern": "^[A-Z][A-Z0-9_]+$" },
+          "retryable": { "type": "boolean" }
+        }
+      },
+      "CodingJobResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "jobId", "traceId", "actorId", "projectId", "repositoryId", "graphStep", "status", "stateVersion", "promptVersion", "allowedCapabilities", "allowedNodes", "expiresAt", "createdAt", "updatedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "actorId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "repositoryId": { "$ref": "#/components/schemas/Uuid" },
+          "graphStep": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z][a-z0-9_-]*$" },
+          "status": { "$ref": "#/components/schemas/CodingJobStatus" },
+          "stateVersion": { "type": "integer", "minimum": 1 },
+          "promptVersion": { "type": "string", "minLength": 1, "maxLength": 120 },
+          "allowedCapabilities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["CHAT", "STRUCTURED_OUTPUT", "TOOL_CALLING"] }
+          },
+          "allowedNodes": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "uniqueItems": true,
+            "items": { "type": "string", "minLength": 1, "maxLength": 120 }
+          },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" },
+          "finishedAt": { "type": "string", "format": "date-time" },
+          "failure": { "$ref": "#/components/schemas/JobFailure" }
+        }
+      },
+      "SessionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "csrfToken", "enabled", "checkedAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "csrfToken": { "type": "string", "minLength": 43, "maxLength": 43, "pattern": "^[A-Za-z0-9_-]{43}$" },
+          "enabled": { "type": "boolean", "const": true },
+          "checkedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "error"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "error": { "$ref": "#/components/schemas/ErrorDetail" }
+        }
+      },
+      "ErrorDetail": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable"],
+        "properties": {
+          "code": { "type": "string", "minLength": 3, "maxLength": 120, "pattern": "^[A-Z][A-Z0-9_]+$" },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean" },
+          "retryAfterMs": { "type": "integer", "minimum": 1, "maximum": 3600000 }
+        }
+      }
+    }
+  }
+}

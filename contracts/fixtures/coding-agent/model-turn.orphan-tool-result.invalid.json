@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "1.0",
+  "turnId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaab0",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.model.orphan.0001",
+  "attempt": 1,
+  "expectedStateVersion": 9,
+  "nodeName": "plan",
+  "promptVersion": "coding-plan-v1",
+  "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "requiredCapabilities": ["CHAT"],
+  "messages": [
+    {
+      "role": "tool",
+      "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "result": {
+        "mediaType": "text/plain",
+        "resultRef": "/internal/coding/tool-executions/dddddddd-dddd-4ddd-8ddd-dddddddddddd/result",
+        "sizeBytes": 35,
+        "digest": "sha256:7003b51ccf6eecefb9224e98eb549635905c1656d8719213a9a049a292e00ce3"
+      },
+      "content": "No preceding assistant call exists."
+    }
+  ],
+  "toolSchemas": [],
+  "responseFormat": { "type": "TEXT" },
+  "deadlineAt": "2026-08-10T09:16:00Z"
+}

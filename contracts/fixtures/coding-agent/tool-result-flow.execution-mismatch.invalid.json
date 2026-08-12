@@ -1,0 +1,5 @@
+{
+  "terminalFixture": "coding-agent/tool-terminal-result.valid.json",
+  "contentFixture": "coding-agent/tool-result-content.alternate-execution.valid.json",
+  "modelRequestFixture": "coding-agent/model-turn.multiturn.request.valid.json"
+}

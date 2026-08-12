@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "idempotencyKey": "stage0.model.turn.0003",
+  "error": {
+    "code": "MODEL_RATE_LIMITED",
+    "message": "The selected provider rate limited the request.",
+    "retryable": true,
+    "retryAfterMs": 2000,
+    "executionState": "NOT_STARTED"
+  }
+}

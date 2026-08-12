@@ -1,0 +1,11 @@
+{
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "outcome": "FAILED",
+  "error": {
+    "code": "TOOL_EXECUTION_FAILED",
+    "message": "The bounded check completed with a terminal execution failure.",
+    "retryable": false,
+    "executionState": "COMPLETED"
+  }
+}

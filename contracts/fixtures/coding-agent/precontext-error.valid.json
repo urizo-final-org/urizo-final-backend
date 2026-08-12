@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "error": {
+    "code": "CONTRACT_VALIDATION_FAILED",
+    "message": "The request could not establish trustworthy job context.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

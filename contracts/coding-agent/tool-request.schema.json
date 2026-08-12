@@ -1,0 +1,403 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.ax-module-studio.local/coding-agent/1.0/tool-request.schema.json",
+  "title": "AX Module Studio Tool Gateway request and result messages",
+  "description": "Model tool calls are candidates only. Spring re-reads authoritative job, role, repository, path, hash, policy, approval, and idempotency state before isolated execution.",
+  "oneOf": [
+    { "$ref": "#/$defs/ToolRequest" },
+    { "$ref": "#/$defs/ToolAccepted" },
+    { "$ref": "#/$defs/ToolSucceeded" },
+    { "$ref": "#/$defs/ToolUnsuccessful" },
+    { "$ref": "#/$defs/ToolTimedOut" }
+  ],
+  "$defs": {
+    "SchemaVersion": { "type": "string", "const": "1.0" },
+    "Uuid": { "type": "string", "format": "uuid" },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "GitObjectId": {
+      "type": "string",
+      "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+    },
+    "RelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000,
+      "pattern": "^(?!.*[\\u0000-\\u001F\\u007F])(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*:)(?!.*%[0-9A-Fa-f]{2})(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "ResultReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mediaType", "resultRef", "sizeBytes", "digest"],
+      "properties": {
+        "mediaType": {
+          "type": "string",
+          "enum": ["application/json", "text/plain", "text/x-diff"]
+        },
+        "resultRef": {
+          "type": "string",
+          "format": "uri-reference",
+          "pattern": "^/internal/coding/tool-executions/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/result$"
+        },
+        "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 200000 },
+        "digest": { "$ref": "#/$defs/Sha256Digest" }
+      }
+    },
+    "ActorContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["actorId", "projectId", "role"],
+      "properties": {
+        "actorId": { "$ref": "#/$defs/Uuid" },
+        "projectId": { "$ref": "#/$defs/Uuid" },
+        "role": {
+          "type": "string",
+          "enum": ["SUPER_ADMIN", "PROJECT_ADMIN", "REVIEWER", "DEVELOPER"]
+        }
+      }
+    },
+    "RepositoryContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repositoryId", "baseSha", "candidateSha"],
+      "properties": {
+        "repositoryId": { "$ref": "#/$defs/Uuid" },
+        "baseSha": { "$ref": "#/$defs/GitObjectId" },
+        "candidateSha": { "$ref": "#/$defs/GitObjectId" }
+      }
+    },
+    "ApprovalContext": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["approvalId", "scopeDigest", "expiresAt"],
+      "properties": {
+        "approvalId": { "$ref": "#/$defs/Uuid" },
+        "scopeDigest": { "$ref": "#/$defs/Sha256Digest" },
+        "expiresAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ReadFileTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "read_file" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path"],
+          "properties": {
+            "path": { "$ref": "#/$defs/RelativePath" }
+          }
+        }
+      }
+    },
+    "SearchCodeTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "search_code" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["query"],
+          "properties": {
+            "query": { "type": "string", "minLength": 1, "maxLength": 1000 },
+            "roots": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 50,
+              "uniqueItems": true,
+              "description": "When omitted, the effective roots are exactly requestedPaths.",
+              "items": { "$ref": "#/$defs/RelativePath" }
+            },
+            "maxResults": { "type": "integer", "minimum": 1, "maximum": 500 }
+          }
+        }
+      }
+    },
+    "ApplyPatchTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "apply_patch" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["patch"],
+          "properties": {
+            "patch": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50000,
+              "pattern": "^--- ",
+              "description": "UTF-8 unified diff with raw POSIX paths in ---/+++ headers; every target is revalidated against requestedPaths."
+            }
+          }
+        }
+      }
+    },
+    "RunCheckTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "run_check" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["checkId"],
+          "properties": {
+            "checkId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120,
+              "pattern": "^[a-z][a-z0-9._-]*$"
+            }
+          }
+        }
+      }
+    },
+    "ToolCandidate": {
+      "oneOf": [
+        { "$ref": "#/$defs/ReadFileTool" },
+        { "$ref": "#/$defs/SearchCodeTool" },
+        { "$ref": "#/$defs/ApplyPatchTool" },
+        { "$ref": "#/$defs/RunCheckTool" }
+      ]
+    },
+    "ToolRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep", "attemptScope", "expectedStateVersion", "deadlineAt", "actor", "jobState", "repository", "contextDigest", "policyHash", "argumentSchemaDigest", "requestedPaths", "tool", "approval"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_REQUEST" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "leaseId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "graphStep": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "attemptScope": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        },
+        "expectedStateVersion": { "type": "integer", "minimum": 1 },
+        "deadlineAt": { "type": "string", "format": "date-time" },
+        "actor": { "$ref": "#/$defs/ActorContext" },
+        "jobState": {
+          "type": "string",
+          "enum": ["RUNNING", "WAITING_APPROVAL"]
+        },
+        "repository": { "$ref": "#/$defs/RepositoryContext" },
+        "contextDigest": { "$ref": "#/$defs/Sha256Digest" },
+        "policyHash": { "$ref": "#/$defs/Sha256Digest" },
+        "argumentSchemaDigest": { "$ref": "#/$defs/Sha256Digest" },
+        "requestedPaths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/RelativePath" }
+        },
+        "tool": { "$ref": "#/$defs/ToolCandidate" },
+        "approval": { "$ref": "#/$defs/ApprovalContext" }
+      }
+    },
+    "ToolAccepted": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "status", "statusUrl", "pollAfterMs", "acceptedAt"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_ACCEPTED" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "const": "ACCEPTED" },
+        "statusUrl": {
+          "type": "string",
+          "format": "uri-reference",
+          "pattern": "^/internal/coding/tool-executions/[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+        },
+        "pollAfterMs": { "type": "integer", "minimum": 1, "maximum": 60000 },
+        "acceptedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolSucceeded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "status", "result", "completedAt"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_RESULT" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "const": "SUCCEEDED" },
+        "result": { "$ref": "#/$defs/ResultReference" },
+        "candidateSha": { "$ref": "#/$defs/GitObjectId" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolDeniedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "executionState"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": ["TOOL_ARGUMENTS_INVALID", "TOOL_NOT_ALLOWED", "PATH_POLICY_DENIED", "REPOSITORY_SCOPE_DENIED", "CANDIDATE_SHA_MISMATCH", "CONTEXT_DIGEST_MISMATCH", "TOOL_APPROVAL_REQUIRED", "TOOL_APPROVAL_DENIED", "TOOL_APPROVAL_EXPIRED"]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retryable": { "type": "boolean", "const": false },
+        "executionState": { "type": "string", "const": "NOT_STARTED" },
+        "violations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "error-code.schema.json#/$defs/Violation" }
+        }
+      }
+    },
+    "ToolFailedError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message", "retryable", "executionState"],
+      "properties": {
+        "code": { "type": "string", "const": "TOOL_EXECUTION_FAILED" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "retryable": { "type": "boolean", "const": false },
+        "executionState": { "type": "string", "const": "COMPLETED" },
+        "violations": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "error-code.schema.json#/$defs/Violation" }
+        }
+      }
+    },
+    "ToolDenied": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "status", "error", "completedAt"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_RESULT" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "const": "DENIED" },
+        "error": { "$ref": "#/$defs/ToolDeniedError" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolFailed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "status", "error", "completedAt"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_RESULT" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "const": "FAILED" },
+        "error": { "$ref": "#/$defs/ToolFailedError" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolUnsuccessful": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolDenied" },
+        { "$ref": "#/$defs/ToolFailed" }
+      ]
+    },
+    "ToolTimedOut": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "messageType", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "status", "error", "completedAt"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "messageType": { "type": "string", "const": "TOOL_RESULT" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "status": { "type": "string", "const": "TIMED_OUT" },
+        "error": { "$ref": "error-code.schema.json#/$defs/AmbiguousToolTimeoutError" },
+        "completedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "ToolExecutionStatus": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolAccepted" },
+        { "$ref": "#/$defs/ToolTerminalResult" }
+      ]
+    },
+    "ToolTerminalResult": {
+      "oneOf": [
+        { "$ref": "#/$defs/ToolSucceeded" },
+        { "$ref": "#/$defs/ToolUnsuccessful" },
+        { "$ref": "#/$defs/ToolTimedOut" }
+      ]
+    },
+    "ToolResultContent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "requestId", "toolCallId", "jobId", "traceId", "idempotencyKey", "executionId", "mediaType", "sizeBytes", "digest", "content"],
+      "properties": {
+        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
+        "requestId": { "$ref": "#/$defs/Uuid" },
+        "toolCallId": { "$ref": "#/$defs/Uuid" },
+        "jobId": { "$ref": "#/$defs/Uuid" },
+        "traceId": { "$ref": "#/$defs/Uuid" },
+        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
+        "executionId": { "$ref": "#/$defs/Uuid" },
+        "mediaType": {
+          "type": "string",
+          "enum": ["application/json", "text/plain", "text/x-diff"]
+        },
+        "sizeBytes": { "type": "integer", "minimum": 0, "maximum": 200000 },
+        "digest": { "$ref": "#/$defs/Sha256Digest" },
+        "content": {
+          "type": "string",
+          "maxLength": 200000,
+          "description": "Sanitized UTF-8 text. application/json is returned as canonical JSON text."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "code": "MODEL_RATE_LIMITED",
+  "message": "The selected provider asked the caller to wait.",
+  "retryable": true,
+  "retryAfterMs": 1000,
+  "executionState": "NOT_STARTED"
+}

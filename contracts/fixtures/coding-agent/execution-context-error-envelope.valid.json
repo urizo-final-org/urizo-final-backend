@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "error": {
+    "code": "TOOL_EXECUTION_NOT_FOUND",
+    "message": "No tool execution exists for the supplied identifier.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

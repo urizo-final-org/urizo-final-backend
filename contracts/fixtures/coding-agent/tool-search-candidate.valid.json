@@ -1,0 +1,8 @@
+{
+  "name": "search_code",
+  "arguments": {
+    "query": "schemaVersion",
+    "roots": ["contracts"],
+    "maxResults": 50
+  }
+}

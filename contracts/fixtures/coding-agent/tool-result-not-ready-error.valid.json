@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "error": {
+    "code": "TOOL_RESULT_NOT_READY",
+    "message": "The accepted execution has not produced a result yet.",
+    "retryable": true,
+    "retryAfterMs": 2000,
+    "executionState": "IN_PROGRESS"
+  }
+}

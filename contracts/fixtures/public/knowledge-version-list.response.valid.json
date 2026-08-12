@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "items": [{
+    "schemaVersion": "1.0",
+    "traceId": "66666666-6666-4666-8666-666666666666",
+    "knowledgeVersionId": "34343434-3434-4343-8343-343434343434",
+    "knowledgeBaseId": "33333333-3333-4333-8333-333333333333",
+    "connectorVersionId": "23232323-2323-4232-8232-232323232323",
+    "versionNumber": 1,
+    "status": "BUILDING",
+    "configDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "documentCount": 0,
+    "chunkCount": 0,
+    "createdAt": "2026-08-10T09:00:00Z"
+  }]
+}

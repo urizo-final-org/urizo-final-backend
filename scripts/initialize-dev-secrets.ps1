@@ -1,0 +1,153 @@
+[CmdletBinding()]
+param()
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+$secretDirectory = Join-Path $repositoryRoot '.local\secrets'
+[void](New-Item -ItemType Directory -Force -Path $secretDirectory)
+
+function Protect-LocalPath {
+    param([Parameter(Mandatory = $true)][string]$LiteralPath)
+
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $sid = $identity.User.Value
+    $grant = "*$($sid):(F)"
+    & "$env:SystemRoot\System32\icacls.exe" $LiteralPath '/inheritance:r' '/grant:r' $grant | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to restrict local secret permissions: $LiteralPath"
+    }
+}
+
+function New-PasswordFile {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $path = Join-Path $secretDirectory $Name
+    if (-not (Test-Path -LiteralPath $path)) {
+        $bytes = New-Object byte[] 36
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $random.GetBytes($bytes)
+        try {
+            $value = [Convert]::ToBase64String($bytes)
+            [System.IO.File]::WriteAllText(
+                $path,
+                $value,
+                [System.Text.UTF8Encoding]::new($false))
+        }
+        finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            $random.Dispose()
+            $value = $null
+        }
+    }
+    Protect-LocalPath -LiteralPath $path
+}
+
+function New-MasterKeyFile {
+    $path = Join-Path $secretDirectory 'cms_master_key'
+    if (-not (Test-Path -LiteralPath $path)) {
+        $bytes = New-Object byte[] 32
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $random.GetBytes($bytes)
+        try {
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+        }
+        finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            $random.Dispose()
+        }
+    }
+    if ((Get-Item -LiteralPath $path).Length -ne 32) {
+        throw 'The local CMS master key must contain exactly 32 bytes.'
+    }
+    Protect-LocalPath -LiteralPath $path
+}
+
+function New-CheckpointEncryptionKeyFile {
+    $path = Join-Path $secretDirectory 'checkpoint_encryption_key'
+    if (-not (Test-Path -LiteralPath $path)) {
+        $bytes = New-Object byte[] 32
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $random.GetBytes($bytes)
+        try {
+            [System.IO.File]::WriteAllBytes($path, $bytes)
+        }
+        finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            $random.Dispose()
+        }
+    }
+    if ((Get-Item -LiteralPath $path).Length -ne 32) {
+        throw 'The local checkpoint encryption key must contain exactly 32 bytes.'
+    }
+    Protect-LocalPath -LiteralPath $path
+}
+
+function New-ValkeyAclFile {
+    $passwordPath = Join-Path $secretDirectory 'valkey_password'
+    $aclPath = Join-Path $secretDirectory 'valkey_acl'
+    if (-not (Test-Path -LiteralPath $passwordPath -PathType Leaf)) {
+        throw 'The local Valkey password file is missing.'
+    }
+    if (-not (Test-Path -LiteralPath $aclPath)) {
+        $password = [System.IO.File]::ReadAllText($passwordPath).Trim()
+        try {
+            if ($password.Length -lt 43 -or $password.Length -gt 512) {
+                throw 'The local Valkey credential has an invalid length.'
+            }
+            $acl = "user default on >$password ~* &* +@all`n"
+            [System.IO.File]::WriteAllText(
+                $aclPath,
+                $acl,
+                [System.Text.UTF8Encoding]::new($false))
+        }
+        finally {
+            $password = $null
+            $acl = $null
+        }
+    }
+    Protect-LocalPath -LiteralPath $aclPath
+}
+
+function New-ServiceTokenFile {
+    $path = Join-Path $secretDirectory 'coding_model_bridge_service_token'
+    if (-not (Test-Path -LiteralPath $path)) {
+        $bytes = New-Object byte[] 48
+        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $random.GetBytes($bytes)
+        try {
+            $value = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+            [System.IO.File]::WriteAllText(
+                $path,
+                $value,
+                [System.Text.UTF8Encoding]::new($false))
+        }
+        finally {
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            $random.Dispose()
+            $value = $null
+        }
+    }
+    $length = (Get-Item -LiteralPath $path).Length
+    if ($length -lt 43 -or $length -gt 512) {
+        throw 'The local coding service credential has an invalid length.'
+    }
+    Protect-LocalPath -LiteralPath $path
+}
+
+Protect-LocalPath -LiteralPath $secretDirectory
+New-PasswordFile -Name 'postgres_superuser_password'
+New-PasswordFile -Name 'migration_owner_password'
+New-PasswordFile -Name 'cms_app_password'
+New-PasswordFile -Name 'dbeaver_reader_password'
+New-PasswordFile -Name 'ai_workspace_password'
+New-PasswordFile -Name 'dev_operator_password'
+New-PasswordFile -Name 'checkpoint_postgres_password'
+New-PasswordFile -Name 'valkey_password'
+New-MasterKeyFile
+New-CheckpointEncryptionKeyFile
+New-ValkeyAclFile
+New-ServiceTokenFile
+
+Write-Output "Local encrypted-secret material is ready under $secretDirectory (values not displayed)."

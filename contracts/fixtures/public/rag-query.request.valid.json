@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "1.0",
+  "query": "Where is the event?",
+  "conversationId": "44444444-4444-4444-8444-444444444444",
+  "topK": 5
+}

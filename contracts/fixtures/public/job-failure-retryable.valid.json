@@ -1,0 +1,6 @@
+{
+  "code": "UPSTREAM_TIMEOUT",
+  "message": "The upstream request exceeded its deadline.",
+  "retryable": true,
+  "retryAfterMs": 2000
+}

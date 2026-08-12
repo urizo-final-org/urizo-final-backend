@@ -1,0 +1,17 @@
+{
+  "schemaVersion": "1.1",
+  "turnId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.model.turn.0002",
+  "attempt": 1,
+  "expectedStateVersion": 4,
+  "nodeName": "plan",
+  "promptVersion": "coding-plan-v1",
+  "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "requiredCapabilities": ["CHAT"],
+  "messages": [{ "role": "user", "content": "Plan." }],
+  "toolSchemas": [],
+  "responseFormat": { "type": "TEXT" },
+  "deadlineAt": "2026-08-10T09:11:00Z"
+}

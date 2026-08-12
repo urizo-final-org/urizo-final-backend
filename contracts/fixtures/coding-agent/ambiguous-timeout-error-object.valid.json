@@ -1,0 +1,7 @@
+{
+  "code": "TOOL_EXECUTION_TIMEOUT",
+  "message": "The original execution must be inspected before retry.",
+  "retryable": false,
+  "executionState": "UNKNOWN",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+}

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "1.0",
+  "turnId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaae",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.model.schema-profile.0001",
+  "attempt": 1,
+  "expectedStateVersion": 5,
+  "nodeName": "summarize",
+  "promptVersion": "coding-summary-v1",
+  "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "requiredCapabilities": ["CHAT", "STRUCTURED_OUTPUT"],
+  "messages": [{ "role": "user", "content": "Return the bounded review summary." }],
+  "toolSchemas": [],
+  "responseFormat": {
+    "type": "JSON_SCHEMA",
+    "schemaDigest": "sha256:84753200b343e8f913b401c88b5d29bae9d927ba00cc7cb992d3b0031973a594",
+    "outputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "credit_card": { "type": "string" },
+        "billing_address": { "type": "string" }
+      },
+      "dependentRequired": {
+        "credit_card": ["billing_address"]
+      }
+    }
+  },
+  "deadlineAt": "2026-08-10T09:14:00Z"
+}

@@ -1,0 +1,45 @@
+spring:
+  config:
+    activate:
+      on-profile: local-full
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+  batch:
+    job:
+      enabled: false
+    jdbc:
+      initialize-schema: never
+      table-prefix: batch.batch_
+
+server:
+  address: 0.0.0.0
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+
+ax:
+  coding:
+    model-turn-bridge:
+      local-mock-tool-candidate-enabled: true
+  local-provider-secrets:
+    trusted-proxy-host: ${AXMS_CMS_TRUSTED_PROXY_HOST:nginx}
+  product-runtime:
+    jdbc-url: ${AXMS_CORE_DB_JDBC_URL:jdbc:postgresql://database:5432/ax_module_studio}
+    database-password-file: ${AXMS_CORE_DB_PASSWORD_FILE:/run/secrets/cms_app_password}
+    valkey-host: ${AXMS_VALKEY_HOST:valkey}
+    valkey-port: ${AXMS_VALKEY_PORT:6379}
+    valkey-password-file: ${AXMS_VALKEY_PASSWORD_FILE:/run/secrets/valkey_password}
+    product-queue: ${AXMS_PRODUCT_QUEUE:axms:product:jobs:v1}
+    coding-queue: ${AXMS_CODING_QUEUE:axms:coding:jobs:v1}
+    outbox-lease: ${AXMS_OUTBOX_LEASE:15s}
+    outbox-poll: ${AXMS_OUTBOX_POLL:250ms}
+    worker-poll: ${AXMS_WORKER_POLL:300ms}
+    worker-id: ${AXMS_PRODUCT_WORKER_ID:axms-spring-app-local-1}
+
+logging:
+  level:
+    org.urizo.axmodulestudio: INFO

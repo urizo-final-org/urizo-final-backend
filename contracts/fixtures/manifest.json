@@ -1,0 +1,1303 @@
+{
+  "schemaVersion": "1.0",
+  "cases": [
+    {
+      "id": "public.health.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/HealthResponse",
+      "fixture": "public/health-response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.readiness-not-ready.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ReadinessResponse",
+      "fixture": "public/readiness-not-ready.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.project-create.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateProjectRequest",
+      "fixture": "public/project-create.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.project-create.unknown-field.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateProjectRequest",
+      "fixture": "public/project-create.unknown-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "additionalProperties"
+    },
+    {
+      "id": "public.connector-create.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateConnectorRequest",
+      "fixture": "public/connector-create.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-build.accepted.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/KnowledgeBuildAcceptedResponse",
+      "fixture": "public/knowledge-build.accepted.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.rag-query.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RagQueryRequest",
+      "fixture": "public/rag-query.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.rag-query.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RagQueryResponse",
+      "fixture": "public/rag-query.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.rag-query.project-scope.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RagQueryRequest",
+      "fixture": "public/rag-query.project-scope.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "additionalProperties"
+    },
+    {
+      "id": "public.validation-error.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ErrorEnvelope",
+      "fixture": "public/validation-error.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "VALIDATION_FAILED"
+    },
+    {
+      "id": "coding.job-requested.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/CodingJobRequested",
+      "fixture": "coding-agent/job-requested.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-requested.unknown-version.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/CodingJobRequested",
+      "fixture": "coding-agent/job-requested.unknown-version.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "const",
+      "expectedInstancePath": "/schemaVersion"
+    },
+    {
+      "id": "coding.job-requested.unknown-field.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/CodingJobRequested",
+      "fixture": "coding-agent/job-requested.unknown-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "additionalProperties",
+      "expectedInstancePath": "/unexpectedField"
+    },
+    {
+      "id": "coding.model-turn.request.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.response.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.validation-error.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#",
+      "fixture": "coding-agent/model-turn.validation-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "CONTRACT_VALIDATION_FAILED"
+    },
+    {
+      "id": "coding.tool-request.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-request.path-traversal.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.path-traversal.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": "/requestedPaths/0"
+    },
+    {
+      "id": "coding.tool-request.patch-without-approval.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.patch-without-approval.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "required",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.tool-accepted.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolAccepted",
+      "fixture": "coding-agent/tool-accepted.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-approval-denied.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolUnsuccessful",
+      "fixture": "coding-agent/tool-approval-denied.valid.json",
+      "expected": "VALID",
+      "validationLayer": "POLICY",
+      "expectedErrorCode": "TOOL_APPROVAL_DENIED"
+    },
+    {
+      "id": "coding.retryable-error.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#",
+      "fixture": "coding-agent/retryable-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC",
+      "expectedErrorCode": "MODEL_RATE_LIMITED"
+    },
+    {
+      "id": "coding.non-retryable-error.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#",
+      "fixture": "coding-agent/non-retryable-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC",
+      "expectedErrorCode": "MODEL_RESPONSE_INVALID"
+    },
+    {
+      "id": "coding.error-retry-mismatch.invalid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/JobScopedErrorEnvelope",
+      "fixture": "coding-agent/error-retry-mismatch.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "oneOf",
+      "expectedInstancePath": "/error"
+    },
+    {
+      "id": "public.connector-create.network-path.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateConnectorRequest",
+      "fixture": "public/connector-create.network-path.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": "/endpoint"
+    },
+    {
+      "id": "public.job-running.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/AgentJobResponse",
+      "fixture": "public/job-running.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.job-failed.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/AgentJobResponse",
+      "fixture": "public/job-failed.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.job-succeeded-with-failure.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/AgentJobResponse",
+      "fixture": "public/job-succeeded-with-failure.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "not",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "public.upstream-timeout-error.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ErrorEnvelope",
+      "fixture": "public/upstream-timeout-error.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC",
+      "expectedErrorCode": "UPSTREAM_TIMEOUT"
+    },
+    {
+      "id": "coding.job-tool-completed.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/ToolExecutionCompleted",
+      "fixture": "coding-agent/job-tool-completed.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-approval-recorded.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/ApprovalRecorded",
+      "fixture": "coding-agent/job-approval-recorded.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.structured.request.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.structured.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.structured.response.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.structured.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.multiturn.request.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.multiturn.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.unknown-version.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.unknown-version.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "const",
+      "expectedInstancePath": "/schemaVersion"
+    },
+    {
+      "id": "coding.model-turn.unknown-field.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.unknown-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "additionalProperties",
+      "expectedInstancePath": "/provider"
+    },
+    {
+      "id": "coding.model-turn.tool-calls-empty.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.tool-calls-empty.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "minItems",
+      "expectedInstancePath": "/toolCalls"
+    },
+    {
+      "id": "coding.tool-succeeded.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolSucceeded",
+      "fixture": "coding-agent/tool-succeeded.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-timeout.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolTimedOut",
+      "fixture": "coding-agent/tool-timeout.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC",
+      "expectedErrorCode": "TOOL_EXECUTION_TIMEOUT"
+    },
+    {
+      "id": "coding.tool-search-candidate.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/SearchCodeTool",
+      "fixture": "coding-agent/tool-search-candidate.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-apply-patch-candidate.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ApplyPatchTool",
+      "fixture": "coding-agent/tool-apply-patch-candidate.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-run-check-candidate.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RunCheckTool",
+      "fixture": "coding-agent/tool-run-check-candidate.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.precontext-error.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/PreContextErrorEnvelope",
+      "fixture": "coding-agent/precontext-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "CONTRACT_VALIDATION_FAILED"
+    },
+    {
+      "id": "coding.path-absolute.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-absolute.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.path-drive.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-drive.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.path-backslash.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-backslash.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.path-ads.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-ads.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.path-control.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-control.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.path-encoded-traversal.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/RelativePath",
+      "fixture": "coding-agent/path-encoded-traversal.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.tool-read-file-candidate.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ReadFileTool",
+      "fixture": "coding-agent/tool-read-file-candidate.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.non-retryable-error-object.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/NonRetryableError",
+      "fixture": "coding-agent/non-retryable-error-object.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.retryable-error-object.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/RetryableError",
+      "fixture": "coding-agent/retryable-error-object.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.ambiguous-timeout-error-object.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/AmbiguousToolTimeoutError",
+      "fixture": "coding-agent/ambiguous-timeout-error-object.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.tool-request.scope-mismatch.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.scope-mismatch.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pathScope",
+      "expectedInstancePath": "/tool/arguments/path"
+    },
+    {
+      "id": "coding.idempotency-replay-pair.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/idempotency-replay-pair.valid.json",
+      "fixtureKind": "IDEMPOTENCY_PAIR",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.idempotency-conflict-pair.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/idempotency-conflict-pair.invalid.json",
+      "fixtureKind": "IDEMPOTENCY_PAIR",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "idempotencyConflict",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.retryable-error-missing-delay.invalid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/RetryableError",
+      "fixture": "coding-agent/retryable-error-missing-delay.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "required",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.non-retryable-error-with-delay.invalid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/NonRetryableError",
+      "fixture": "coding-agent/non-retryable-error-with-delay.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "additionalProperties",
+      "expectedInstancePath": "/retryAfterMs"
+    },
+    {
+      "id": "coding.unknown-error-code.invalid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/NonRetryableError",
+      "fixture": "coding-agent/unknown-error-code.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "enum",
+      "expectedInstancePath": "/code"
+    },
+    {
+      "id": "coding.uuid.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/Uuid",
+      "fixture": "coding-agent/uuid.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "format",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.sha256.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/Sha256Digest",
+      "fixture": "coding-agent/sha256.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.approval-date-time.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ApprovalContext",
+      "fixture": "coding-agent/approval-date-time.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "format",
+      "expectedInstancePath": "/expiresAt"
+    },
+    {
+      "id": "coding.provider-secret-field.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/provider-secret-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "secretShape",
+      "expectedInstancePath": "/providerApiKey"
+    },
+    {
+      "id": "coding.tool-request.apply-patch.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.apply-patch.valid.json",
+      "expected": "VALID",
+      "validationLayer": "POLICY"
+    },
+    {
+      "id": "coding.tool-request.apply-patch-outside-scope.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolRequest",
+      "fixture": "coding-agent/tool-request.apply-patch-outside-scope.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pathScope",
+      "expectedInstancePath": "/tool/arguments/patch"
+    },
+    {
+      "id": "coding.model-turn.response.mismatched-turn.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.response.mismatched-turn.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.response.unregistered-tool.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.response.unregistered-tool.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.structured.response.bad-output.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.structured.response.bad-output.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn.structured.response.bad-digest.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn.structured.response.bad-digest.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-turn-pair.tool.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.tool.valid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.model-turn-pair.structured.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.structured.valid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.model-turn-pair.correlation.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.correlation.invalid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "correlation",
+      "expectedInstancePath": "/response/turnId"
+    },
+    {
+      "id": "coding.model-turn-pair.unregistered-tool.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.unregistered-tool.invalid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "toolSchema",
+      "expectedInstancePath": "/response/toolCalls/0/name"
+    },
+    {
+      "id": "coding.model-turn-pair.bad-output.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.bad-output.invalid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "type",
+      "expectedInstancePath": "/response/responseFormat/structuredOutput/summary"
+    },
+    {
+      "id": "coding.model-turn-pair.bad-digest.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "responseSchemaPointer": "#/components/schemas/ModelTurnResponse",
+      "fixture": "coding-agent/model-turn-pair.bad-digest.invalid.json",
+      "fixtureKind": "MODEL_TURN_PAIR",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "schemaDigest",
+      "expectedInstancePath": "/response/responseFormat/schemaDigest"
+    },
+    {
+      "id": "coding.model-turn.orphan-tool-result.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.orphan-tool-result.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "toolCallSequence",
+      "expectedInstancePath": "/messages/0/toolCallId"
+    },
+    {
+      "id": "coding.model-turn.duplicate-tool-call.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.duplicate-tool-call.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "toolCallSequence",
+      "expectedInstancePath": "/messages/1/toolCalls/0/toolCallId"
+    },
+    {
+      "id": "coding.job-tool-success-payload.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/SuccessfulToolCompletion",
+      "fixture": "coding-agent/job-tool-success-payload.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-tool-unsuccessful-payload.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/UnsuccessfulToolCompletion",
+      "fixture": "coding-agent/job-tool-unsuccessful-payload.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-tool-failed-payload.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/FailedToolCompletion",
+      "fixture": "coding-agent/job-tool-failed-payload.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-tool-denied-payload.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/DeniedToolCompletion",
+      "fixture": "coding-agent/job-tool-denied-payload.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-tool-timeout-payload.valid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/TimedOutToolCompletion",
+      "fixture": "coding-agent/job-tool-timeout-payload.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-denied.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolDenied",
+      "fixture": "coding-agent/tool-denied.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-failed.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolFailed",
+      "fixture": "coding-agent/tool-failed.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-terminal-result.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolTerminalResult",
+      "fixture": "coding-agent/tool-terminal-result.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-execution-status.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolExecutionStatus",
+      "fixture": "coding-agent/tool-execution-status.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-result-content.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolResultContent",
+      "fixture": "coding-agent/tool-result-content.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.job-scoped-error-envelope.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/JobScopedErrorEnvelope",
+      "fixture": "coding-agent/job-scoped-error-envelope.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.execution-context-error-envelope.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/ExecutionContextErrorEnvelope",
+      "fixture": "coding-agent/execution-context-error-envelope.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.readiness-ready.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ReadinessReadyResponse",
+      "fixture": "public/readiness-ready.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.readiness-not-ready.direct.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ReadinessNotReadyResponse",
+      "fixture": "public/readiness-not-ready.direct.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.project-create.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProjectResponse",
+      "fixture": "public/project-create.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-create.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorResponse",
+      "fixture": "public/connector-create.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-preview.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorPreviewRequest",
+      "fixture": "public/connector-preview.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-preview.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorPreviewResponse",
+      "fixture": "public/connector-preview.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-sync.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorSyncRequest",
+      "fixture": "public/connector-sync.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-sync.accepted.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorSyncAcceptedResponse",
+      "fixture": "public/connector-sync.accepted.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-base-create.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateKnowledgeBaseRequest",
+      "fixture": "public/knowledge-base-create.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-base-create.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/KnowledgeBaseResponse",
+      "fixture": "public/knowledge-base-create.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-build.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/StartKnowledgeBuildRequest",
+      "fixture": "public/knowledge-build.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.tool-result-flow.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolSucceeded",
+      "fixture": "coding-agent/tool-result-flow.valid.json",
+      "fixtureKind": "TOOL_RESULT_FLOW",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.tool-result-content.bad-digest.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolResultContent",
+      "fixture": "coding-agent/tool-result-content.bad-digest.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "contentIntegrity",
+      "expectedInstancePath": "/content"
+    },
+    {
+      "id": "coding.tool-result-flow.bad-digest.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolSucceeded",
+      "fixture": "coding-agent/tool-result-flow.bad-digest.invalid.json",
+      "fixtureKind": "TOOL_RESULT_FLOW",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "contentIntegrity",
+      "expectedInstancePath": "/content/content"
+    },
+    {
+      "id": "coding.approval-approved-missing-expiry.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/ApprovalRecorded",
+      "fixture": "coding-agent/approval-approved-missing-expiry.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "required",
+      "expectedInstancePath": "/payload"
+    },
+    {
+      "id": "coding.model-turn.combined-capabilities.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.combined-capabilities.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "not",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "coding.tool-denied.execution-failure.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolDenied",
+      "fixture": "coding-agent/tool-denied.execution-failure.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "enum",
+      "expectedInstancePath": "/error/code"
+    },
+    {
+      "id": "coding.job-tool-timeout.denial-error.invalid",
+      "contract": "coding-agent/job-event.schema.json",
+      "schemaPointer": "#/$defs/TimedOutToolCompletion",
+      "fixture": "coding-agent/job-tool-timeout.denial-error.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "const",
+      "expectedInstancePath": "/error/code"
+    },
+    {
+      "id": "coding.tool-result-content.bad-size.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolResultContent",
+      "fixture": "coding-agent/tool-result-content.bad-size.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "contentIntegrity",
+      "expectedInstancePath": "/content"
+    },
+    {
+      "id": "coding.tool-result-content.alternate-execution.valid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolResultContent",
+      "fixture": "coding-agent/tool-result-content.alternate-execution.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.tool-result-flow.execution-mismatch.invalid",
+      "contract": "coding-agent/tool-request.schema.json",
+      "schemaPointer": "#/$defs/ToolSucceeded",
+      "fixture": "coding-agent/tool-result-flow.execution-mismatch.invalid.json",
+      "fixtureKind": "TOOL_RESULT_FLOW",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "resultFlowCorrelation",
+      "expectedInstancePath": "/content/executionId"
+    },
+    {
+      "id": "coding.tool-result-not-ready-error.valid",
+      "contract": "coding-agent/error-code.schema.json",
+      "schemaPointer": "#/$defs/ExecutionContextErrorEnvelope",
+      "fixture": "coding-agent/tool-result-not-ready-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "TOOL_RESULT_NOT_READY"
+    },
+    {
+      "id": "public.citation-missing-source-url.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/Citation",
+      "fixture": "public/citation-missing-source-url.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "required",
+      "expectedInstancePath": ""
+    },
+    {
+      "id": "public.readiness-ready-required-down.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ReadinessReadyResponse",
+      "fixture": "public/readiness-ready-required-down.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "not",
+      "expectedInstancePath": "/checks"
+    },
+    {
+      "id": "public.readiness-not-ready-optional-only.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ReadinessNotReadyResponse",
+      "fixture": "public/readiness-not-ready-optional-only.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "contains",
+      "expectedInstancePath": "/checks"
+    },
+    {
+      "id": "public.job-succeeded-incomplete-progress.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/AgentJobResponse",
+      "fixture": "public/job-succeeded-incomplete-progress.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "const",
+      "expectedInstancePath": "/progress/percent"
+    },
+    {
+      "id": "public.connector-create.userinfo.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateConnectorRequest",
+      "fixture": "public/connector-create.userinfo.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "POLICY",
+      "expectedKeyword": "pattern",
+      "expectedInstancePath": "/baseUrl"
+    },
+    {
+      "id": "public.rag-query.refused.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RagQueryResponse",
+      "fixture": "public/rag-query.refused.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SEMANTIC"
+    },
+    {
+      "id": "coding.model-turn.unsupported-schema-keyword.invalid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ModelTurnRequest",
+      "fixture": "coding-agent/model-turn.unsupported-schema-keyword.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SEMANTIC",
+      "expectedKeyword": "schemaProfile",
+      "expectedInstancePath": "/responseFormat/outputSchema"
+    },
+    {
+      "id": "public.readiness-check-required.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RequiredReadinessCheck",
+      "fixture": "public/readiness-check-required.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.readiness-check-optional.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/OptionalReadinessCheck",
+      "fixture": "public/readiness-check-optional.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.job-failure-nonretryable.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/NonRetryableJobFailure",
+      "fixture": "public/job-failure-nonretryable.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.job-failure-retryable.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RetryableJobFailure",
+      "fixture": "public/job-failure-retryable.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.public-error-nonretryable.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/NonRetryablePublicError",
+      "fixture": "public/public-error-nonretryable.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.public-error-retryable.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RetryablePublicError",
+      "fixture": "public/public-error-retryable.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-message-text.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/TextMessage",
+      "fixture": "coding-agent/model-message-text.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-message-assistant-tool.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/AssistantToolCallMessage",
+      "fixture": "coding-agent/model-message-assistant-tool.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.model-message-tool-result.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ToolResultMessage",
+      "fixture": "coding-agent/model-message-tool-result.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.response-format-request-text.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/TextResponseFormatRequest",
+      "fixture": "coding-agent/response-format-request-text.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.response-format-request-json-schema.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/JsonSchemaResponseFormatRequest",
+      "fixture": "coding-agent/response-format-request-json-schema.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.response-format-result-text.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/TextResponseFormatResult",
+      "fixture": "coding-agent/response-format-result-text.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.response-format-result-json-schema.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/JsonSchemaResponseFormatResult",
+      "fixture": "coding-agent/response-format-result-json-schema.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-lifecycle-create.valid",
+      "contract": "coding-agent/job-lifecycle.openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateCodingJobRequest",
+      "fixture": "coding-agent/coding-job-create.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-lifecycle-response.valid",
+      "contract": "coding-agent/job-lifecycle.openapi.yaml",
+      "schemaPointer": "#/components/schemas/CodingJobResponse",
+      "fixture": "coding-agent/coding-job-response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-lifecycle-session.valid",
+      "contract": "coding-agent/job-lifecycle.openapi.yaml",
+      "schemaPointer": "#/components/schemas/SessionResponse",
+      "fixture": "coding-agent/coding-job-session.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-lifecycle-transition.valid",
+      "contract": "coding-agent/job-lifecycle.openapi.yaml",
+      "schemaPointer": "#/components/schemas/TransitionCodingJobRequest",
+      "fixture": "coding-agent/coding-job-transition.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "coding.job-lifecycle-create-unknown-field.invalid",
+      "contract": "coding-agent/job-lifecycle.openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateCodingJobRequest",
+      "fixture": "coding-agent/coding-job-create.unknown-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA",
+      "expectedKeyword": "additionalProperties",
+      "expectedInstancePath": "/provider"
+    },
+    {
+      "id": "public.project-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProjectListResponse",
+      "fixture": "public/project-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.connector-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ConnectorListResponse",
+      "fixture": "public/connector-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.state-mutation.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/StateMutationRequest",
+      "fixture": "public/state-mutation.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-base-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/KnowledgeBaseListResponse",
+      "fixture": "public/knowledge-base-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-version.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/KnowledgeVersionResponse",
+      "fixture": "public/knowledge-version.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-version-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/KnowledgeVersionListResponse",
+      "fixture": "public/knowledge-version-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.knowledge-rollback.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/RollbackKnowledgeRequest",
+      "fixture": "public/knowledge-rollback.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.chatbot-create.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CreateChatbotRequest",
+      "fixture": "public/chatbot-create.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.chatbot.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ChatbotResponse",
+      "fixture": "public/chatbot.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.chatbot-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/ChatbotListResponse",
+      "fixture": "public/chatbot-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.agent-job-list.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/AgentJobListResponse",
+      "fixture": "public/agent-job-list.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    }
+  ]
+}

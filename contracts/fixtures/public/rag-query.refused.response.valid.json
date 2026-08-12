@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "queryId": "ffffffff-ffff-4fff-8fff-ffffffffffff",
+  "outcome": "REFUSED",
+  "answer": "The active knowledge version does not support this answer.",
+  "citations": [],
+  "knowledgeVersionId": "34343434-3434-4434-8434-343434343434",
+  "generatedAt": "2026-08-10T09:02:00Z"
+}

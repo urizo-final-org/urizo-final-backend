@@ -1,0 +1,6 @@
+{
+  "name": "run_check",
+  "arguments": {
+    "checkId": "contract-validation"
+  }
+}

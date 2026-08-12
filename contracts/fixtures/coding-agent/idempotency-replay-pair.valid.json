@@ -1,0 +1,36 @@
+{
+  "first": {
+    "schemaVersion": "1.0",
+    "turnId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad",
+    "jobId": "55555555-5555-4555-8555-555555555555",
+    "traceId": "66666666-6666-4666-8666-666666666666",
+    "idempotencyKey": "stage0.model.replay.0001",
+    "attempt": 1,
+    "expectedStateVersion": 8,
+    "nodeName": "summarize",
+    "promptVersion": "coding-summary-v1",
+    "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "requiredCapabilities": ["CHAT"],
+    "messages": [{ "role": "user", "content": "Summarize the approved context." }],
+    "toolSchemas": [],
+    "responseFormat": { "type": "TEXT" },
+    "deadlineAt": "2026-08-10T09:15:00Z"
+  },
+  "second": {
+    "schemaVersion": "1.0",
+    "turnId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaad",
+    "jobId": "55555555-5555-4555-8555-555555555555",
+    "traceId": "66666666-6666-4666-8666-666666666666",
+    "idempotencyKey": "stage0.model.replay.0001",
+    "attempt": 2,
+    "expectedStateVersion": 8,
+    "nodeName": "summarize",
+    "promptVersion": "coding-summary-v1",
+    "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "requiredCapabilities": ["CHAT"],
+    "messages": [{ "role": "user", "content": "Summarize the approved context." }],
+    "toolSchemas": [],
+    "responseFormat": { "type": "TEXT" },
+    "deadlineAt": "2026-08-10T09:15:00Z"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0",
+  "messageType": "TOOL_ACCEPTED",
+  "requestId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+  "toolCallId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "jobId": "55555555-5555-4555-8555-555555555555",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "idempotencyKey": "stage0.tool.check.0001",
+  "executionId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "status": "ACCEPTED",
+  "statusUrl": "/internal/coding/tool-executions/dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+  "pollAfterMs": 1000,
+  "acceptedAt": "2026-08-10T09:12:00Z"
+}

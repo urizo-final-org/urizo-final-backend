@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "1.0",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "status": "READY",
+  "checkedAt": "2026-08-10T09:00:00Z",
+  "checks": [
+    { "name": "core-database", "status": "UP", "required": true },
+    { "name": "queue", "status": "UP", "required": true },
+    { "name": "migrations", "status": "UP", "required": true },
+    { "name": "coding-agent", "status": "NOT_CONFIGURED", "required": false }
+  ]
+}

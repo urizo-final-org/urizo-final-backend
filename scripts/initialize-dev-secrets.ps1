@@ -5,18 +5,27 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$secretDirectory = Join-Path $repositoryRoot '.local\secrets'
+$secretDirectory = Join-Path (Join-Path $repositoryRoot '.local') 'secrets'
 [void](New-Item -ItemType Directory -Force -Path $secretDirectory)
 
 function Protect-LocalPath {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
 
-    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $sid = $identity.User.Value
-    $grant = "*$($sid):(F)"
-    & "$env:SystemRoot\System32\icacls.exe" $LiteralPath '/inheritance:r' '/grant:r' $grant | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to restrict local secret permissions: $LiteralPath"
+    if ($IsWindows) {
+        $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $sid = $identity.User.Value
+        $grant = "*$($sid):(F)"
+        & "$env:SystemRoot\System32\icacls.exe" $LiteralPath '/inheritance:r' '/grant:r' $grant | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to restrict local secret permissions: $LiteralPath"
+        }
+    }
+    else {
+        $mode = if (Test-Path -LiteralPath $LiteralPath -PathType Container) { '700' } else { '600' }
+        & chmod $mode $LiteralPath
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to restrict local secret permissions: $LiteralPath"
+        }
     }
 }
 

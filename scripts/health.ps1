@@ -15,17 +15,23 @@ if ($WaitTimeoutSeconds -lt 5 -or $WaitTimeoutSeconds -gt 1800) {
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
-$dockerBinCandidates = @(
-    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
-    'C:\Program Files\Docker\Docker\resources\bin'
-)
-$dockerBin = $dockerBinCandidates |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
-    Select-Object -First 1
-if (-not $dockerBin) {
-    throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+if ($dockerCommand) {
+    $docker = $dockerCommand.Source
 }
-$docker = Join-Path $dockerBin 'docker.exe'
+else {
+    $dockerBinCandidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
+        'C:\Program Files\Docker\Docker\resources\bin'
+    )
+    $dockerBin = $dockerBinCandidates |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
+        Select-Object -First 1
+    if (-not $dockerBin) {
+        throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+    }
+    $docker = Join-Path $dockerBin 'docker.exe'
+}
 $compose = @('compose', '-f', $composeFile, '--profile', $Profile)
 
 function Get-ComposeContainerId {
@@ -56,8 +62,9 @@ function Get-HttpStatus {
         return [int]$response.StatusCode
     }
     catch {
-        if ($_.Exception.Response) {
-            return [int]$_.Exception.Response.StatusCode
+        $exception = $_.Exception
+        if ($exception -and $exception.PSObject.Properties.Match('Response').Count -gt 0 -and $exception.Response) {
+            return [int]$exception.Response.StatusCode
         }
         return 0
     }
@@ -161,7 +168,7 @@ Assert-HttpStatus -Uri "$baseUri/actuator/health" -ExpectedStatus 404
 Assert-HttpStatus -Uri "$baseUri/internal/not-allowlisted" -ExpectedStatus 404
 
 $databaseId = Get-ComposeContainerId -Service 'database'
-$migrationFiles = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'src\main\resources\db\migration') -File -Filter 'V*__*.sql'
+$migrationFiles = Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'src/main/resources/db/migration') -File -Filter 'V*__*.sql'
 $expectedVersions = @(
     $migrationFiles |
         ForEach-Object {

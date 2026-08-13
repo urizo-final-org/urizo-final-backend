@@ -66,6 +66,17 @@ local files/credentials and never print their values.
 .\scripts\verify-full-local-failure-gates.ps1 -ConfirmFailureInjection
 ```
 
+Normal internet environments use the Maven and Temurin default certificate
+authorities and do not require any local build trust file. Only on a network
+with explicit TLS interception, opt in to the ignored Windows CA bundle:
+
+```powershell
+.\scripts\bootstrap-dev.ps1 -Profile full -EnableHostBuildTrust
+```
+
+The opt-in flow passes the same local PEM bundle to the Maven and Node build
+steps without displaying certificate contents or committing the bundle.
+
 The canonical UI/API ingress is `http://127.0.0.1:18080/`. The read-only DBeaver
 gateway is `127.0.0.1:15432`. Frontend, Spring, Core PostgreSQL, Valkey, Coding
 Runtime and Checkpoint PostgreSQL do not publish host ports directly.

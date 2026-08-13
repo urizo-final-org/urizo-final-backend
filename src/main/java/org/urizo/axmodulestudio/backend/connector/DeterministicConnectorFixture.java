@@ -1,4 +1,4 @@
-package org.urizo.axmodulestudio.backend.product;
+package org.urizo.axmodulestudio.backend.connector;
 
 import java.net.URI;
 import java.time.Instant;
@@ -6,7 +6,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
-final class DeterministicConnectorFixture {
+import org.urizo.axmodulestudio.backend.product.ProductApiContract;
+
+public final class DeterministicConnectorFixture {
 
     private static final List<ProductApiContract.PreviewDocument> DOCUMENTS = List.of(
             new ProductApiContract.PreviewDocument(
@@ -34,15 +36,15 @@ final class DeterministicConnectorFixture {
     private DeterministicConnectorFixture() {
     }
 
-    static List<ProductApiContract.PreviewDocument> documents(int maxItems) {
+    public static List<ProductApiContract.PreviewDocument> documents(int maxItems) {
         return List.copyOf(DOCUMENTS.subList(0, Math.min(maxItems, DOCUMENTS.size())));
     }
 
-    static int totalCount() {
+    public static int totalCount() {
         return DOCUMENTS.size();
     }
 
-    static boolean supports(String baseUrl) {
+    public static boolean supports(String baseUrl) {
         URI uri;
         try {
             uri = URI.create(baseUrl);
@@ -59,7 +61,7 @@ final class DeterministicConnectorFixture {
                 && uri.getFragment() == null;
     }
 
-    static String vector(String text) {
+    public static String vector(String text) {
         double[] values = new double[32];
         String[] tokens = text.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1);
         for (String token : tokens) {
@@ -85,7 +87,7 @@ final class DeterministicConnectorFixture {
         return "[" + String.join(",", encoded) + "]";
     }
 
-    static boolean hasGroundingOverlap(String query, String content) {
+    public static boolean hasGroundingOverlap(String query, String content) {
         String normalizedContent = content.toLowerCase(Locale.ROOT);
         for (String token : query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1)) {
             if (token.length() >= 2 && normalizedContent.contains(token)) {

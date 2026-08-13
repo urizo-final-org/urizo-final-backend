@@ -15,6 +15,12 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
+/**
+ * Compatibility facade for the existing Stage 3 product API payloads.
+ *
+ * <p>Its nested types remain stable for public contract compatibility. New CMS domains own
+ * feature-local contract types instead of extending this facade.
+ */
 public final class ProductApiContract {
 
     public static final String SCHEMA_VERSION = "1.0";

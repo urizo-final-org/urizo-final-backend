@@ -1,6 +1,6 @@
 # AX Module Studio Spring Primary 팀 Dev Setup v0.2
 
-> 대상: Windows + WSL2 + Docker Desktop 기반 `dev`  
+> 대상: Windows + WSL2 + Docker Desktop 기반 `dev`
 > 상태: Bootstrap 계약. Repository Script는 Source Bootstrap 뒤 Backend에서 구현한다.
 
 ## 1. 목표
@@ -51,6 +51,8 @@ WSL·VirtualMachinePlatform
 ```
 
 Docker 로그인은 Public Image만 사용할 때 기본 필수가 아니다. Private Registry·조직 정책·Rate Limit이 요구할 때만 별도 승인 후 로그인한다.
+
+일반 인터넷 환경은 Maven·Temurin 기본 CA를 그대로 사용하며 Local trust 파일을 요구하지 않는다. 회사 Proxy·TLS interception이 확인된 환경에서만 `bootstrap-dev.ps1 -EnableHostBuildTrust`를 명시적으로 사용한다. 이 opt-in은 Windows Root/CA를 ignored Local PEM으로 생성해 Maven·Node Build에만 전달하며 인증서 원문을 출력하거나 Commit하지 않는다.
 
 ## 5. Host Tool 기준
 

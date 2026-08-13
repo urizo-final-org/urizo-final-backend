@@ -33,20 +33,26 @@ foreach ($sibling in @('urizo-final-frontend', 'urizo-final-orchestrator', 'uriz
     }
 }
 
-$dockerBinCandidates = @(
-    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
-    'C:\Program Files\Docker\Docker\resources\bin'
-)
-$dockerBin = $dockerBinCandidates |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
-    Select-Object -First 1
-if (-not $dockerBin) {
-    throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+if ($dockerCommand) {
+    $docker = $dockerCommand.Source
 }
-$docker = Join-Path $dockerBin 'docker.exe'
-# Docker Desktop's credential helper is resolved through PATH by the CLI.
-# Keep this process-scoped so bootstrap works without changing the host environment.
-$env:Path = $dockerBin + [System.IO.Path]::PathSeparator + $env:Path
+else {
+    $dockerBinCandidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
+        'C:\Program Files\Docker\Docker\resources\bin'
+    )
+    $dockerBin = $dockerBinCandidates |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
+        Select-Object -First 1
+    if (-not $dockerBin) {
+        throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+    }
+    $docker = Join-Path $dockerBin 'docker.exe'
+    # Docker Desktop's credential helper is resolved through PATH by the CLI.
+    # Keep this process-scoped so bootstrap works without changing the host environment.
+    $env:Path = $dockerBin + [System.IO.Path]::PathSeparator + $env:Path
+}
 
 & $docker info --format '{{.ServerVersion}}' | Out-Null
 if ($LASTEXITCODE -ne 0) {

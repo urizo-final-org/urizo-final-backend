@@ -9,18 +9,24 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
-$dockerBinCandidates = @(
-    (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
-    'C:\Program Files\Docker\Docker\resources\bin'
-)
-$dockerBin = $dockerBinCandidates |
-    Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
-    Select-Object -First 1
-if (-not $dockerBin) {
-    throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+if ($dockerCommand) {
+    $docker = $dockerCommand.Source
 }
-$env:PATH = $dockerBin + ';' + $env:PATH
-$docker = Join-Path $dockerBin 'docker.exe'
+else {
+    $dockerBinCandidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
+        'C:\Program Files\Docker\Docker\resources\bin'
+    )
+    $dockerBin = $dockerBinCandidates |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_ 'docker.exe') } |
+        Select-Object -First 1
+    if (-not $dockerBin) {
+        throw 'Docker CLI was not found in an approved Docker Desktop installation path.'
+    }
+    $env:PATH = $dockerBin + [System.IO.Path]::PathSeparator + $env:PATH
+    $docker = Join-Path $dockerBin 'docker.exe'
+}
 
 if ($Action -eq 'up') {
     & (Join-Path $PSScriptRoot 'initialize-dev-secrets.ps1')

@@ -6,18 +6,18 @@ Set-StrictMode -Version Latest
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $trustDirectory = Join-Path $repositoryRoot '.local\runtime-trust'
-$nodeBundle = Join-Path $trustDirectory 'node-extra-ca.pem'
+$buildBundle = Join-Path $trustDirectory 'build-extra-ca.pem'
 
 [void](New-Item -ItemType Directory -Force -Path $trustDirectory)
 
-if (Test-Path -LiteralPath $nodeBundle -PathType Leaf) {
-    $existing = [System.IO.File]::ReadAllText($nodeBundle)
+if (Test-Path -LiteralPath $buildBundle -PathType Leaf) {
+    $existing = [System.IO.File]::ReadAllText($buildBundle)
     if ($existing.Contains('-----BEGIN CERTIFICATE-----') -and
             $existing.Contains('-----END CERTIFICATE-----')) {
-        Write-Output 'Local Node build trust bundle is ready (certificate contents not displayed).'
+        Write-Output 'Opt-in local build trust bundle is ready (certificate contents not displayed).'
         return
     }
-    throw 'The existing local Node build trust bundle is invalid.'
+    throw 'The existing opt-in local build trust bundle is invalid.'
 }
 
 $encodedCertificates = [System.Collections.Generic.SortedSet[string]]::new(
@@ -45,7 +45,7 @@ foreach ($store in $stores) {
 }
 
 if ($encodedCertificates.Count -eq 0) {
-    throw 'No public certificates were available for the local Node build trust bundle.'
+    throw 'No public certificates were available for the opt-in local build trust bundle.'
 }
 
 $builder = [System.Text.StringBuilder]::new()
@@ -56,9 +56,9 @@ foreach ($encoded in $encodedCertificates) {
 }
 
 [System.IO.File]::WriteAllText(
-    $nodeBundle,
+    $buildBundle,
     $builder.ToString(),
     [System.Text.UTF8Encoding]::new($false))
 $builder.Clear() | Out-Null
 
-Write-Output 'Local Node build trust bundle is ready (certificate contents not displayed).'
+Write-Output 'Opt-in local build trust bundle is ready (certificate contents not displayed).'

@@ -5,6 +5,8 @@ param(
 
     [switch]$SkipBuild,
 
+    [switch]$EnableHostBuildTrust,
+
     [int]$WaitTimeoutSeconds = 420
 )
 
@@ -18,6 +20,7 @@ if ($WaitTimeoutSeconds -lt 30 -or $WaitTimeoutSeconds -gt 1800) {
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $workspaceRoot = Split-Path -Parent $repositoryRoot
 $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
+$buildTrustComposeFile = Join-Path $repositoryRoot 'compose.dev-build-trust.yaml'
 
 if (Test-Path -LiteralPath (Join-Path $workspaceRoot '.git')) {
     throw 'The shared AX Module Studio workspace must not be a Git repository.'
@@ -54,12 +57,21 @@ if ($LASTEXITCODE -ne 0) {
 if ($LASTEXITCODE -ne 0) {
     throw 'Local secret initialization failed.'
 }
-& (Join-Path $PSScriptRoot 'initialize-dev-build-trust.ps1')
-if ($LASTEXITCODE -ne 0) {
-    throw 'Local build trust initialization failed.'
+
+$composeFiles = @($composeFile)
+if ($EnableHostBuildTrust) {
+    & (Join-Path $PSScriptRoot 'initialize-dev-build-trust.ps1')
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Opt-in local build trust initialization failed.'
+    }
+    $composeFiles += $buildTrustComposeFile
 }
 
-$compose = @('compose', '-f', $composeFile, '--profile', $Profile)
+$compose = @('compose')
+foreach ($file in $composeFiles) {
+    $compose += @('-f', $file)
+}
+$compose += @('--profile', $Profile)
 $opsCompose = @('compose', '-f', $composeFile, '--profile', 'ops')
 & $docker @compose config --quiet
 if ($LASTEXITCODE -ne 0) {

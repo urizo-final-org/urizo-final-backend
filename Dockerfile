@@ -6,19 +6,32 @@ WORKDIR /workspace
 
 COPY .mvn/ .mvn/
 COPY mvnw pom.xml ./
-RUN --mount=type=secret,id=maven_build_truststore,required=false \
-    if [ -f /run/secrets/maven_build_truststore ]; then \
-      export MAVEN_OPTS="-Djavax.net.ssl.trustStore=/run/secrets/maven_build_truststore"; \
-    fi \
-    && mvn -B -ntp -DskipTests dependency:go-offline
+COPY --chmod=0555 scripts/import-maven-build-extra-ca.sh /usr/local/bin/import-maven-build-extra-ca
+RUN --mount=type=secret,id=maven_build_extra_ca,required=false \
+    set -eu; \
+    truststore=''; \
+    cleanup() { if [ -n "$truststore" ]; then rm -f "$truststore"; fi; }; \
+    trap cleanup EXIT; \
+    if [ -f /run/secrets/maven_build_extra_ca ]; then \
+      truststore="$(mktemp)"; \
+      import-maven-build-extra-ca /run/secrets/maven_build_extra_ca "$truststore"; \
+      export MAVEN_OPTS="-Djavax.net.ssl.trustStore=$truststore -Djavax.net.ssl.trustStorePassword=changeit"; \
+    fi; \
+    mvn -B -ntp -DskipTests dependency:go-offline
 
 COPY src/ src/
 COPY contracts/ contracts/
-RUN --mount=type=secret,id=maven_build_truststore,required=false \
-    if [ -f /run/secrets/maven_build_truststore ]; then \
-      export MAVEN_OPTS="-Djavax.net.ssl.trustStore=/run/secrets/maven_build_truststore"; \
-    fi \
-    && mvn -B -ntp -DskipTests package
+RUN --mount=type=secret,id=maven_build_extra_ca,required=false \
+    set -eu; \
+    truststore=''; \
+    cleanup() { if [ -n "$truststore" ]; then rm -f "$truststore"; fi; }; \
+    trap cleanup EXIT; \
+    if [ -f /run/secrets/maven_build_extra_ca ]; then \
+      truststore="$(mktemp)"; \
+      import-maven-build-extra-ca /run/secrets/maven_build_extra_ca "$truststore"; \
+      export MAVEN_OPTS="-Djavax.net.ssl.trustStore=$truststore -Djavax.net.ssl.trustStorePassword=changeit"; \
+    fi; \
+    mvn -B -ntp -DskipTests package
 
 
 FROM build AS migration

@@ -1,0 +1,22 @@
+services:
+  flyway-migration:
+    build:
+      secrets:
+        - source: host_build_extra_ca
+          target: maven_build_extra_ca
+
+  spring-app:
+    build:
+      secrets:
+        - source: host_build_extra_ca
+          target: maven_build_extra_ca
+
+  frontend:
+    build:
+      secrets:
+        - source: host_build_extra_ca
+          target: node_build_extra_ca
+
+secrets:
+  host_build_extra_ca:
+    file: ./.local/runtime-trust/build-extra-ca.pem

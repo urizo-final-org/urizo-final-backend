@@ -77,9 +77,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: migration
-      secrets:
-        - source: maven_build_truststore
-          target: maven_build_truststore
     restart: "no"
     init: true
     entrypoint: ["/bin/bash", "-euc"]
@@ -178,9 +175,6 @@ services:
       context: .
       dockerfile: Dockerfile
       target: runtime
-      secrets:
-        - source: maven_build_truststore
-          target: maven_build_truststore
     restart: unless-stopped
     init: true
     environment:
@@ -310,9 +304,6 @@ services:
       dockerfile: Dockerfile
       args:
         AXMS_NODE_TLS_REJECT_UNAUTHORIZED: ${AXMS_NODE_TLS_REJECT_UNAUTHORIZED:-1}
-      secrets:
-        - source: node_build_extra_ca
-          target: node_build_extra_ca
     restart: unless-stopped
     init: true
     environment:
@@ -398,10 +389,6 @@ services:
       - axms_internal
 
 secrets:
-  maven_build_truststore:
-    file: ./.local/runtime-trust/cacerts
-  node_build_extra_ca:
-    file: ./.local/runtime-trust/node-extra-ca.pem
   postgres_superuser_password:
     file: ./.local/secrets/postgres_superuser_password
   migration_owner_password:

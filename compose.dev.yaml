@@ -187,6 +187,14 @@ services:
       AXMS_CMS_DB_PASSWORD_FILE: /run/secrets/cms_app_password
       AXMS_CMS_MASTER_KEY_FILE: /run/secrets/cms_master_key
       AXMS_CMS_TRUSTED_PROXY_HOST: nginx
+      # Shared demo administrators for the internal-network admin page. These are
+      # deliberately in plain sight so every teammate can sign in without a secret
+      # handoff; they are not deployment credentials and must be replaced before
+      # this stack is exposed beyond the internal network.
+      AXMS_AUTH_SUPER_ADMIN_LOGIN_ID: super-admin
+      AXMS_AUTH_SUPER_ADMIN_PASSWORD: axms-super-admin-demo
+      AXMS_AUTH_GENERAL_ADMIN_LOGIN_ID: general-admin
+      AXMS_AUTH_GENERAL_ADMIN_PASSWORD: axms-general-admin-demo
       AXMS_CODING_JOB_LIFECYCLE_ENABLED: "true"
       AXMS_CODING_JOB_DB_URL: jdbc:postgresql://database:5432/ax_module_studio
       AXMS_CODING_JOB_DB_PASSWORD_FILE: /run/secrets/dev_operator_password

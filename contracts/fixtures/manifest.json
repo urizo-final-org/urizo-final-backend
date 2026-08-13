@@ -18,6 +18,38 @@
       "validationLayer": "SCHEMA"
     },
     {
+      "id": "public.auth-login.request.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/LoginRequest",
+      "fixture": "public/auth-login.request.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.auth-login.unknown-field.invalid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/LoginRequest",
+      "fixture": "public/auth-login.unknown-field.invalid.json",
+      "expected": "INVALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.auth-login.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/LoginResponse",
+      "fixture": "public/auth-login.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "public.auth-current-session.response.valid",
+      "contract": "public/openapi.yaml",
+      "schemaPointer": "#/components/schemas/CurrentSessionResponse",
+      "fixture": "public/auth-current-session.response.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
       "id": "public.project-create.request.valid",
       "contract": "public/openapi.yaml",
       "schemaPointer": "#/components/schemas/CreateProjectRequest",

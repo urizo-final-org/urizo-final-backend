@@ -22,6 +22,17 @@ management:
       show-details: never
 
 ax:
+  auth:
+    session-lifetime: ${AXMS_AUTH_SESSION_LIFETIME:8h}
+    # The first administrators cannot be created through the product: there is no
+    # sign-up. A blank password leaves that account uncreated rather than creating
+    # one nobody can sign in to.
+    bootstrap:
+      enabled: ${AXMS_AUTH_BOOTSTRAP_ENABLED:true}
+      super-admin-login-id: ${AXMS_AUTH_SUPER_ADMIN_LOGIN_ID:super-admin}
+      super-admin-password: ${AXMS_AUTH_SUPER_ADMIN_PASSWORD:}
+      general-admin-login-id: ${AXMS_AUTH_GENERAL_ADMIN_LOGIN_ID:general-admin}
+      general-admin-password: ${AXMS_AUTH_GENERAL_ADMIN_PASSWORD:}
   coding:
     model-turn-bridge:
       local-mock-tool-candidate-enabled: true

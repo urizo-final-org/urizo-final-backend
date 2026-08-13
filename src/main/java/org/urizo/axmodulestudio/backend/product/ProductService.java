@@ -5,10 +5,20 @@ import java.util.UUID;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
+import org.urizo.axmodulestudio.backend.connector.ConnectorOperations;
+import org.urizo.axmodulestudio.backend.job.ProductJobOperations;
+import org.urizo.axmodulestudio.backend.knowledge.KnowledgeOperations;
+import org.urizo.axmodulestudio.backend.project.ProjectOperations;
+import org.urizo.axmodulestudio.backend.rag.RagOperations;
 
 @Service
 @Profile("local-full")
-final class ProductService {
+public final class ProductService implements
+        ProjectOperations,
+        ConnectorOperations,
+        KnowledgeOperations,
+        RagOperations,
+        ProductJobOperations {
 
     private final ProductStore store;
 
@@ -16,23 +26,23 @@ final class ProductService {
         this.store = store;
     }
 
-    ProductApiContract.ProjectResponse createProject(
+    public ProductApiContract.ProjectResponse createProject(
             UUID traceId, String key, ProductApiContract.CreateProjectRequest request) {
         return store.idempotent("CREATE_PROJECT", key, request, 201,
                 ProductApiContract.ProjectResponse.class,
                 () -> store.createProject(traceId, request));
     }
 
-    ProductApiContract.ProjectListResponse listProjects(UUID traceId) {
+    public ProductApiContract.ProjectListResponse listProjects(UUID traceId) {
         return new ProductApiContract.ProjectListResponse(
                 version(), traceId, store.listProjects(traceId));
     }
 
-    ProductApiContract.ProjectResponse getProject(UUID id, UUID traceId) {
+    public ProductApiContract.ProjectResponse getProject(UUID id, UUID traceId) {
         return store.getProject(id, traceId);
     }
 
-    ProductApiContract.ConnectorResponse createConnector(
+    public ProductApiContract.ConnectorResponse createConnector(
             UUID projectId,
             UUID traceId,
             String key,
@@ -43,16 +53,16 @@ final class ProductService {
                 () -> store.createConnector(projectId, traceId, request));
     }
 
-    ProductApiContract.ConnectorListResponse listConnectors(UUID projectId, UUID traceId) {
+    public ProductApiContract.ConnectorListResponse listConnectors(UUID projectId, UUID traceId) {
         return new ProductApiContract.ConnectorListResponse(
                 version(), traceId, store.listConnectors(projectId, traceId));
     }
 
-    ProductApiContract.ConnectorResponse getConnector(UUID id, UUID traceId) {
+    public ProductApiContract.ConnectorResponse getConnector(UUID id, UUID traceId) {
         return store.getConnector(id, traceId);
     }
 
-    ProductApiContract.ConnectorPreviewResponse previewConnector(
+    public ProductApiContract.ConnectorPreviewResponse previewConnector(
             UUID connectorId,
             UUID traceId,
             String key,
@@ -63,7 +73,7 @@ final class ProductService {
                 () -> store.previewConnector(connectorId, traceId, request));
     }
 
-    ProductApiContract.ConnectorResponse activateConnectorVersion(
+    public ProductApiContract.ConnectorResponse activateConnectorVersion(
             UUID connectorId,
             UUID versionId,
             UUID traceId,
@@ -75,7 +85,7 @@ final class ProductService {
                 () -> store.activateConnectorVersion(connectorId, versionId, traceId));
     }
 
-    ProductApiContract.JobAcceptedResponse syncConnector(
+    public ProductApiContract.JobAcceptedResponse syncConnector(
             UUID connectorId,
             UUID traceId,
             String key,
@@ -86,7 +96,7 @@ final class ProductService {
                 () -> store.createConnectorSync(connectorId, traceId, request));
     }
 
-    ProductApiContract.KnowledgeBaseResponse createKnowledgeBase(
+    public ProductApiContract.KnowledgeBaseResponse createKnowledgeBase(
             UUID traceId,
             String key,
             ProductApiContract.CreateKnowledgeBaseRequest request) {
@@ -95,17 +105,17 @@ final class ProductService {
                 () -> store.createKnowledgeBase(traceId, request));
     }
 
-    ProductApiContract.KnowledgeBaseListResponse listKnowledgeBases(
+    public ProductApiContract.KnowledgeBaseListResponse listKnowledgeBases(
             UUID projectId, UUID traceId) {
         return new ProductApiContract.KnowledgeBaseListResponse(
                 version(), traceId, store.listKnowledgeBases(projectId, traceId));
     }
 
-    ProductApiContract.KnowledgeBaseResponse getKnowledgeBase(UUID id, UUID traceId) {
+    public ProductApiContract.KnowledgeBaseResponse getKnowledgeBase(UUID id, UUID traceId) {
         return store.getKnowledgeBase(id, traceId);
     }
 
-    ProductApiContract.JobAcceptedResponse startKnowledgeBuild(
+    public ProductApiContract.JobAcceptedResponse startKnowledgeBuild(
             UUID knowledgeBaseId,
             UUID traceId,
             String key,
@@ -116,17 +126,17 @@ final class ProductService {
                 () -> store.createKnowledgeBuild(knowledgeBaseId, traceId, request));
     }
 
-    ProductApiContract.KnowledgeVersionListResponse listKnowledgeVersions(
+    public ProductApiContract.KnowledgeVersionListResponse listKnowledgeVersions(
             UUID knowledgeBaseId, UUID traceId) {
         return new ProductApiContract.KnowledgeVersionListResponse(
                 version(), traceId, store.listKnowledgeVersions(knowledgeBaseId, traceId));
     }
 
-    ProductApiContract.KnowledgeVersionResponse getKnowledgeVersion(UUID id, UUID traceId) {
+    public ProductApiContract.KnowledgeVersionResponse getKnowledgeVersion(UUID id, UUID traceId) {
         return store.getKnowledgeVersion(id, traceId);
     }
 
-    ProductApiContract.KnowledgeVersionResponse activateKnowledgeVersion(
+    public ProductApiContract.KnowledgeVersionResponse activateKnowledgeVersion(
             UUID id,
             UUID traceId,
             String key,
@@ -137,7 +147,7 @@ final class ProductService {
                 () -> store.activateKnowledgeVersion(id, traceId, request.expectedStateVersion()));
     }
 
-    ProductApiContract.KnowledgeVersionResponse rollbackKnowledgeVersion(
+    public ProductApiContract.KnowledgeVersionResponse rollbackKnowledgeVersion(
             UUID knowledgeBaseId,
             UUID traceId,
             String key,
@@ -149,7 +159,7 @@ final class ProductService {
                         knowledgeBaseId, request.targetKnowledgeVersionId(), traceId));
     }
 
-    ProductApiContract.ChatbotResponse createChatbot(
+    public ProductApiContract.ChatbotResponse createChatbot(
             UUID projectId,
             UUID traceId,
             String key,
@@ -160,16 +170,16 @@ final class ProductService {
                 () -> store.createChatbot(projectId, traceId, request));
     }
 
-    ProductApiContract.ChatbotListResponse listChatbots(UUID projectId, UUID traceId) {
+    public ProductApiContract.ChatbotListResponse listChatbots(UUID projectId, UUID traceId) {
         return new ProductApiContract.ChatbotListResponse(
                 version(), traceId, store.listChatbots(projectId, traceId));
     }
 
-    ProductApiContract.ChatbotResponse getChatbot(UUID id, UUID traceId) {
+    public ProductApiContract.ChatbotResponse getChatbot(UUID id, UUID traceId) {
         return store.getChatbot(id, traceId);
     }
 
-    ProductApiContract.RagQueryResponse query(
+    public ProductApiContract.RagQueryResponse query(
             UUID chatbotId,
             UUID traceId,
             String key,
@@ -180,16 +190,16 @@ final class ProductService {
                 () -> store.query(chatbotId, traceId, request));
     }
 
-    ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {
+    public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {
         return store.getJob(id, traceId);
     }
 
-    ProductApiContract.AgentJobListResponse listJobs(UUID projectId, UUID traceId) {
+    public ProductApiContract.AgentJobListResponse listJobs(UUID projectId, UUID traceId) {
         return new ProductApiContract.AgentJobListResponse(
                 version(), traceId, store.listJobs(projectId, traceId));
     }
 
-    ProductApiContract.AgentJobResponse cancelJob(
+    public ProductApiContract.AgentJobResponse cancelJob(
             UUID id,
             UUID traceId,
             String key,
@@ -200,7 +210,7 @@ final class ProductService {
                 () -> store.cancelJob(id, traceId, request.expectedStateVersion()));
     }
 
-    ProductApiContract.AgentJobResponse retryJob(
+    public ProductApiContract.AgentJobResponse retryJob(
             UUID id,
             UUID traceId,
             String key,

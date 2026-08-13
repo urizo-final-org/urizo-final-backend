@@ -2,18 +2,18 @@ package org.urizo.axmodulestudio.backend.product;
 
 import org.springframework.http.HttpStatus;
 
-final class ProductApiException extends RuntimeException {
+public final class ProductApiException extends RuntimeException {
 
     private final String code;
     private final HttpStatus status;
     private final boolean retryable;
     private final Long retryAfterMs;
 
-    ProductApiException(String code, String message, HttpStatus status) {
+    public ProductApiException(String code, String message, HttpStatus status) {
         this(code, message, status, false, null);
     }
 
-    ProductApiException(
+    public ProductApiException(
             String code,
             String message,
             HttpStatus status,
@@ -26,8 +26,8 @@ final class ProductApiException extends RuntimeException {
         this.retryAfterMs = retryAfterMs;
     }
 
-    String code() { return code; }
-    HttpStatus status() { return status; }
-    boolean retryable() { return retryable; }
-    Long retryAfterMs() { return retryAfterMs; }
+    public String code() { return code; }
+    public HttpStatus status() { return status; }
+    public boolean retryable() { return retryable; }
+    public Long retryAfterMs() { return retryAfterMs; }
 }

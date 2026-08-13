@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.urizo.axmodulestudio.backend.connector.DeterministicConnectorFixture;
 
 @Service
 @Profile("local-full")

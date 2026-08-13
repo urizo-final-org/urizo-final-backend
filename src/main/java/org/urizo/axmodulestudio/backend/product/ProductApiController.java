@@ -18,6 +18,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.urizo.axmodulestudio.backend.common.web.TraceIdFilter;
+import org.urizo.axmodulestudio.backend.connector.ConnectorOperations;
+import org.urizo.axmodulestudio.backend.job.ProductJobOperations;
+import org.urizo.axmodulestudio.backend.knowledge.KnowledgeOperations;
+import org.urizo.axmodulestudio.backend.project.ProjectOperations;
+import org.urizo.axmodulestudio.backend.rag.RagOperations;
 
 @RestController
 @Validated
@@ -27,10 +32,23 @@ public class ProductApiController {
 
     private static final String IDEMPOTENCY = "Idempotency-Key";
 
-    private final ProductService service;
+    private final ProjectOperations projects;
+    private final ConnectorOperations connectors;
+    private final KnowledgeOperations knowledge;
+    private final RagOperations rag;
+    private final ProductJobOperations jobs;
 
-    ProductApiController(ProductService service) {
-        this.service = service;
+    ProductApiController(
+            ProjectOperations projects,
+            ConnectorOperations connectors,
+            KnowledgeOperations knowledge,
+            RagOperations rag,
+            ProductJobOperations jobs) {
+        this.projects = projects;
+        this.connectors = connectors;
+        this.knowledge = knowledge;
+        this.rag = rag;
+        this.jobs = jobs;
     }
 
     @PostMapping("/projects")
@@ -38,7 +56,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.CreateProjectRequest body,
             HttpServletRequest request) {
-        ProductApiContract.ProjectResponse response = service.createProject(trace(request), key, body);
+        ProductApiContract.ProjectResponse response = projects.createProject(trace(request), key, body);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .header(HttpHeaders.LOCATION, "/api/projects/" + response.projectId())
                 .body(response);
@@ -46,13 +64,13 @@ public class ProductApiController {
 
     @GetMapping("/projects")
     ProductApiContract.ProjectListResponse listProjects(HttpServletRequest request) {
-        return service.listProjects(trace(request));
+        return projects.listProjects(trace(request));
     }
 
     @GetMapping("/projects/{projectId}")
     ProductApiContract.ProjectResponse getProject(
             @PathVariable UUID projectId, HttpServletRequest request) {
-        return service.getProject(projectId, trace(request));
+        return projects.getProject(projectId, trace(request));
     }
 
     @PostMapping("/projects/{projectId}/connectors")
@@ -61,7 +79,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.CreateConnectorRequest body,
             HttpServletRequest request) {
-        ProductApiContract.ConnectorResponse response = service.createConnector(
+        ProductApiContract.ConnectorResponse response = connectors.createConnector(
                 projectId, trace(request), key, body);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .header(HttpHeaders.LOCATION, "/api/connectors/" + response.connectorId())
@@ -71,13 +89,13 @@ public class ProductApiController {
     @GetMapping("/projects/{projectId}/connectors")
     ProductApiContract.ConnectorListResponse listConnectors(
             @PathVariable UUID projectId, HttpServletRequest request) {
-        return service.listConnectors(projectId, trace(request));
+        return connectors.listConnectors(projectId, trace(request));
     }
 
     @GetMapping("/connectors/{connectorId}")
     ProductApiContract.ConnectorResponse getConnector(
             @PathVariable UUID connectorId, HttpServletRequest request) {
-        return service.getConnector(connectorId, trace(request));
+        return connectors.getConnector(connectorId, trace(request));
     }
 
     @PostMapping("/connectors/{connectorId}/preview")
@@ -86,7 +104,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.ConnectorPreviewRequest body,
             HttpServletRequest request) {
-        return service.previewConnector(connectorId, trace(request), key, body);
+        return connectors.previewConnector(connectorId, trace(request), key, body);
     }
 
     @PostMapping("/connectors/{connectorId}/versions/{connectorVersionId}/activate")
@@ -96,7 +114,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.StateMutationRequest body,
             HttpServletRequest request) {
-        return service.activateConnectorVersion(
+        return connectors.activateConnectorVersion(
                 connectorId, connectorVersionId, trace(request), key, body);
     }
 
@@ -106,7 +124,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.ConnectorSyncRequest body,
             HttpServletRequest request) {
-        ProductApiContract.JobAcceptedResponse response = service.syncConnector(
+        ProductApiContract.JobAcceptedResponse response = connectors.syncConnector(
                 connectorId, trace(request), key, body);
         return ResponseEntity.accepted()
                 .header(HttpHeaders.LOCATION, response.statusUrl())
@@ -119,7 +137,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.CreateKnowledgeBaseRequest body,
             HttpServletRequest request) {
-        ProductApiContract.KnowledgeBaseResponse response = service.createKnowledgeBase(
+        ProductApiContract.KnowledgeBaseResponse response = knowledge.createKnowledgeBase(
                 trace(request), key, body);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .header(HttpHeaders.LOCATION, "/api/knowledge-bases/" + response.knowledgeBaseId())
@@ -129,13 +147,13 @@ public class ProductApiController {
     @GetMapping("/knowledge-bases")
     ProductApiContract.KnowledgeBaseListResponse listKnowledgeBases(
             @RequestParam UUID projectId, HttpServletRequest request) {
-        return service.listKnowledgeBases(projectId, trace(request));
+        return knowledge.listKnowledgeBases(projectId, trace(request));
     }
 
     @GetMapping("/knowledge-bases/{knowledgeBaseId}")
     ProductApiContract.KnowledgeBaseResponse getKnowledgeBase(
             @PathVariable UUID knowledgeBaseId, HttpServletRequest request) {
-        return service.getKnowledgeBase(knowledgeBaseId, trace(request));
+        return knowledge.getKnowledgeBase(knowledgeBaseId, trace(request));
     }
 
     @PostMapping("/knowledge-bases/{knowledgeBaseId}/versions")
@@ -144,7 +162,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.StartKnowledgeBuildRequest body,
             HttpServletRequest request) {
-        ProductApiContract.JobAcceptedResponse response = service.startKnowledgeBuild(
+        ProductApiContract.JobAcceptedResponse response = knowledge.startKnowledgeBuild(
                 knowledgeBaseId, trace(request), key, body);
         return ResponseEntity.accepted()
                 .header(HttpHeaders.LOCATION, response.statusUrl())
@@ -155,13 +173,13 @@ public class ProductApiController {
     @GetMapping("/knowledge-bases/{knowledgeBaseId}/versions")
     ProductApiContract.KnowledgeVersionListResponse listKnowledgeVersions(
             @PathVariable UUID knowledgeBaseId, HttpServletRequest request) {
-        return service.listKnowledgeVersions(knowledgeBaseId, trace(request));
+        return knowledge.listKnowledgeVersions(knowledgeBaseId, trace(request));
     }
 
     @GetMapping("/knowledge-versions/{knowledgeVersionId}")
     ProductApiContract.KnowledgeVersionResponse getKnowledgeVersion(
             @PathVariable UUID knowledgeVersionId, HttpServletRequest request) {
-        return service.getKnowledgeVersion(knowledgeVersionId, trace(request));
+        return knowledge.getKnowledgeVersion(knowledgeVersionId, trace(request));
     }
 
     @PostMapping("/knowledge-versions/{knowledgeVersionId}/activate")
@@ -170,7 +188,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.StateMutationRequest body,
             HttpServletRequest request) {
-        return service.activateKnowledgeVersion(knowledgeVersionId, trace(request), key, body);
+        return knowledge.activateKnowledgeVersion(knowledgeVersionId, trace(request), key, body);
     }
 
     @PostMapping("/knowledge-bases/{knowledgeBaseId}/rollback")
@@ -179,7 +197,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.RollbackKnowledgeRequest body,
             HttpServletRequest request) {
-        return service.rollbackKnowledgeVersion(knowledgeBaseId, trace(request), key, body);
+        return knowledge.rollbackKnowledgeVersion(knowledgeBaseId, trace(request), key, body);
     }
 
     @PostMapping("/projects/{projectId}/chatbots")
@@ -188,7 +206,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.CreateChatbotRequest body,
             HttpServletRequest request) {
-        ProductApiContract.ChatbotResponse response = service.createChatbot(
+        ProductApiContract.ChatbotResponse response = rag.createChatbot(
                 projectId, trace(request), key, body);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .header(HttpHeaders.LOCATION, "/api/chatbots/" + response.chatbotId())
@@ -198,13 +216,13 @@ public class ProductApiController {
     @GetMapping("/projects/{projectId}/chatbots")
     ProductApiContract.ChatbotListResponse listChatbots(
             @PathVariable UUID projectId, HttpServletRequest request) {
-        return service.listChatbots(projectId, trace(request));
+        return rag.listChatbots(projectId, trace(request));
     }
 
     @GetMapping("/chatbots/{chatbotId}")
     ProductApiContract.ChatbotResponse getChatbot(
             @PathVariable UUID chatbotId, HttpServletRequest request) {
-        return service.getChatbot(chatbotId, trace(request));
+        return rag.getChatbot(chatbotId, trace(request));
     }
 
     @PostMapping("/chatbots/{chatbotId}/query")
@@ -213,19 +231,19 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.RagQueryRequest body,
             HttpServletRequest request) {
-        return service.query(chatbotId, trace(request), key, body);
+        return rag.query(chatbotId, trace(request), key, body);
     }
 
     @GetMapping("/agent-jobs/{jobId}")
     ProductApiContract.AgentJobResponse getJob(
             @PathVariable UUID jobId, HttpServletRequest request) {
-        return service.getJob(jobId, trace(request));
+        return jobs.getJob(jobId, trace(request));
     }
 
     @GetMapping("/agent-jobs")
     ProductApiContract.AgentJobListResponse listJobs(
             @RequestParam UUID projectId, HttpServletRequest request) {
-        return service.listJobs(projectId, trace(request));
+        return jobs.listJobs(projectId, trace(request));
     }
 
     @PostMapping("/agent-jobs/{jobId}/cancel")
@@ -234,7 +252,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.StateMutationRequest body,
             HttpServletRequest request) {
-        return service.cancelJob(jobId, trace(request), key, body);
+        return jobs.cancelJob(jobId, trace(request), key, body);
     }
 
     @PostMapping("/agent-jobs/{jobId}/retry")
@@ -243,7 +261,7 @@ public class ProductApiController {
             @RequestHeader(IDEMPOTENCY) String key,
             @Valid @RequestBody ProductApiContract.StateMutationRequest body,
             HttpServletRequest request) {
-        return service.retryJob(jobId, trace(request), key, body);
+        return jobs.retryJob(jobId, trace(request), key, body);
     }
 
     private static UUID trace(HttpServletRequest request) {

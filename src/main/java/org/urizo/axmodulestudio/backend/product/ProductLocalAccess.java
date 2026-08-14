@@ -13,7 +13,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 @Component
-@Profile("local-full")
+@Profile("local-full & dev-session")
 final class ProductLocalAccess {
 
     private static final Duration LIFETIME = Duration.ofHours(24);

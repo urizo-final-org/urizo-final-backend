@@ -63,7 +63,17 @@ if ($verifiedProviderCount -lt 3) {
 }
 $providerOverview = $null
 
-$session = Invoke-RestMethod -UseBasicParsing -Uri "$baseUri/internal/dev/product-session" -TimeoutSec 10
+# This acceptance path runs on the development session, which now lives behind the
+# 'dev-session' profile. Without it the stack requires a real administrator login and
+# this endpoint is absent, so add 'dev-session' to SPRING_PROFILES_ACTIVE before
+# running Stage 3-5 verification.
+try {
+    $session = Invoke-RestMethod -UseBasicParsing -Uri "$baseUri/internal/dev/product-session" -TimeoutSec 10
+}
+catch {
+    throw ('The local product session endpoint is unavailable. Stage 3-5 verification ' +
+        "requires the 'dev-session' profile; production authentication is active without it.")
+}
 if (($session.schemaVersion -ne '1.0') -or
         ($session.tokenType -ne 'Bearer') -or
         [string]::IsNullOrWhiteSpace([string]$session.accessToken)) {

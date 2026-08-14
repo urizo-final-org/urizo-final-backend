@@ -6,7 +6,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
-@Profile("local-full")
+@Profile("local-full & dev-session")
 @RequestMapping("/internal/dev/product-session")
 final class ProductSessionController {
 

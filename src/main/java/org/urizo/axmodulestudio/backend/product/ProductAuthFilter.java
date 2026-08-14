@@ -19,7 +19,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 import org.urizo.axmodulestudio.backend.common.web.TraceIdFilter;
 
 @Component
-@Profile("local-full")
+@Profile("local-full & dev-session")
 @Order(Ordered.HIGHEST_PRECEDENCE + 10)
 final class ProductAuthFilter extends OncePerRequestFilter {
 

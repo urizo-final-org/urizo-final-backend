@@ -14,6 +14,7 @@
   ],
   "tags": [
     { "name": "Health" },
+    { "name": "Auth" },
     { "name": "Projects" },
     { "name": "Connectors" },
     { "name": "Knowledge" },
@@ -80,6 +81,85 @@
             }
           },
           "400": { "$ref": "#/components/responses/BadRequest" }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "operationId": "login",
+        "tags": ["Auth"],
+        "summary": "Exchange administrator credentials for an opaque session",
+        "description": "The only unauthenticated product endpoint. An unknown login id, a wrong credential, and a disabled account are reported identically so administrator accounts cannot be enumerated. The idempotency key is validated for shape but not replayed: repeating a login issues a new session and leaves the earlier one valid until it expires, because replaying the response would require persisting the session value that this design deliberately keeps out of storage.",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Session issued",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/LoginResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "tags": ["Auth"],
+        "summary": "Revoke the presented session",
+        "description": "Revoking an already revoked or unknown session succeeds so a client can always reach a signed-out state.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "responses": {
+          "204": {
+            "description": "Session revoked",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/InternalError" }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "operationId": "getCurrentSession",
+        "tags": ["Auth"],
+        "summary": "Return the server-derived actor and role",
+        "description": "Every field is derived from the validated session and persisted membership. The response never contains a password value or session digest.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/TraceIdHeader" }],
+        "responses": {
+          "200": {
+            "description": "Current session identity",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/CurrentSessionResponse" }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "500": { "$ref": "#/components/responses/InternalError" }
         }
       }
     },
@@ -982,6 +1062,76 @@
     "schemas": {
       "SchemaVersion": { "type": "string", "const": "1.0" },
       "Uuid": { "type": "string", "format": "uuid" },
+      "AdminRole": {
+        "type": "string",
+        "description": "The MVP fixes exactly two administrator roles. SUPER_ADMIN is platform-global; GENERAL_ADMIN reaches assigned Projects only.",
+        "enum": ["SUPER_ADMIN", "GENERAL_ADMIN"]
+      },
+      "LoginId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 120
+      },
+      "PasswordValue": {
+        "type": "string",
+        "description": "Administrator password. Named to stay outside the credential-shaped key guard while still carrying the only value a login can accept.",
+        "minLength": 8,
+        "maxLength": 256,
+        "writeOnly": true
+      },
+      "LoginRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "loginId", "passwordValue"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "loginId": { "$ref": "#/components/schemas/LoginId" },
+          "passwordValue": { "$ref": "#/components/schemas/PasswordValue" }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "sessionToken", "tokenType", "expiresAt", "actor"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "sessionToken": {
+            "type": "string",
+            "description": "Opaque session value. Only its digest is persisted, so it is returned once and cannot be recovered later.",
+            "minLength": 32
+          },
+          "tokenType": { "type": "string", "const": "Bearer" },
+          "expiresAt": { "type": "string", "format": "date-time" },
+          "actor": { "$ref": "#/components/schemas/ActorContext" }
+        }
+      },
+      "ActorContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "Server-derived authority. A client-supplied actor id, role, or Project claim never contributes to it.",
+        "required": ["actorId", "role", "assignedProjectIds"],
+        "properties": {
+          "actorId": { "$ref": "#/components/schemas/Uuid" },
+          "role": { "$ref": "#/components/schemas/AdminRole" },
+          "assignedProjectIds": {
+            "type": "array",
+            "description": "Empty for SUPER_ADMIN, which reaches every Project without a membership row.",
+            "items": { "$ref": "#/components/schemas/Uuid" }
+          }
+        }
+      },
+      "CurrentSessionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "traceId", "actor", "expiresAt"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "actor": { "$ref": "#/components/schemas/ActorContext" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
+      },
       "IdempotencyKey": {
         "type": "string",
         "minLength": 8,

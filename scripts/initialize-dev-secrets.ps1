@@ -8,10 +8,21 @@ $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Pat
 $secretDirectory = Join-Path (Join-Path $repositoryRoot '.local') 'secrets'
 [void](New-Item -ItemType Directory -Force -Path $secretDirectory)
 
+function Test-WindowsHost {
+    # $IsWindows exists only in PowerShell 6 and later, and this script runs under
+    # Set-StrictMode, which turns reading an undefined variable into a terminating
+    # error rather than yielding $false. Windows PowerShell 5.1 runs on Windows and
+    # nowhere else, so its major version answers the question without the variable.
+    if ($PSVersionTable.PSVersion.Major -lt 6) {
+        return $true
+    }
+    return $IsWindows
+}
+
 function Protect-LocalPath {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
 
-    if ($IsWindows) {
+    if (Test-WindowsHost) {
         $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
         $sid = $identity.User.Value
         $grant = "*$($sid):(F)"

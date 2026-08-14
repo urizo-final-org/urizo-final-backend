@@ -47,7 +47,17 @@ public final class AdminAuthorizationFilter extends OncePerRequestFilter {
             new Rule("POST", "/api/knowledge-versions/*/activate",
                     AdminPermission.KNOWLEDGE_VERSION_TRANSITION),
             new Rule("POST", "/api/knowledge-bases/*/rollback",
-                    AdminPermission.KNOWLEDGE_VERSION_TRANSITION));
+                    AdminPermission.KNOWLEDGE_VERSION_TRANSITION),
+
+            // Platform LLM credentials. Reading is guarded as well as writing: the overview reports
+            // which providers hold a Secret and when it was last rotated, which is itself platform
+            // technical state rather than customer business data.
+            new Rule("GET", ProductionAuthFilter.PROVIDER_CREDENTIALS_PATH,
+                    AdminPermission.PLATFORM_SECRET_MANAGE),
+            new Rule("PUT", ProductionAuthFilter.PROVIDER_CREDENTIALS_PATH + "/*",
+                    AdminPermission.PLATFORM_SECRET_MANAGE),
+            new Rule("POST", ProductionAuthFilter.PROVIDER_CREDENTIALS_PATH + "/*/test",
+                    AdminPermission.PLATFORM_SECRET_MANAGE));
 
     private static final AntPathMatcher PATHS = new AntPathMatcher();
 
@@ -61,7 +71,7 @@ public final class AdminAuthorizationFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !request.getRequestURI().startsWith("/api/");
+        return !ProductionAuthFilter.isProtectedPath(request.getRequestURI());
     }
 
     @Override

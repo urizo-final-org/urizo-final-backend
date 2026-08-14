@@ -73,10 +73,32 @@ class AdminAuthorizationFilterTest {
     }
 
     @Test
-    void aRouteOutsideTheApiBoundaryIsNotFiltered() throws Exception {
+    void aRouteOutsideTheProtectedBoundaryIsNotFiltered() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/internal/dev/whatever");
 
         assertThat(filter.shouldNotFilter(request)).isTrue();
+    }
+
+    /**
+     * The platform LLM credential screen lives under the internal prefix but is administrator-facing,
+     * and the matrix reserves Secret registration and rotation for the delivery-company role.
+     */
+    @Test
+    void platformCredentialsAreClosedToACustomerOperator() throws Exception {
+        String base = "/internal/dev/provider-credentials";
+
+        assertThat(dispatch("GET", base, generalAdmin()).getStatus()).isEqualTo(403);
+        assertThat(dispatch("PUT", base + "/OPENAI", generalAdmin()).getStatus()).isEqualTo(403);
+        assertThat(dispatch("POST", base + "/OPENAI/test", generalAdmin()).getStatus()).isEqualTo(403);
+    }
+
+    @Test
+    void platformCredentialsStayOpenToTheDeliveryEngineer() throws Exception {
+        String base = "/internal/dev/provider-credentials";
+
+        assertThat(dispatch("GET", base, superAdmin()).getStatus()).isEqualTo(200);
+        assertThat(dispatch("PUT", base + "/OPENAI", superAdmin()).getStatus()).isEqualTo(200);
+        assertThat(dispatch("POST", base + "/OPENAI/test", superAdmin()).getStatus()).isEqualTo(200);
     }
 
     /**

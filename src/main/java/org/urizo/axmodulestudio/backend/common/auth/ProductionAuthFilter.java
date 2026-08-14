@@ -32,12 +32,27 @@ public final class ProductionAuthFilter extends OncePerRequestFilter {
     public static final String SESSION_EXPIRY_ATTRIBUTE =
             ProductionAuthFilter.class.getName() + ".sessionExpiresAt";
 
+    /**
+     * Administrator surfaces outside {@code /api} that still need a resolved actor.
+     *
+     * <p>The platform LLM credential screen is administrator-facing even though it sits under the
+     * internal prefix, and the approved matrix reserves Secret registration for the delivery-company
+     * role. Leaving it out of authentication would leave the one screen the matrix is most explicit
+     * about as the only one nobody is identified on.
+     */
+    public static final String PROVIDER_CREDENTIALS_PATH = "/internal/dev/provider-credentials";
+
     static final String SCHEMA_VERSION = "1.0";
     private static final String BEARER_PREFIX = "Bearer ";
     private static final Set<String> OPEN_PATHS = Set.of(
             "/api/health",
             "/api/readiness",
             "/api/auth/login");
+
+    /** Whether a path is behind production authentication at all. */
+    public static boolean isProtectedPath(String path) {
+        return path.startsWith("/api/") || path.startsWith(PROVIDER_CREDENTIALS_PATH);
+    }
 
     private final AuthenticationService authentication;
     private final ObjectMapper objectMapper;
@@ -50,7 +65,7 @@ public final class ProductionAuthFilter extends OncePerRequestFilter {
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
-        return !path.startsWith("/api/") || OPEN_PATHS.contains(path);
+        return !isProtectedPath(path) || OPEN_PATHS.contains(path);
     }
 
     @Override

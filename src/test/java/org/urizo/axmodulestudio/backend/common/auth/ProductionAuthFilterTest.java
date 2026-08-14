@@ -136,6 +136,8 @@ class ProductionAuthFilterTest {
         assertThat(filter.shouldNotFilter(request("/api/auth/login"))).isTrue();
         assertThat(filter.shouldNotFilter(request("/internal/dev/product-session"))).isTrue();
         assertThat(filter.shouldNotFilter(request("/api/projects"))).isFalse();
+        // Administrator-facing even though it sits under the internal prefix.
+        assertThat(filter.shouldNotFilter(request("/internal/dev/provider-credentials"))).isFalse();
     }
 
     @Test

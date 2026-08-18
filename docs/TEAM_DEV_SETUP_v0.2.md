@@ -1,5 +1,7 @@
 # AX Module Studio Spring Primary 팀 Dev Setup v0.2
 
+> **HISTORICAL / NON-NORMATIVE:** 이 문서는 Source Bootstrap 전 설정 계약을 보존한다. 현재 실행 명령과 구현된 Script는 Backend `README.md`와 `scripts/`가 소유하며, 공통 정책과 현재 작업 상태는 sibling Master만 소유한다. 아래의 "현재 Script가 없음" 문구는 역사적 시점 설명이다.
+>
 > 대상: Windows + WSL2 + Docker Desktop 기반 `dev`
 > 상태: Bootstrap 계약. Repository Script는 Source Bootstrap 뒤 Backend에서 구현한다.
 

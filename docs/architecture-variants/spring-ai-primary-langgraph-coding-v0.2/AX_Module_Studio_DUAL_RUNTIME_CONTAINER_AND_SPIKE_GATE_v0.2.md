@@ -1,5 +1,7 @@
 # AX Module Studio 독립 Fallback·Container·Spike Gate v0.2
 
+> **HISTORICAL / NON-NORMATIVE:** Spring 전환 전 후보 Gate와 fallback runbook의 설계 증거다. 아래의 구현 Hold, Source/Repository 전환, Git, 승인 및 일정 규칙은 현재 지시가 아니며 workspace sibling `urizo-final-master`만 소유한다.
+>
 > 작성일: 2026-08-10  
 > 상태: 실행 계약 후보  
 > 전제: 아직 실제 Backend Source·Dockerfile·Compose·Migration은 없음

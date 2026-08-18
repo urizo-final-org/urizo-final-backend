@@ -1,13 +1,15 @@
-# Backend Repository Rules
+# Backend Repository Agent Entry
 
-- Scope: Spring platform API, Spring Batch, Flyway migrations, infrastructure composition, and workspace bootstrap scripts.
-- Follow the parent workspace architecture and Git workflow rules.
-- Implementation follows the Spring AI primary and Python LangGraph coding-agent candidate architecture v0.2.
-- Before implementation, read `docs/architecture-variants/spring-ai-primary-langgraph-coding-v0.2/README.md` and every document in its required reading order.
-- For local setup, migrations, Git workflow, or coding-agent harness work, read the matching v0.2 document under `docs/` first.
-- Earlier FastAPI documents are preserved snapshots, not executable source backups.
-- Flyway is the only DDL owner. Runtime accounts and ORM/schema auto-creation must not mutate schema.
-- Local business, RAG, checkpoint, and test data are not synchronized through Git.
-- Do not create product scaffolding or run migrations until the next implementation stage is explicitly approved.
-- Keep secrets out of source, prompts, logs, commits, and pull requests.
-- Normal work branches from the latest `dev` and reaches `dev` through a reviewed pull request.
+## Common authority routing
+
+- This file is a repository entry point, not a copy of team policy.
+- Cross-repository policy, roles, Wave/WBS state, assignments, Git/PR workflow, and shared safety rules are owned only by the sibling `../urizo-final-master/AGENTS.md` and its required current-status documents.
+- Before planning or editing, read that Master authority from the canonical parent workspace. If the sibling Master checkout is unavailable, do not infer current work from this repository alone; reopen the canonical four-repository workspace or synchronize Master first.
+- Claude Code uses `CLAUDE.md`, which imports this file. Do not add a second copy of common policy there.
+
+## Repository-local scope
+
+- Own Spring platform APIs, Spring Batch, public/coding contracts, Flyway Core migrations, Tool Gateway, integrated Compose, and development bootstrap scripts.
+- Flyway is the only Core DDL owner. Runtime accounts and ORM/schema auto-creation must not mutate the Core schema.
+- The sibling Orchestrator owns Python LangGraph graph/checkpoint implementation; the Backend owns the authority and contracts it consumes.
+- `README.md`, current source, contracts, migrations, and executable verification scripts describe the implemented Backend. Documents marked historical or non-normative preserve evidence only and never override Master status or policy.

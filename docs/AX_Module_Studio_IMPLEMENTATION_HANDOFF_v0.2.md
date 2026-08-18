@@ -1,5 +1,7 @@
 # AX Module Studio Spring Primary 구현 인수인계 v0.2
 
+> **HISTORICAL / NON-NORMATIVE:** 이 문서는 2026-08-10 구현 전 상태의 증거를 보존한다. 현재 구현 상태, Repository URL, Wave/Slice, 역할, 승인 경계, Git 정책은 workspace sibling `../../urizo-final-master/AGENTS.md`, 최신 Master handoff와 상태 snapshot만 따른다. 아래의 Scaffold Hold와 시작 Gate는 현재 작업 규칙이 아니다.
+>
 > 작성일: 2026-08-10  
 > 상태: **Environment Bootstrap 진행 / Product Source Scaffold Hold**  
 > 기준: Spring AI Primary + Python LangGraph Coding 후보안

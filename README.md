@@ -86,15 +86,15 @@ preview/sync, Batch Knowledge build/approval/activation, RAG citation/refusal,
 Coding Job claim/Model Turn/Tool/checkpoint interrupt-resume, restart
 idempotency and bounded Valkey/Checkpoint/Spring failure recovery.
 
-## Canonical documents
+## Repository-local documents
 
-- Start with `docs/architecture-variants/spring-ai-primary-langgraph-coding-v0.2/README.md` and follow its reading order.
-- Use `docs/AX_Module_Studio_IMPLEMENTATION_HANDOFF_v0.2.md` for implementation handoff state.
-- Use `docs/TEAM_DEV_SETUP_v0.2.md` for local development setup.
-- Use `docs/DATABASE_MIGRATION_POLICY_v0.2.md` for schema and Flyway work.
-- Use `docs/GIT-WORKFLOW_v0.2.md` for branch, push, and pull-request rules.
-- Use `docs/AX_Module_Studio_LLM_Function_Tool_Job_Harness_Design_v0.2.md` for the coding-agent tool and job harness.
+- Use this README and executable scripts for the current local-development runtime.
+- Use `docs/DATABASE_MIGRATION_POLICY_v0.2.md` for Backend-specific schema and Flyway invariants.
+- Use `docs/AX_Module_Studio_LLM_Function_Tool_Job_Harness_Design_v0.2.md` and current contracts for Backend-specific coding-agent authority and contract details.
+- Architecture candidate, implementation handoff, team setup, and Git workflow v0.2 documents preserve historical design/bootstrap evidence where marked; they are not current team-policy authorities.
 
-## Workflow
+## Team policy authority
 
-Normal changes use `latest dev -> feature/<work-slug> -> pull request to dev`. Direct pushes to `dev` and `main` are reserved for explicitly approved owner bootstrap or emergency recovery.
+Cross-repository workflow, current Wave/Slice state, assignments, and Git/PR policy are owned by the
+sibling Master repository. Start from the canonical parent workspace and follow
+`../urizo-final-master/AGENTS.md`; this README contains only Backend runtime and verification facts.

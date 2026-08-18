@@ -1,5 +1,7 @@
 # AX Module Studio Spring·Flyway DB Migration Policy v0.2
 
+> Authority scope: 이 문서는 Backend 전용 Core/Flyway 불변조건만 규정한다. 공통 Git/PR, 역할, Wave/Slice, 승인 및 안전 정책은 sibling Master만 소유하며 이 문서가 복제하거나 변경하지 않는다.
+>
 > 상태: Spring Primary 후보의 Core DB Schema 정책
 
 ## 1. 소유권

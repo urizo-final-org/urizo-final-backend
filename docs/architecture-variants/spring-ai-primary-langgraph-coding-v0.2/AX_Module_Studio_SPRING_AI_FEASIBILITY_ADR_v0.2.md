@@ -1,5 +1,7 @@
 # AX Module Studio Spring AI 전환 타당성 조사·ADR v0.2
 
+> **HISTORICAL ARCHITECTURE RECORD:** Spring 전환 판단 근거를 보존하는 ADR이다. 현재 구현 상태, Gate, 일정, 역할, Git 및 승인 규칙으로 사용하지 않으며 workspace sibling `urizo-final-master`가 현재 정책을 소유한다.
+>
 > 작성일: 2026-08-10  
 > 상태: **Conditional Go / Implementation Hold**  
 > 조사 기준: 전자정부 표준프레임워크·Spring·Docker·LangGraph 공식 문서  

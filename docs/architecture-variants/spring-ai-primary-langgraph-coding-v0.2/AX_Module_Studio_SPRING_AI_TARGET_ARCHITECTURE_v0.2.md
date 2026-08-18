@@ -1,5 +1,7 @@
 # AX Module Studio Spring AI Primary 목표 아키텍처 v0.2
 
+> **HISTORICAL ARCHITECTURE RECORD:** Master가 채택한 Spring/Flyway/LangGraph 기술 경계의 설계 근거만 보존한다. 아래의 후보 상태, 구현 Gate, 역할, Project 격리 범위, 일정, Git 및 승인 규칙은 현재 규범이 아니며 workspace sibling `urizo-final-master`가 소유한다.
+>
 > 작성일: 2026-08-10  
 > 상태: 후보 — Spike Gate 통과 전 구현 금지  
 > 선행 문서: `AX_Module_Studio_SPRING_AI_FEASIBILITY_ADR_v0.2.md`

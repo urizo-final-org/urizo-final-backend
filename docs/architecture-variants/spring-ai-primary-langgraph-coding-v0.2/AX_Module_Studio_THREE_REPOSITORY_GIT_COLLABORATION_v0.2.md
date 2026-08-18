@@ -1,5 +1,7 @@
 # AX Module Studio 3-Repository Git·AI 협업 규칙 v0.2
 
+> **HISTORICAL / NON-NORMATIVE:** Repository 분리 결정의 설계 근거만 보존한다. 아래의 개인 Repository URL, 빈 Repository 상태, Branch/PR/승인 절차와 AI 작업 규칙은 현재 정책이 아니며 workspace sibling `urizo-final-master` 문서만 따른다.
+>
 > 작성일: 2026-08-10  
 > 상태: Spring 후보안 전용 Git Addendum  
 > 관계: 기존 `GIT-WORKFLOW.md`의 Branch·PR·승인 원칙을 계승하고 Repository Routing만 확장

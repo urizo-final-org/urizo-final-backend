@@ -1,5 +1,7 @@
 # AX Module Studio 요구사항 계승·우선순위 Matrix v0.2
 
+> **HISTORICAL / NON-NORMATIVE:** Spring 전환 당시의 요구사항 비교표다. 아래의 `Project Admin`, `Reviewer`, 승인/Audit, Project 격리, 일정·Wave 해석은 최신 제품 규칙이 아니다. 현재 역할·제품 범위·Wave/WBS는 workspace sibling `urizo-final-master`의 최신 제품 결정과 상태 snapshot만 따른다.
+>
 > 작성일: 2026-08-10  
 > 상태: Spring 후보안의 요구사항 경계 확정  
 > 기준 원본: `../../baseline-fastapi-python-v0.1-2026-08-10/snapshot/`

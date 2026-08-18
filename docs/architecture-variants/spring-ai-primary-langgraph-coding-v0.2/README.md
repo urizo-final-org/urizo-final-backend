@@ -1,5 +1,7 @@
 # Spring AI Primary + Python LangGraph Coding 후보 문서
 
+> **HISTORICAL ARCHITECTURE RECORD:** 이 폴더는 Spring 전환 후보를 평가하던 2026-08-10 설계 증거다. Master가 채택한 Spring/Flyway/LangGraph 기술 경계만 현재 아키텍처 참고자료로 사용할 수 있다. `Implementation Hold`, 역할, 제품 범위, Wave/WBS, Repository URL, Git/PR 및 승인 규칙은 현재 규범이 아니며 workspace sibling `urizo-final-master`가 전적으로 소유한다.
+>
 > 작성일: 2026-08-10  
 > 상태: Conditional Go / Implementation Hold  
 > 기준선: `../baseline-fastapi-python-v0.1-2026-08-10/snapshot/`

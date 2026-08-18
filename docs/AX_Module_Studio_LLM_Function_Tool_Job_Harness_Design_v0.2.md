@@ -1,5 +1,7 @@
 # AX Module Studio Spring–LangGraph Tool·Job Harness Design v0.2
 
+> Authority scope: Backend/Orchestrator Tool·Job 기술 설계의 역사적 근거다. 현재 제품 역할, 일반 Approval/Audit 범위, Wave/Slice, Git 및 승인 정책은 workspace sibling `urizo-final-master`만 소유하며 이 문서의 Stage 0 표현이 이를 변경하지 않는다.
+>
 > 상태: Stage 0 Contract 기준  
 > 변경: FastAPI Control Plane을 Spring Control Plane·Model Gateway·Tool Gateway로 대체
 

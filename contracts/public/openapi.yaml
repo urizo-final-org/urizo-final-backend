@@ -88,8 +88,8 @@
       "post": {
         "operationId": "login",
         "tags": ["Auth"],
-        "summary": "Exchange administrator credentials for an opaque session",
-        "description": "The only unauthenticated product endpoint. An unknown login id, a wrong credential, and a disabled account are reported identically so administrator accounts cannot be enumerated. The idempotency key is validated for shape but not replayed: repeating a login issues a new session and leaves the earlier one valid until it expires, because replaying the response would require persisting the session value that this design deliberately keeps out of storage.",
+        "summary": "Exchange CMS credentials for an access/refresh JWT pair",
+        "description": "Returns a short-lived access JWT and sets the rotating refresh JWT in an HttpOnly same-origin cookie.",
         "security": [],
         "parameters": [
           { "$ref": "#/components/parameters/TraceIdHeader" },
@@ -119,12 +119,33 @@
         }
       }
     },
+    "/api/auth/refresh": {
+      "post": {
+        "operationId": "refreshSession",
+        "tags": ["Auth"],
+        "summary": "Rotate the refresh JWT and issue a new access JWT",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/TraceIdHeader" },
+          { "$ref": "#/components/parameters/IdempotencyKeyHeader" }
+        ],
+        "responses": {
+          "200": {
+            "description": "Refresh JWT rotated",
+            "headers": { "X-Trace-Id": { "$ref": "#/components/headers/TraceId" } },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoginResponse" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/api/auth/logout": {
       "post": {
         "operationId": "logout",
         "tags": ["Auth"],
-        "summary": "Revoke the presented session",
-        "description": "Revoking an already revoked or unknown session succeeds so a client can always reach a signed-out state.",
+        "summary": "Revoke the refresh JWT and clear its cookie",
+        "description": "Logout is idempotent and clears the browser refresh cookie.",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/TraceIdHeader" },
@@ -145,7 +166,7 @@
         "operationId": "getCurrentSession",
         "tags": ["Auth"],
         "summary": "Return the server-derived actor and role",
-        "description": "Every field is derived from the validated session and persisted membership. The response never contains a password value or session digest.",
+        "description": "Every field is derived from the validated access JWT and current persisted account.",
         "security": [{ "bearerAuth": [] }],
         "parameters": [{ "$ref": "#/components/parameters/TraceIdHeader" }],
         "responses": {
@@ -887,7 +908,7 @@
       "bearerAuth": {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "opaque"
+        "bearerFormat": "JWT"
       }
     },
     "parameters": {
@@ -1064,8 +1085,8 @@
       "Uuid": { "type": "string", "format": "uuid" },
       "AdminRole": {
         "type": "string",
-        "description": "The MVP fixes exactly two administrator roles. SUPER_ADMIN is platform-global; GENERAL_ADMIN reaches assigned Projects only.",
-        "enum": ["SUPER_ADMIN", "GENERAL_ADMIN"]
+        "description": "The local CMS demo has two equivalent administrator roles and one read-only user role.",
+        "enum": ["SUPER_ADMIN", "GENERAL_ADMIN", "GENERAL_USER"]
       },
       "LoginId": {
         "type": "string",
@@ -1098,8 +1119,8 @@
           "traceId": { "$ref": "#/components/schemas/Uuid" },
           "sessionToken": {
             "type": "string",
-            "description": "Opaque session value. Only its digest is persisted, so it is returned once and cannot be recovered later.",
-            "minLength": 32
+            "description": "Signed short-lived access JWT. Refresh JWTs are stored only as a server-side digest.",
+            "minLength": 8
           },
           "tokenType": { "type": "string", "const": "Bearer" },
           "expiresAt": { "type": "string", "format": "date-time" },
@@ -1109,16 +1130,12 @@
       "ActorContext": {
         "type": "object",
         "additionalProperties": false,
-        "description": "Server-derived authority. A client-supplied actor id, role, or Project claim never contributes to it.",
-        "required": ["actorId", "role", "assignedProjectIds"],
+        "description": "Server-derived CMS identity and role.",
+        "required": ["actorId", "name", "role"],
         "properties": {
           "actorId": { "$ref": "#/components/schemas/Uuid" },
-          "role": { "$ref": "#/components/schemas/AdminRole" },
-          "assignedProjectIds": {
-            "type": "array",
-            "description": "Empty for SUPER_ADMIN, which reaches every Project without a membership row.",
-            "items": { "$ref": "#/components/schemas/Uuid" }
-          }
+          "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "role": { "$ref": "#/components/schemas/AdminRole" }
         }
       },
       "CurrentSessionResponse": {

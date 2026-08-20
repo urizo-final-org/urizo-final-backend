@@ -2205,7 +2205,9 @@ def validate_security_boundaries(public_path: Path, model_path: Path) -> None:
     # Login is unauthenticated by definition: it is the operation that issues the
     # Bearer session every other route requires. Health and readiness stay open so
     # the container probe reaches them without a session.
-    unauthenticated_routes = {"/api/health", "/api/readiness", "/api/auth/login"}
+    unauthenticated_routes = {
+        "/api/health", "/api/readiness", "/api/auth/login", "/api/auth/refresh"
+    }
     for route, path_item in public["paths"].items():
         for method in ("get", "post", "put", "patch", "delete", "head", "options", "trace"):
             operation = path_item.get(method)

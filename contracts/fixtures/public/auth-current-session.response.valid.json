@@ -3,8 +3,8 @@
   "traceId": "66666666-6666-4666-8666-666666666666",
   "actor": {
     "actorId": "33333333-3333-4333-8333-333333333333",
-    "role": "SUPER_ADMIN",
-    "assignedProjectIds": []
+    "name": "최고 관리자",
+    "role": "SUPER_ADMIN"
   },
   "expiresAt": "2026-08-13T17:00:00Z"
 }

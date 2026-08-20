@@ -79,6 +79,7 @@ try {
             'postgres_superuser_password',
             'migration_owner_password',
             'cms_app_password',
+            'auth_jwt_signing_key',
             'cms_master_key',
             'dbeaver_reader_password',
             'ai_workspace_password',

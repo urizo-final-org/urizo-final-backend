@@ -22,13 +22,16 @@ import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.context.annotation.Import;
 import org.springframework.test.web.servlet.MockMvc;
 import org.urizo.axmodulestudio.backend.dev.cms.LocalDevRequestGuard;
+import org.urizo.axmodulestudio.backend.security.SecurityConfig;
 
 @WebMvcTest(
         controllers = CodingJobLifecycleController.class,
         properties = "ax.coding.job-lifecycle.enabled=true")
 @ActiveProfiles({"dev", "coding-job-local-fixture"})
+@Import(SecurityConfig.class)
 class CodingJobLifecycleControllerTest {
 
     private static final UUID TRACE_ID = UUID.fromString("55555555-5555-4555-8555-555555555555");

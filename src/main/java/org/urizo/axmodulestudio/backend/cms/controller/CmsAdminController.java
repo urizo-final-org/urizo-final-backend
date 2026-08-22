@@ -1,15 +1,12 @@
-package org.urizo.axmodulestudio.backend.cms;
+package org.urizo.axmodulestudio.backend.cms.controller;
 
 import java.util.List;
 import java.util.UUID;
 
 import jakarta.validation.Valid;
-import jakarta.validation.constraints.Min;
-import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Size;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -20,8 +17,19 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.ArticleRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.BoardRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.MenuRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.TemplateRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MemberView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
+import org.urizo.axmodulestudio.backend.cms.service.CmsService;
+import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
 
 @RestController
 @Validated
@@ -38,23 +46,28 @@ public class CmsAdminController {
     }
 
     @GetMapping("/members")
-    List<CmsService.MemberView> members() { return cms.members(); }
+    List<MemberView> members() {
+        return cms.members();
+    }
 
     @GetMapping("/members/{id}")
-    CmsService.MemberView member(@PathVariable UUID id) { return cms.member(id); }
+    MemberView member(@PathVariable UUID id) {
+        return cms.member(id);
+    }
 
     @GetMapping("/menus")
-    List<CmsService.MenuView> menus() { return cms.menus(); }
+    List<MenuView> menus() {
+        return cms.menus();
+    }
 
     @PostMapping("/menus")
-    CmsService.MenuView createMenu(@Valid @RequestBody MenuRequest request) {
-        return cms.createMenu(request.name(), request.path(), request.parentId(), request.displayOrder(),
-                request.targetType(), request.targetId());
+    MenuView createMenu(@Valid @RequestBody MenuRequest request) {
+        return cms.createMenu(request.name(), request.path(), request.parentId(),
+                request.displayOrder(), request.targetType(), request.targetId());
     }
 
     @PutMapping("/menus/{id}")
-    CmsService.MenuView updateMenu(
-            @PathVariable long id, @Valid @RequestBody MenuRequest request) {
+    MenuView updateMenu(@PathVariable long id, @Valid @RequestBody MenuRequest request) {
         return cms.updateMenu(id, request.name(), request.path(), request.parentId(),
                 request.displayOrder(), request.targetType(), request.targetId());
     }
@@ -66,19 +79,23 @@ public class CmsAdminController {
     }
 
     @GetMapping("/contents")
-    List<CmsService.ContentView> contents() { return cms.contents(); }
+    List<ContentView> contents() {
+        return cms.contents();
+    }
 
     @GetMapping("/contents/{id}")
-    CmsService.ContentView content(@PathVariable long id) { return cms.content(id); }
+    ContentView content(@PathVariable long id) {
+        return cms.content(id);
+    }
 
     @PostMapping("/contents")
-    CmsService.ContentView createContent(
+    ContentView createContent(
             Authentication authentication, @Valid @RequestBody ArticleRequest request) {
         return cms.createContent(actor(authentication).actorId(), request.title(), request.body());
     }
 
     @PutMapping("/contents/{id}")
-    CmsService.ContentView updateContent(
+    ContentView updateContent(
             @PathVariable long id, @Valid @RequestBody ArticleRequest request) {
         return cms.updateContent(id, request.title(), request.body());
     }
@@ -90,19 +107,22 @@ public class CmsAdminController {
     }
 
     @GetMapping("/boards")
-    List<CmsService.BoardView> boards() { return cms.boards(); }
+    List<BoardView> boards() {
+        return cms.boards();
+    }
 
     @GetMapping("/boards/{id}")
-    CmsService.BoardView board(@PathVariable long id) { return cms.board(id); }
+    BoardView board(@PathVariable long id) {
+        return cms.board(id);
+    }
 
     @PostMapping("/boards")
-    CmsService.BoardView createBoard(@Valid @RequestBody BoardRequest request) {
+    BoardView createBoard(@Valid @RequestBody BoardRequest request) {
         return cms.createBoard(request.name(), request.description());
     }
 
     @PutMapping("/boards/{id}")
-    CmsService.BoardView updateBoard(
-            @PathVariable long id, @Valid @RequestBody BoardRequest request) {
+    BoardView updateBoard(@PathVariable long id, @Valid @RequestBody BoardRequest request) {
         return cms.updateBoard(id, request.name(), request.description());
     }
 
@@ -113,22 +133,26 @@ public class CmsAdminController {
     }
 
     @GetMapping("/boards/{boardId}/posts")
-    List<CmsService.PostView> posts(@PathVariable long boardId) { return cms.posts(boardId); }
+    List<PostView> posts(@PathVariable long boardId) {
+        return cms.posts(boardId);
+    }
 
     @PostMapping("/boards/{boardId}/posts")
-    CmsService.PostView createPost(
+    PostView createPost(
             Authentication authentication,
             @PathVariable long boardId,
             @Valid @RequestBody ArticleRequest request) {
-        return cms.createPost(actor(authentication).actorId(), boardId, request.title(), request.body());
+        return cms.createPost(
+                actor(authentication).actorId(), boardId, request.title(), request.body());
     }
 
     @GetMapping("/posts/{id}")
-    CmsService.PostView post(@PathVariable long id) { return cms.post(id); }
+    PostView post(@PathVariable long id) {
+        return cms.post(id);
+    }
 
     @PutMapping("/posts/{id}")
-    CmsService.PostView updatePost(
-            @PathVariable long id, @Valid @RequestBody ArticleRequest request) {
+    PostView updatePost(@PathVariable long id, @Valid @RequestBody ArticleRequest request) {
         return cms.updatePost(id, request.title(), request.body());
     }
 
@@ -139,10 +163,12 @@ public class CmsAdminController {
     }
 
     @GetMapping("/templates")
-    List<CmsService.TemplateView> templates() { return cms.templates(); }
+    List<TemplateView> templates() {
+        return cms.templates();
+    }
 
     @PutMapping("/templates/{key}")
-    CmsService.TemplateView saveTemplate(
+    TemplateView saveTemplate(
             @PathVariable String key, @Valid @RequestBody TemplateRequest request) {
         return cms.saveTemplate(key, request.layout(), request.primaryColor(), request.siteName(),
                 request.headerText(), request.footerText(), request.heroImageUrl(),
@@ -152,43 +178,14 @@ public class CmsAdminController {
 
     private AuthenticatedActor actor(Authentication authentication) {
         if (authentication == null || !authentication.isAuthenticated()) {
-            throw new org.springframework.security.authentication.AuthenticationCredentialsNotFoundException(
-                    "Authentication is required.");
+            throw new AuthenticationCredentialsNotFoundException("Authentication is required.");
         }
         try {
             return authService.loadActor(UUID.fromString(authentication.getName()));
         }
-        catch (IllegalArgumentException ex) {
-            throw new org.springframework.security.authentication.AuthenticationCredentialsNotFoundException(
-                    "Authentication is required.", ex);
+        catch (IllegalArgumentException failure) {
+            throw new AuthenticationCredentialsNotFoundException(
+                    "Authentication is required.", failure);
         }
     }
-
-    public record MenuRequest(
-            @NotBlank @Size(max = 80) String name,
-            @NotBlank @Size(max = 180) String path,
-            Long parentId,
-            @Min(0) int displayOrder,
-            @NotBlank @Pattern(regexp = "NONE|CONTENT|BOARD") String targetType,
-            Long targetId) {}
-
-    public record ArticleRequest(
-            @NotBlank @Size(max = 200) String title,
-            @NotBlank @Size(max = 20000) String body) {}
-
-    public record BoardRequest(
-            @NotBlank @Size(max = 100) String name,
-            @Size(max = 300) String description) {}
-
-    public record TemplateRequest(
-            @NotBlank @Size(max = 40) String layout,
-            @NotBlank @Pattern(regexp = "^#[0-9A-Fa-f]{6}$") String primaryColor,
-            @NotBlank @Size(max = 100) String siteName,
-            @Size(max = 200) String headerText,
-            @Size(max = 200) String footerText,
-            @NotBlank @Size(max = 500) String heroImageUrl,
-            @NotBlank @Size(max = 160) String heroTitle,
-            @Size(max = 300) String heroSubtitle,
-            @Size(max = 60) String heroButtonLabel,
-            @Size(max = 180) String heroButtonUrl) {}
 }

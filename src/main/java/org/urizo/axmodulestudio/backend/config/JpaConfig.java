@@ -16,12 +16,14 @@ import org.springframework.orm.jpa.vendor.HibernateJpaVendorAdapter;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminAccountEntity;
 import org.urizo.axmodulestudio.backend.auth.repository.AdminAccountRepository;
+import org.urizo.axmodulestudio.backend.cms.entity.CmsMenuEntity;
+import org.urizo.axmodulestudio.backend.cms.repository.CmsMenuJpaRepository;
 
-/** JPA is explicitly scoped to auth entities on productDataSource; Flyway remains the only DDL owner. */
+/** JPA uses the product data source while Flyway remains the only Core DDL owner. */
 @Configuration(proxyBeanMethods = false)
 @Profile("local-full")
 @EnableJpaRepositories(
-        basePackageClasses = AdminAccountRepository.class,
+        basePackageClasses = {AdminAccountRepository.class, CmsMenuJpaRepository.class},
         entityManagerFactoryRef = "authEntityManagerFactory",
         transactionManagerRef = "authJpaTransactionManager")
 public class JpaConfig {
@@ -37,8 +39,10 @@ public class JpaConfig {
                 new LocalContainerEntityManagerFactoryBean();
         factory.setDataSource(productDataSource);
         factory.setJpaVendorAdapter(vendorAdapter);
-        factory.setPackagesToScan(AdminAccountEntity.class.getPackageName());
-        factory.setPersistenceUnitName("axms-auth");
+        factory.setPackagesToScan(
+                AdminAccountEntity.class.getPackageName(),
+                CmsMenuEntity.class.getPackageName());
+        factory.setPersistenceUnitName("axms-business");
         factory.setJpaPropertyMap(Map.of(
                 "hibernate.hbm2ddl.auto", "validate",
                 "hibernate.default_schema", "app",

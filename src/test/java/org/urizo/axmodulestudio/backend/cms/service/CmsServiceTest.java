@@ -1,0 +1,92 @@
+package org.urizo.axmodulestudio.backend.cms.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
+import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
+
+@ExtendWith(MockitoExtension.class)
+class CmsServiceTest {
+
+    @Mock
+    private CmsRepository repository;
+
+    @InjectMocks
+    private CmsService service;
+
+    @Test
+    void createsMenuAfterValidatingParentAndMappedContent() {
+        MenuView parent = new MenuView(10L, "소개", "/about", null, 10, "NONE", null);
+        ContentView content = new ContentView(
+                20L, UUID.randomUUID(), "관리자", "회사 소개", "본문", Instant.now(), Instant.now());
+        MenuView created = new MenuView(
+                30L, "회사 소개", "/about/company", 10L, 11, "CONTENT", 20L);
+        when(repository.findMenu(10L)).thenReturn(Optional.of(parent));
+        when(repository.findContent(20L)).thenReturn(Optional.of(content));
+        when(repository.insertMenu("회사 소개", "/about/company", 10L, 11, "CONTENT", 20L))
+                .thenReturn(30L);
+        when(repository.findMenu(30L)).thenReturn(Optional.of(created));
+
+        MenuView result = service.createMenu(
+                " 회사 소개 ", "/about/company", 10L, 11, "CONTENT", 20L);
+
+        assertThat(result).isEqualTo(created);
+        verify(repository).insertMenu(
+                "회사 소개", "/about/company", 10L, 11, "CONTENT", 20L);
+    }
+
+    @Test
+    void removesContentMappingInTheSameServiceOperation() {
+        when(repository.softDeleteContent(42L)).thenReturn(1);
+
+        service.deleteContent(42L);
+
+        verify(repository).clearMenuTarget("CONTENT", 42L);
+    }
+
+    @Test
+    void rejectsMissingContentWithoutRunningFollowUpUpdates() {
+        when(repository.softDeleteContent(42L)).thenReturn(0);
+
+        assertThatThrownBy(() -> service.deleteContent(42L))
+                .isInstanceOf(CmsServiceException.class)
+                .extracting(failure -> ((CmsServiceException) failure).kind())
+                .isEqualTo(CmsServiceException.Kind.NOT_FOUND);
+    }
+
+    @Test
+    void activatesOnlyTheSavedTemplate() {
+        TemplateView active = new TemplateView(
+                "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
+                "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
+                "자세히 보기", "/about", true, Instant.now());
+        when(repository.templateExists("MINIMAL")).thenReturn(true);
+        when(repository.findActiveTemplate()).thenReturn(Optional.of(active));
+
+        TemplateView result = service.saveTemplate(
+                "MINIMAL", "MINIMAL", "#0e9f76", " AX Studio ", "간결한 콘텐츠",
+                "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
+                "자세히 보기", "/about");
+
+        assertThat(result).isEqualTo(active);
+        verify(repository).deactivateTemplates();
+        verify(repository).updateTemplate(
+                "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
+                "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
+                "자세히 보기", "/about");
+    }
+}

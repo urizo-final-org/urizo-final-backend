@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('full')]
+    [ValidateSet('spring-core', 'full')]
     [string]$Profile = 'full',
 
     [switch]$SkipBuild,
@@ -135,26 +135,28 @@ if ($LASTEXITCODE -ne 0) {
 }
 Wait-ComposeOneShot -ComposeArguments $compose -Service 'flyway-migration' -Label 'Flyway one-shot service'
 
-# Register or idempotently reactivate the current rotating service credential
-# only after its authoritative Core DB table exists.
-& $docker @opsCompose up -d --no-deps --force-recreate coding_credential_registrar
-if ($LASTEXITCODE -ne 0) {
-    throw 'Coding service credential registrar could not be created.'
+if ($Profile -eq 'full') {
+    # Register or idempotently reactivate the current rotating service credential
+    # only when the Coding Runtime is part of the requested profile.
+    & $docker @opsCompose up -d --no-deps --force-recreate coding_credential_registrar
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Coding service credential registrar could not be created.'
+    }
+    Wait-ComposeOneShot -ComposeArguments $opsCompose -Service 'coding_credential_registrar' `
+        -Label 'Coding service credential registrar'
 }
-Wait-ComposeOneShot -ComposeArguments $opsCompose -Service 'coding_credential_registrar' `
-    -Label 'Coding service credential registrar'
 
 & $docker @compose up -d --wait --wait-timeout $WaitTimeoutSeconds
 if ($LASTEXITCODE -ne 0) {
-    throw 'The full local Compose profile did not become healthy.'
+    throw "The $Profile local Compose profile did not become healthy."
 }
 
 & (Join-Path $PSScriptRoot 'health.ps1') -Profile $Profile -WaitTimeoutSeconds $WaitTimeoutSeconds
 if ($LASTEXITCODE -ne 0) {
-    throw 'Full local health verification failed.'
+    throw "$Profile local health verification failed."
 }
 
 $httpPort = if ($env:AXMS_HTTP_PORT) { $env:AXMS_HTTP_PORT } else { '18080' }
 $postgresPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '15432' }
-Write-Output "AX Module Studio full local profile is healthy at http://127.0.0.1:$httpPort/."
+Write-Output "AX Module Studio $Profile local profile is healthy at http://127.0.0.1:$httpPort/."
 Write-Output "Read-only PostgreSQL gateway remains loopback-only at 127.0.0.1:$postgresPort."

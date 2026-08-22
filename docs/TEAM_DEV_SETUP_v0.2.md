@@ -77,6 +77,11 @@ Docker 로그인은 Public Image만 사용할 때 기본 필수가 아니다. Pr
 
 `full`은 Coding Agent 통합 Test와 최종 시연의 필수 Profile이다.
 
+축소 CMS의 일상 실행은 `scripts/start-cms-local.ps1`을 사용한다. 이 Script는
+`spring-core`만 확인하므로 Coding Runtime 장애가 CMS 실행을 지연시키지 않는다. 이미 정상이면
+Container를 재사용하고, 최초 Image 준비에는 `-ApproveNetwork`, Source 변경 반영에는
+`-Rebuild -ApproveNetwork`를 사용한다.
+
 ## 7. 향후 Script 계약
 
 Backend Repository가 다음 Script를 소유한다.
@@ -84,12 +89,13 @@ Backend Repository가 다음 Script를 소유한다.
 ```text
 scripts/bootstrap-workspace.ps1
 scripts/bootstrap-dev.ps1
+scripts/start-cms-local.ps1
 scripts/dev-sync.ps1
 scripts/health.ps1
 scripts/pr-preflight.ps1
 ```
 
-현재 Script가 없으므로 문서의 예시 명령을 수동으로 대체 실행하지 않는다. Script 구현 PR이 Merge된 뒤 Version 관리된 Script만 사용한다.
+현재 구현된 실행 경로는 Version 관리된 Script만 사용하며, 없는 과거 Script 이름을 수동 명령으로 대체하지 않는다.
 
 ## 8. 금지
 

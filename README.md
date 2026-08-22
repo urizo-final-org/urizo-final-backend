@@ -81,6 +81,20 @@ The canonical UI/API ingress is `http://127.0.0.1:18080/`. The read-only DBeaver
 gateway is `127.0.0.1:15432`. Frontend, Spring, Core PostgreSQL, Valkey, Coding
 Runtime and Checkpoint PostgreSQL do not publish host ports directly.
 
+## Fast CMS local profile
+
+Routine CMS startup uses one health-first command. It reuses an already healthy
+`spring-core` profile and does not wait for the separate Coding Runtime.
+
+```powershell
+.\scripts\start-cms-local.ps1 -ApproveLocalMutation
+```
+
+If required images are missing, add `-ApproveNetwork`. After Source changes that
+must be reflected in Docker images, add `-Rebuild -ApproveNetwork`. The script
+uses the versioned bootstrap, local build-trust path, Flyway gate and CMS health
+check; do not replace it with ad-hoc Docker commands.
+
 The verified local acceptance covers Project replay, deterministic Connector
 preview/sync, Batch Knowledge build/approval/activation, RAG citation/refusal,
 Coding Job claim/Model Turn/Tool/checkpoint interrupt-resume, restart

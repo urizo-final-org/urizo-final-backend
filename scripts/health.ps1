@@ -1,7 +1,9 @@
 [CmdletBinding()]
 param(
-    [ValidateSet('full')]
+    [ValidateSet('spring-core', 'full')]
     [string]$Profile = 'full',
+
+    [switch]$Quick,
 
     [int]$WaitTimeoutSeconds = 180
 )
@@ -82,16 +84,20 @@ function Assert-HttpStatus {
     }
 }
 
-$requiredSeven = @(
+$requiredCore = @(
     'nginx',
     'frontend',
     'spring-app',
     'database',
-    'valkey',
-    'coding-runtime',
-    'checkpoint_database'
+    'valkey'
 )
-$requiredLongRunning = @($requiredSeven + 'database_gateway')
+$requiredProfile = if ($Profile -eq 'full') {
+    @($requiredCore + 'coding-runtime' + 'checkpoint_database')
+}
+else {
+    $requiredCore
+}
+$requiredLongRunning = @($requiredProfile + 'database_gateway')
 
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($WaitTimeoutSeconds)
 do {
@@ -115,7 +121,7 @@ do {
 while ([DateTimeOffset]::UtcNow -lt $deadline)
 
 if (-not $allHealthy) {
-    throw 'Timed out waiting for the seven required services and database gateway to become healthy.'
+    throw "Timed out waiting for the $Profile services and database gateway to become healthy."
 }
 
 $migrationId = Get-ComposeContainerId -Service 'flyway-migration'
@@ -125,6 +131,17 @@ if (-not $migrationId) {
 $migrationState = Get-ContainerState -ContainerId $migrationId
 if ($migrationState -ne 'exited|none|0') {
     throw "Flyway one-shot container is not Exited (0): $migrationState"
+}
+
+if ($Quick) {
+    $httpPort = if ($env:AXMS_HTTP_PORT) { [int]$env:AXMS_HTTP_PORT } else { 18080 }
+    $baseUri = "http://127.0.0.1:$httpPort"
+    Assert-HttpStatus -Uri "$baseUri/nginx-health" -ExpectedStatus 200
+    Assert-HttpStatus -Uri "$baseUri/" -ExpectedStatus 200
+    Assert-HttpStatus -Uri "$baseUri/api/health" -ExpectedStatus 200
+    Assert-HttpStatus -Uri "$baseUri/api/readiness" -ExpectedStatus 200
+    Write-Output "$Profile quick health passed; required containers, Flyway and core HTTP endpoints are ready."
+    return
 }
 
 foreach ($service in @($requiredLongRunning + 'flyway-migration')) {
@@ -147,7 +164,11 @@ if ($LASTEXITCODE -ne 0 -or $databaseBinding -notmatch '^127\.0\.0\.1:\d+$') {
     throw "PostgreSQL gateway is not published loopback-only: $databaseBinding"
 }
 
-foreach ($service in @('frontend', 'spring-app', 'database', 'valkey', 'coding-runtime', 'checkpoint_database')) {
+$internalOnlyServices = @('frontend', 'spring-app', 'database', 'valkey')
+if ($Profile -eq 'full') {
+    $internalOnlyServices += @('coding-runtime', 'checkpoint_database')
+}
+foreach ($service in $internalOnlyServices) {
     $containerId = Get-ComposeContainerId -Service $service
     $publishedPorts = @(& $docker port $containerId)
     if ($LASTEXITCODE -ne 0) {
@@ -211,4 +232,4 @@ if ($LASTEXITCODE -ne 0 -or $duplicateHistoryCount -ne '0') {
 }
 
 $latestVersion = $expectedVersions[-1]
-Write-Output "Seven required services and the database gateway are healthy; Flyway is Exited (0) at $latestVersion with pending 0."
+Write-Output "$Profile services and the database gateway are healthy; Flyway is Exited (0) at $latestVersion with pending 0."

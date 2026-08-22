@@ -27,12 +27,15 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.context.annotation.Import;
 import org.urizo.axmodulestudio.backend.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.security.SecurityConfig;
 
 @WebMvcTest(
         controllers = CodingModelTurnController.class,
         properties = "ax.coding.model-turn-bridge.enabled=true")
+@Import(SecurityConfig.class)
 class CodingModelTurnControllerTest {
 
     @Autowired

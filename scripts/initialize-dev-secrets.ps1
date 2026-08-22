@@ -160,6 +160,7 @@ Protect-LocalPath -LiteralPath $secretDirectory
 New-PasswordFile -Name 'postgres_superuser_password'
 New-PasswordFile -Name 'migration_owner_password'
 New-PasswordFile -Name 'cms_app_password'
+New-PasswordFile -Name 'auth_jwt_signing_key'
 New-PasswordFile -Name 'dbeaver_reader_password'
 New-PasswordFile -Name 'ai_workspace_password'
 New-PasswordFile -Name 'dev_operator_password'

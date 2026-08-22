@@ -23,7 +23,14 @@ management:
 
 ax:
   auth:
-    session-lifetime: ${AXMS_AUTH_SESSION_LIFETIME:8h}
+    jwt:
+      access-token-lifetime: ${AXMS_AUTH_ACCESS_TOKEN_LIFETIME:15m}
+      refresh-token-lifetime: ${AXMS_AUTH_REFRESH_TOKEN_LIFETIME:7d}
+      issuer: ${AXMS_AUTH_JWT_ISSUER:ax-module-studio}
+      access-audience: ${AXMS_AUTH_ACCESS_AUDIENCE:axms-api}
+      refresh-audience: ${AXMS_AUTH_REFRESH_AUDIENCE:axms-refresh}
+      signing-key-file: ${AXMS_AUTH_JWT_SIGNING_KEY_FILE:/run/secrets/auth_jwt_signing_key}
+      secure-refresh-cookie: ${AXMS_AUTH_SECURE_REFRESH_COOKIE:false}
     # The first administrators cannot be created through the product: there is no
     # sign-up. A blank password leaves that account uncreated rather than creating
     # one nobody can sign in to.
@@ -33,6 +40,8 @@ ax:
       super-admin-password: ${AXMS_AUTH_SUPER_ADMIN_PASSWORD:}
       general-admin-login-id: ${AXMS_AUTH_GENERAL_ADMIN_LOGIN_ID:general-admin}
       general-admin-password: ${AXMS_AUTH_GENERAL_ADMIN_PASSWORD:}
+      general-user-login-id: ${AXMS_AUTH_GENERAL_USER_LOGIN_ID:general-user}
+      general-user-password: ${AXMS_AUTH_GENERAL_USER_PASSWORD:}
   coding:
     model-turn-bridge:
       local-mock-tool-candidate-enabled: true

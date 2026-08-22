@@ -195,6 +195,9 @@ services:
       AXMS_AUTH_SUPER_ADMIN_PASSWORD: axms-super-admin-demo
       AXMS_AUTH_GENERAL_ADMIN_LOGIN_ID: general-admin
       AXMS_AUTH_GENERAL_ADMIN_PASSWORD: axms-general-admin-demo
+      AXMS_AUTH_GENERAL_USER_LOGIN_ID: general-user
+      AXMS_AUTH_GENERAL_USER_PASSWORD: axms-general-user-demo
+      AXMS_AUTH_JWT_SIGNING_KEY_FILE: /run/secrets/auth_jwt_signing_key
       AXMS_CODING_JOB_LIFECYCLE_ENABLED: "true"
       AXMS_CODING_JOB_DB_URL: jdbc:postgresql://database:5432/ax_module_studio
       AXMS_CODING_JOB_DB_PASSWORD_FILE: /run/secrets/dev_operator_password
@@ -224,6 +227,7 @@ services:
       - dev_operator_password
       - ai_workspace_password
       - valkey_password
+      - auth_jwt_signing_key
     expose:
       - "8080"
     healthcheck:
@@ -421,6 +425,8 @@ secrets:
     file: ./.local/secrets/valkey_password
   valkey_acl:
     file: ./.local/secrets/valkey_acl
+  auth_jwt_signing_key:
+    file: ./.local/secrets/auth_jwt_signing_key
 
 volumes:
   axms_spring_core_db:

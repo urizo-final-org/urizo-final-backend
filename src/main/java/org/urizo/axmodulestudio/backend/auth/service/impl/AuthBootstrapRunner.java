@@ -17,7 +17,7 @@ import org.urizo.axmodulestudio.backend.auth.entity.AccountStatus;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminAccountEntity;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminRole;
 import org.urizo.axmodulestudio.backend.auth.repository.AdminAccountRepository;
-import org.urizo.axmodulestudio.backend.config.AuthBootstrapProperties;
+import org.urizo.axmodulestudio.backend.auth.config.AuthBootstrapProperties;
 
 @Component
 @Profile("local-full")

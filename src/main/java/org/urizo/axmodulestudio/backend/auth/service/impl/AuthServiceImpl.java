@@ -16,8 +16,8 @@ import org.urizo.axmodulestudio.backend.auth.repository.AdminAccountRepository;
 import org.urizo.axmodulestudio.backend.auth.repository.AdminSessionRepository;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.auth.service.AuthenticationFailedException;
-import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
-import org.urizo.axmodulestudio.backend.security.JwtTokenProvider;
+import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.auth.security.JwtTokenProvider;
 
 @Service
 @Profile("local-full")

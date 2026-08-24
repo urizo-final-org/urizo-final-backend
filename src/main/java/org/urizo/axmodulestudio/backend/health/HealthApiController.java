@@ -11,8 +11,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
-import org.urizo.axmodulestudio.backend.common.web.TraceIdFilter;
-import org.urizo.axmodulestudio.backend.product.ProductReadiness;
+import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
+import org.urizo.axmodulestudio.backend.knowledge.health.ProductReadiness;
 
 @RestController
 @RequestMapping("/api")

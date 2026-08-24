@@ -29,7 +29,7 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
-import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 
 @RestController
 @Validated

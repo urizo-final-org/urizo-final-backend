@@ -16,8 +16,8 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.urizo.axmodulestudio.backend.auth.dto.response.ErrorDetail;
 import org.urizo.axmodulestudio.backend.auth.dto.response.ErrorResponse;
 import org.urizo.axmodulestudio.backend.auth.service.AuthenticationFailedException;
-import org.urizo.axmodulestudio.backend.common.web.TraceIdFilter;
-import org.urizo.axmodulestudio.backend.config.JwtProperties;
+import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
+import org.urizo.axmodulestudio.backend.auth.config.JwtProperties;
 
 @RestControllerAdvice(basePackageClasses = AuthController.class)
 @Profile("local-full & !dev-session")

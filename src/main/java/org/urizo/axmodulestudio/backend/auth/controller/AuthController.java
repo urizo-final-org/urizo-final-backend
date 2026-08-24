@@ -25,9 +25,9 @@ import org.urizo.axmodulestudio.backend.auth.dto.response.ActorResponse;
 import org.urizo.axmodulestudio.backend.auth.dto.response.CurrentSessionResponse;
 import org.urizo.axmodulestudio.backend.auth.dto.response.LoginResponse;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
-import org.urizo.axmodulestudio.backend.common.web.TraceIdFilter;
-import org.urizo.axmodulestudio.backend.config.JwtProperties;
-import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
+import org.urizo.axmodulestudio.backend.auth.config.JwtProperties;
+import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 
 @RestController
 @Validated

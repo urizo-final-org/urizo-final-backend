@@ -1,0 +1,12 @@
+package org.urizo.axmodulestudio.backend.integration.ai.gateway;
+
+public enum ModelGatewayErrorCode {
+    CONTRACT_VALIDATION_FAILED,
+    MODEL_NOT_CONFIGURED,
+    MODEL_CAPABILITY_UNSUPPORTED,
+    MODEL_RATE_LIMITED,
+    MODEL_TIMEOUT,
+    MODEL_PROVIDER_UNAVAILABLE,
+    MODEL_RESPONSE_INVALID,
+    INTERNAL_TRANSIENT_ERROR
+}

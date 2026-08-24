@@ -3,7 +3,7 @@ package org.urizo.axmodulestudio.backend.auth.service;
 import java.time.Instant;
 import java.util.UUID;
 
-import org.urizo.axmodulestudio.backend.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 
 public interface AuthService {
 

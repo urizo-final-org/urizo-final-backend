@@ -19,22 +19,24 @@ $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
 $liveComposeFile = Join-Path $repositoryRoot 'compose.dev-live.yaml'
 $healthScript = Join-Path $PSScriptRoot 'health.ps1'
 
-if (-not $FrontendSourceRoot) {
-    $FrontendSourceRoot = Join-Path $workspaceRoot 'urizo-final-frontend'
-}
-
 foreach ($requiredFile in @($composeFile, $liveComposeFile, $healthScript)) {
     if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
         throw "Required Frontend live-development file is missing: $requiredFile"
     }
 }
-if (-not (Test-Path -LiteralPath $FrontendSourceRoot -PathType Container)) {
-    throw "Frontend source root does not exist: $FrontendSourceRoot"
-}
-$FrontendSourceRoot = (Resolve-Path -LiteralPath $FrontendSourceRoot).Path
-foreach ($requiredSource in @('src', 'public', 'index.html', 'package.json', 'pnpm-lock.yaml', 'Dockerfile')) {
-    if (-not (Test-Path -LiteralPath (Join-Path $FrontendSourceRoot $requiredSource))) {
-        throw "Frontend source root is incomplete; missing: $requiredSource"
+
+if (-not $RestoreImageOnly) {
+    if (-not $FrontendSourceRoot) {
+        $FrontendSourceRoot = Join-Path $workspaceRoot 'urizo-final-frontend'
+    }
+    if (-not (Test-Path -LiteralPath $FrontendSourceRoot -PathType Container)) {
+        throw "Frontend source root does not exist: $FrontendSourceRoot"
+    }
+    $FrontendSourceRoot = (Resolve-Path -LiteralPath $FrontendSourceRoot).Path
+    foreach ($requiredSource in @('src', 'public', 'index.html', 'package.json', 'pnpm-lock.yaml', 'Dockerfile')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $FrontendSourceRoot $requiredSource))) {
+            throw "Frontend source root is incomplete; missing: $requiredSource"
+        }
     }
 }
 
@@ -65,19 +67,6 @@ else {
 & $docker info --format '{{.ServerVersion}}' | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Docker Engine is not available.'
-}
-
-$composeVersionText = (& $docker compose version --short).Trim()
-if ($LASTEXITCODE -ne 0 -or $composeVersionText -notmatch '(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)') {
-    throw "Unable to read Docker Compose version: $composeVersionText"
-}
-$composeVersion = [Version]::new(
-    [int]$Matches.major,
-    [int]$Matches.minor,
-    [int]$Matches.patch
-)
-if ($composeVersion -lt [Version]'2.22.0') {
-    throw "Docker Compose 2.22.0 or newer is required for Watch; found $composeVersionText."
 }
 
 $baseCompose = @('compose', '-f', $composeFile, '--profile', 'spring-core')
@@ -117,6 +106,19 @@ function Restore-ImageOnlyFrontend {
 if ($RestoreImageOnly) {
     Restore-ImageOnlyFrontend
     return
+}
+
+$composeVersionText = (& $docker compose version --short).Trim()
+if ($LASTEXITCODE -ne 0 -or $composeVersionText -notmatch '(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)') {
+    throw "Unable to read Docker Compose version: $composeVersionText"
+}
+$composeVersion = [Version]::new(
+    [int]$Matches.major,
+    [int]$Matches.minor,
+    [int]$Matches.patch
+)
+if ($composeVersion -lt [Version]'2.22.0') {
+    throw "Docker Compose 2.22.0 or newer is required for Watch; found $composeVersionText."
 }
 
 try {

@@ -1,0 +1,18 @@
+services:
+  frontend:
+    # Local development only. The base Compose file remains image-only and read-only.
+    read_only: false
+    develop:
+      watch:
+        - action: sync
+          path: ${AXMS_FRONTEND_LIVE_SOURCE:-../urizo-final-frontend}/src
+          target: /app/src
+          initial_sync: true
+        - action: sync
+          path: ${AXMS_FRONTEND_LIVE_SOURCE:-../urizo-final-frontend}/public
+          target: /app/public
+          initial_sync: true
+        - action: sync
+          path: ${AXMS_FRONTEND_LIVE_SOURCE:-../urizo-final-frontend}/index.html
+          target: /app/index.html
+          initial_sync: true

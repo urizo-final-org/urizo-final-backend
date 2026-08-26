@@ -28,7 +28,7 @@ $probeTimeoutSeconds = [Math]::Min(10, $WaitTimeoutSeconds)
 $probeFailure = ''
 try {
     $healthOutput = @(& $healthScript -Profile spring-core -Quick -WaitTimeoutSeconds $probeTimeoutSeconds)
-    if ($LASTEXITCODE -eq 0) {
+    if ($LASTEXITCODE -eq 0 -and -not $Rebuild) {
         $healthOutput | Write-Output
         Write-Output 'CMS LOCAL START PASS: reused the already healthy spring-core containers.'
         Write-Output 'CMS URL: http://127.0.0.1:18080/'

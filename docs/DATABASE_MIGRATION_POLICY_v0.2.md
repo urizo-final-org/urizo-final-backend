@@ -28,9 +28,11 @@ FastAPI Fallback DB          → 전환 승인 뒤 별도 Alembic Chain
 파일 형식은 다음을 기본으로 한다.
 
 ```text
-db/migration/VYYYYMMDDHHMMSS__lower_snake_description.sql
+db/migration/VyyyyMMddHHmmssSSS__lower_snake_description.sql
 ```
 
+- 신규 Revision은 현재 UTC 기준 17자리이며 마지막 3자리는 밀리초다. 기존 14자리 Revision은 그대로 유효하며 이름을 바꾸지 않는다.
+- Revision 예약·소유권·상태 변경은 sibling Master의 `docs/team/FLYWAY_RESERVATION_LEDGER.md`를 단일 기준으로 따른다.
 - 이미 `dev`에 Merge됐거나 다른 DB에 적용된 Revision은 수정하지 않는다.
 - 변경이 필요하면 새 Forward Revision을 추가한다.
 - 개인 Test Data·공공 API 결과·RAG Document·Embedding·CMS 콘텐츠를 Migration에 넣지 않는다.

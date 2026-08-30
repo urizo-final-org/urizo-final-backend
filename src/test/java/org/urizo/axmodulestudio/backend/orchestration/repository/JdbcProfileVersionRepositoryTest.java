@@ -11,6 +11,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Modifier;
 import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Instant;
@@ -44,6 +45,11 @@ class JdbcProfileVersionRepositoryTest {
     private final Clock clock = Clock.fixed(Instant.parse("2026-08-30T00:00:00Z"), ZoneOffset.UTC);
     private final JdbcProfileVersionRepository repository =
             new JdbcProfileVersionRepository(jdbc, transactions, objectMapper, clock);
+
+    @Test
+    void remainsProxyableForRepositoryAdvice() {
+        assertThat(Modifier.isFinal(JdbcProfileVersionRepository.class.getModifiers())).isFalse();
+    }
 
     @BeforeEach
     void executeTransactionCallbacks() {

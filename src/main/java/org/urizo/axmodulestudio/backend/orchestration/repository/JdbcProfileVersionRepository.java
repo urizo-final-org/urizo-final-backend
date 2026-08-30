@@ -25,7 +25,7 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileVersionExce
 
 @Repository
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
-public final class JdbcProfileVersionRepository implements ProfileVersionRepository {
+public class JdbcProfileVersionRepository implements ProfileVersionRepository {
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;

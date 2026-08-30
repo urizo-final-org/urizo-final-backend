@@ -28,7 +28,7 @@ if (-not $DatabaseContainer) {
 }
 
 $snapshotPath = Join-Path $repositoryRoot `
-    'contracts\fixtures\orchestration\profile-version.snapshot.valid.json'
+    'contracts\fixtures\orchestration\llm-ops-coding-handler.snapshot.valid.json'
 $snapshotJson = [System.IO.File]::ReadAllText($snapshotPath)
 $snapshot = $snapshotJson | ConvertFrom-Json
 $profileVersionId = [string]$snapshot.profileVersionId

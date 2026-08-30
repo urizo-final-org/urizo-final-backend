@@ -24,6 +24,15 @@ public final class McpPlatformContract {
             Map.entry("revalidate_cms_preview", "cms"),
             Map.entry("apply_cms_preview", "cms"));
 
+    private static final Set<String> CODING_TOOL_NAMES = Set.of(
+            "read_file",
+            "search_code",
+            "read_diff",
+            "apply_patch",
+            "run_check",
+            "check_package_allowlist",
+            "scan_changed_files");
+
     private McpPlatformContract() {
     }
 
@@ -33,6 +42,10 @@ public final class McpPlatformContract {
 
     public static String packageFor(String toolName) {
         return ALLOWED_TOOL_PACKAGES.get(toolName);
+    }
+
+    public static Set<String> codingToolNames() {
+        return CODING_TOOL_NAMES;
     }
 
     public record Snapshot(String protocolVersion, String serverName, Set<String> exposedTools) {

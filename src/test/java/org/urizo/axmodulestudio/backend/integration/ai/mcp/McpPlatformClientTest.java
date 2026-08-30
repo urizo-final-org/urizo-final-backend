@@ -78,6 +78,49 @@ class McpPlatformClientTest {
     }
 
     @Test
+    void callsOnlyARegisteredCodingToolWithExactArguments() throws Exception {
+        FakeTransport transport = new FakeTransport(success(
+                "axms-mcp-1",
+                "{\"isError\":false,\"structuredContent\":{"
+                        + "\"path\":\"README.md\",\"content\":\"ok\"}}"));
+        JsonNode arguments = objectMapper.createObjectNode()
+                .put("workspace", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .put("expectedHead", "1111111111111111111111111111111111111111")
+                .put("path", "README.md");
+
+        JsonNode result = client(transport).callTool("read_file", arguments);
+
+        assertThat(result.path("structuredContent").path("content").asText()).isEqualTo("ok");
+        assertThat(transport.requests).hasSize(1);
+        assertThat(transport.requests.get(0).headers())
+                .containsEntry("Mcp-Method", "tools/call")
+                .containsEntry("Mcp-Name", "read_file");
+        JsonNode request = objectMapper.readTree(transport.requests.get(0).body());
+        assertThat(request.path("params").path("name").asText()).isEqualTo("read_file");
+        assertThat(request.path("params").path("arguments")).isEqualTo(arguments);
+    }
+
+    @Test
+    void rejectsUnknownToolsAndArgumentFieldsBeforeTransport() {
+        FakeTransport transport = new FakeTransport();
+        JsonNode safe = objectMapper.createObjectNode()
+                .put("workspace", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+                .put("expectedHead", "1111111111111111111111111111111111111111")
+                .put("path", "README.md");
+        assertThatThrownBy(() -> client(transport).callTool("arbitrary_shell", safe))
+                .isInstanceOf(McpPlatformException.class)
+                .hasMessage("MCP coding tool call contract was rejected.");
+
+        JsonNode injected = safe.deepCopy();
+        ((com.fasterxml.jackson.databind.node.ObjectNode) injected)
+                .put("command", "unregistered");
+        assertThatThrownBy(() -> client(transport).callTool("read_file", injected))
+                .isInstanceOf(McpPlatformException.class)
+                .hasMessage("MCP coding tool call contract was rejected.");
+        assertThat(transport.requests).isEmpty();
+    }
+
+    @Test
     void rejectsTheWrongServerOrProtocol() {
         FakeTransport wrongServer = new FakeTransport(
                 success("axms-mcp-1", discoveryResult().replace(McpPlatformContract.SERVER_NAME, "other-server")));

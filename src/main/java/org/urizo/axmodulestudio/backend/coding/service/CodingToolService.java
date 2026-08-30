@@ -12,26 +12,40 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
+import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingToolService {
 
-    private static final String READ_FILE_SCHEMA_DIGEST =
-            "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+    static final Map<String, String> CODING_TOOL_SCHEMA_DIGESTS = Map.of(
+            "read_file", "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
+            "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
+            "read_diff", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+            "apply_patch", "sha256:f6594e18aaedfb029106fa669c557027854ec5f86cce436fcec1723791743cd7",
+            "run_check", "sha256:9c8ff63f21a3414335f7f7788d00bdfb096480b37a1cee5e9084d2954439824a",
+            "check_package_allowlist", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
+            "scan_changed_files", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa");
+    private static final Pattern SHA256_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "messageType", "requestId", "toolCallId", "jobId",
             "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep",
@@ -49,16 +63,19 @@ public final class CodingToolService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final String fixtureContent;
+    private final ObjectProvider<McpPlatformClient> mcpClients;
 
     CodingToolService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions,
             ObjectMapper objectMapper,
-            Clock clock) throws IOException {
+            Clock clock,
+            ObjectProvider<McpPlatformClient> mcpClients) throws IOException {
         this.jdbc = jdbc;
         this.transactions = transactions;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.mcpClients = mcpClients;
         this.fixtureContent = new ClassPathResource("coding-fixture/README.md")
                 .getContentAsString(StandardCharsets.UTF_8);
     }
@@ -91,23 +108,38 @@ public final class CodingToolService {
                             parsed.jobId(), replay.traceId(), parsed.idempotencyKey(), replay.createdAt());
                 }
                 JobAuthority authority = requireAuthority(parsed.jobId());
-                validateAuthority(parsed, authority);
+                ToolBinding toolBinding = mcpClients.getIfAvailable() == null
+                        ? new ToolBinding(null, authority.baseSha(), null)
+                        : toolBinding(parsed.jobId(), authority.baseSha());
+                validateAuthority(parsed, authority, toolBinding);
                 UUID executionId = UUID.randomUUID();
                 Instant now = Instant.now(clock);
-                byte[] contentBytes = fixtureContent.getBytes(StandardCharsets.UTF_8);
+                ToolOutput output = execute(parsed, toolBinding);
+                byte[] contentBytes = output.content().getBytes(StandardCharsets.UTF_8);
+                if (contentBytes.length > 200_000) {
+                    Arrays.fill(contentBytes, (byte) 0);
+                    throw new CodingToolException(
+                            "TOOL_EXECUTION_FAILED",
+                            "The MCP coding tool result exceeds the approved result bound.",
+                            HttpStatus.BAD_GATEWAY);
+                }
                 String resultDigest = "sha256:" + java.util.HexFormat.of()
                         .formatHex(sha256Bytes(contentBytes));
                 jdbc.update("INSERT INTO app.coding_tool_execution "
                                 + "(execution_id, request_id, tool_call_id, job_id, trace_id, lease_id, "
                                 + "idempotency_key, request_digest, expected_state_version, tool_name, "
-                                + "requested_path, status, result_media_type, result_size_bytes, "
+                                + "requested_path, arguments_json, requested_paths, workspace_id, "
+                                + "candidate_sha, status, result_media_type, result_size_bytes, "
                                 + "result_digest, result_content, created_at, completed_at) "
-                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'read_file', 'README.md', "
-                                + "'SUCCEEDED', 'text/plain', ?, ?, ?, ?, ?)",
+                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?::jsonb, ?, ?, "
+                                + "'SUCCEEDED', ?, ?, ?, ?, ?, ?)",
                         executionId, parsed.requestId(), parsed.toolCallId(), parsed.jobId(),
                         parsed.traceId(), parsed.leaseId(), parsed.idempotencyKey(), requestDigest,
-                        parsed.expectedStateVersion(), contentBytes.length, resultDigest,
-                        fixtureContent, Timestamp.from(now), Timestamp.from(now));
+                        parsed.expectedStateVersion(), parsed.toolName(), parsed.requestedPaths().get(0),
+                        parsed.arguments().toString(), objectMapper.valueToTree(parsed.requestedPaths()).toString(),
+                        toolBinding.workspaceId(), toolBinding.expectedHead(), output.mediaType(),
+                        contentBytes.length, resultDigest,
+                        output.content(), Timestamp.from(now), Timestamp.from(now));
                 Arrays.fill(contentBytes, (byte) 0);
                 return accepted(executionId, parsed.requestId(), parsed.toolCallId(), parsed.jobId(),
                         parsed.traceId(), parsed.idempotencyKey(), now);
@@ -153,6 +185,41 @@ public final class CodingToolService {
         }
     }
 
+    StageAuthority stageAuthority(
+            String authorization, UUID jobId, int expectedStateVersion) {
+        byte[] digest = credentialDigest(authorization);
+        try {
+            StageAuthority authority = transactions.execute(status -> {
+                authenticate(digest);
+                JobAuthority job = requireAuthority(jobId);
+                Instant now = Instant.now(clock);
+                if (!"RUNNING".equals(job.status())
+                        || job.stateVersion() != expectedStateVersion
+                        || job.leaseId() == null
+                        || job.leaseExpiresAt() == null
+                        || !job.leaseExpiresAt().isAfter(now)
+                        || !job.expiresAt().isAfter(now)) {
+                    throw new CodingToolException(
+                            "JOB_STATE_CONFLICT",
+                            "The Coding Job is not authorized for stage execution.",
+                            HttpStatus.CONFLICT);
+                }
+                return new StageAuthority(
+                        job.traceId(), job.stateVersion(), job.leaseId(), job.actorId(),
+                        job.projectId(), job.repositoryId(), job.graphStep(), job.baseSha(),
+                        job.contextDigest(), job.policyHash(), job.promptVersion(),
+                        job.allowedCapabilities(), job.allowedNodes(), job.expiresAt());
+            });
+            if (authority == null) {
+                throw unavailable();
+            }
+            return authority;
+        }
+        finally {
+            Arrays.fill(digest, (byte) 0);
+        }
+    }
+
     private ParsedRequest parse(JsonNode request) {
         requireObjectFields(request, TOP_LEVEL_FIELDS, "tool request");
         if (!"1.0".equals(text(request, "schemaVersion"))
@@ -167,20 +234,16 @@ public final class CodingToolService {
         requireObjectFields(repository, REPOSITORY_FIELDS, "repository");
         requireObjectFields(approval, APPROVAL_FIELDS, "approval");
         requireObjectFields(tool, Set.of("name", "arguments"), "tool");
-        requireObjectFields(tool.path("arguments"), Set.of("path"), "tool arguments");
-        if (!READ_FILE_SCHEMA_DIGEST.equals(text(request, "argumentSchemaDigest"))) {
+        String toolName = text(tool, "name");
+        JsonNode arguments = tool.path("arguments");
+        validateToolArguments(toolName, arguments);
+        if (!Objects.equals(
+                CODING_TOOL_SCHEMA_DIGESTS.get(toolName),
+                text(request, "argumentSchemaDigest"))) {
             throw validation("Tool argument schema digest is invalid.");
         }
-        JsonNode requestedPaths = request.path("requestedPaths");
-        if (!requestedPaths.isArray() || requestedPaths.size() != 1
-                || !"README.md".equals(requestedPaths.get(0).asText())
-                || !"read_file".equals(text(tool, "name"))
-                || !"README.md".equals(text(tool.path("arguments"), "path"))) {
-            throw new CodingToolException(
-                    "PATH_POLICY_DENIED",
-                    "The local Tool Gateway permits read_file for README.md only.",
-                    HttpStatus.FORBIDDEN);
-        }
+        List<String> requestedPaths = requestedPaths(request.path("requestedPaths"));
+        validateRequestedPaths(toolName, arguments, requestedPaths);
         int expectedVersion = integer(request, "expectedStateVersion");
         if (expectedVersion < 1 || integer(request, "attempt") < 1) {
             throw validation("Tool request attempt or stateVersion is invalid.");
@@ -195,14 +258,142 @@ public final class CodingToolService {
                 text(repository, "candidateSha"), text(request, "contextDigest"),
                 text(request, "policyHash"), uuid(approval, "approvalId"),
                 text(approval, "scopeDigest"), Instant.parse(text(approval, "expiresAt")),
-                text(request, "jobState"));
+                text(request, "jobState"), toolName, arguments.deepCopy(), requestedPaths);
+    }
+
+    private ToolOutput execute(ParsedRequest request, ToolBinding binding) {
+        McpPlatformClient client = mcpClients.getIfAvailable();
+        if (client == null) {
+            if (!"read_file".equals(request.toolName())) {
+                throw unavailable();
+            }
+            return new ToolOutput("text/plain", fixtureContent);
+        }
+        ObjectNode arguments = objectMapper.createObjectNode();
+        arguments.put("workspace", binding.workspaceId().toString());
+        arguments.put("expectedHead", gitHash(binding.expectedHead()));
+        switch (request.toolName()) {
+            case "read_file" -> arguments.put("path", text(request.arguments(), "path"));
+            case "search_code" -> {
+                arguments.put("query", text(request.arguments(), "query"));
+                JsonNode roots = request.arguments().path("roots");
+                if (roots.isArray() && !roots.isEmpty()) {
+                    arguments.put("scope", roots.get(0).asText());
+                }
+            }
+            case "read_diff" -> { }
+            case "apply_patch" -> {
+                requireDiffDigest(binding);
+                arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
+                arguments.put("patch", text(request.arguments(), "patch"));
+            }
+            case "run_check" -> {
+                requireDiffDigest(binding);
+                arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
+                arguments.put("profile", text(request.arguments(), "checkId"));
+            }
+            case "check_package_allowlist", "scan_changed_files" -> {
+                requireDiffDigest(binding);
+                arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
+            }
+            default -> throw validation("Tool name is not registered.");
+        }
+        JsonNode result;
+        try {
+            result = client.callTool(request.toolName(), arguments);
+        }
+        catch (McpPlatformException failure) {
+            throw unavailable();
+        }
+        JsonNode structured = result.path("structuredContent");
+        if (result.path("isError").asBoolean() || !structured.isObject()) {
+            throw new CodingToolException(
+                    "TOOL_EXECUTION_FAILED",
+                    "The MCP coding tool returned an unsuccessful result.",
+                    HttpStatus.BAD_GATEWAY);
+        }
+        validateMcpResult(request, structured);
+        if ("read_file".equals(request.toolName())) {
+            return new ToolOutput("text/plain", structured.path("content").asText());
+        }
+        try {
+            return new ToolOutput("application/json", objectMapper.writeValueAsString(structured));
+        }
+        catch (IOException failure) {
+            throw unavailable();
+        }
+    }
+
+    private ToolBinding toolBinding(UUID jobId, String baseSha) {
+        List<ToolBinding> rows = jdbc.query("""
+                SELECT cpa.workspace_id,
+                       COALESCE((
+                           SELECT chr.candidate_sha
+                           FROM app.coding_handler_result chr
+                           WHERE chr.job_id = cpa.job_id
+                             AND chr.pipeline_attempt = cpa.pipeline_attempt
+                             AND chr.candidate_sha IS NOT NULL
+                           ORDER BY chr.recorded_at DESC, chr.result_id DESC
+                           LIMIT 1), ?) AS expected_head,
+                       (SELECT chr.diff_digest
+                        FROM app.coding_handler_result chr
+                        WHERE chr.job_id = cpa.job_id
+                          AND chr.pipeline_attempt = cpa.pipeline_attempt
+                          AND chr.diff_digest IS NOT NULL
+                        ORDER BY chr.recorded_at DESC, chr.result_id DESC
+                        LIMIT 1) AS expected_diff_digest
+                FROM app.coding_pipeline_attempt cpa
+                WHERE cpa.job_id = ? AND cpa.status = 'ACTIVE'
+                ORDER BY cpa.pipeline_attempt DESC
+                LIMIT 1
+                FOR SHARE
+                """, (rs, row) -> new ToolBinding(
+                        rs.getObject("workspace_id", UUID.class),
+                        rs.getString("expected_head"),
+                        rs.getString("expected_diff_digest")),
+                baseSha, jobId);
+        if (rows.size() != 1 || rows.get(0).workspaceId() == null) {
+            throw new CodingToolException(
+                    "TOOL_NOT_ALLOWED",
+                    "The Coding Job does not have an authoritative MCP workspace binding.",
+                    HttpStatus.FORBIDDEN);
+        }
+        ToolBinding binding = rows.get(0);
+        if (binding.expectedDiffDigest() != null) {
+            return binding;
+        }
+        List<String> toolResults = jdbc.query("""
+                SELECT result_content
+                FROM app.coding_tool_execution
+                WHERE job_id = ? AND status = 'SUCCEEDED'
+                  AND tool_name IN ('read_diff', 'apply_patch', 'run_check',
+                                    'check_package_allowlist', 'scan_changed_files')
+                ORDER BY completed_at DESC, execution_id DESC
+                LIMIT 10
+                """, (rs, row) -> rs.getString(1), jobId);
+        for (String content : toolResults) {
+            try {
+                JsonNode value = objectMapper.readTree(content);
+                String digest = value.hasNonNull("diffDigest")
+                        ? value.path("diffDigest").asText()
+                        : value.path("digest").asText();
+                if (SHA256_DIGEST.matcher(digest).matches()) {
+                    return new ToolBinding(
+                            binding.workspaceId(), binding.expectedHead(), digest);
+                }
+            }
+            catch (JsonProcessingException ignored) {
+                // Older read_file rows contain plain text and are not diff bindings.
+            }
+        }
+        return binding;
     }
 
     private JobAuthority requireAuthority(UUID jobId) {
         List<JobAuthority> rows = jdbc.query(
                 "SELECT trace_id, status, state_version, worker_lease_id, worker_lease_expires_at, "
                         + "actor_id, project_id, repository_id, graph_step, base_sha, context_digest, "
-                        + "policy_hash, allowed_capabilities, allowed_nodes, expires_at "
+                        + "policy_hash, prompt_version, allowed_capabilities, allowed_nodes, expires_at "
                         + "FROM app.coding_job WHERE job_id = ? "
                         + "AND authority_source = 'SPRING_CONTROL_PLANE' FOR SHARE",
                 (rs, row) -> new JobAuthority(
@@ -211,10 +402,10 @@ public final class CodingToolService {
                         rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toInstant(),
                         rs.getObject(6, UUID.class), rs.getObject(7, UUID.class),
                         rs.getObject(8, UUID.class), rs.getString(9), rs.getString(10),
-                        rs.getString(11), rs.getString(12),
-                        Set.of((String[]) rs.getArray(13).getArray()),
+                        rs.getString(11), rs.getString(12), rs.getString(13),
                         Set.of((String[]) rs.getArray(14).getArray()),
-                        rs.getTimestamp(15).toInstant()), jobId);
+                        Set.of((String[]) rs.getArray(15).getArray()),
+                        rs.getTimestamp(16).toInstant()), jobId);
         if (rows.isEmpty()) {
             throw new CodingToolException(
                     "JOB_NOT_FOUND", "Authoritative coding job not found.",
@@ -223,7 +414,8 @@ public final class CodingToolService {
         return rows.get(0);
     }
 
-    private void validateAuthority(ParsedRequest request, JobAuthority job) {
+    private void validateAuthority(
+            ParsedRequest request, JobAuthority job, ToolBinding toolBinding) {
         Instant now = Instant.now(clock);
         UUID expectedApproval = UUID.nameUUIDFromBytes(
                 (request.jobId() + ":approval").getBytes(StandardCharsets.UTF_8));
@@ -240,7 +432,7 @@ public final class CodingToolService {
                 && job.allowedNodes().contains(request.graphStep())
                 && job.allowedCapabilities().contains("TOOL_CALLING")
                 && job.baseSha().equals(request.baseSha())
-                && job.baseSha().equals(request.candidateSha())
+                && toolBinding.expectedHead().equals(request.candidateSha())
                 && job.contextDigest().equals(request.contextDigest())
                 && job.policyHash().equals(request.policyHash())
                 && "DEVELOPER".equals(request.role())
@@ -355,6 +547,178 @@ public final class CodingToolService {
         return value.intValue();
     }
 
+    private static List<String> requestedPaths(JsonNode node) {
+        if (!node.isArray() || node.isEmpty() || node.size() > 50) {
+            throw validation("requestedPaths must be a bounded non-empty array.");
+        }
+        List<String> values = new java.util.ArrayList<>();
+        for (JsonNode value : node) {
+            if (!value.isTextual()) {
+                throw validation("requestedPaths must contain relative paths.");
+            }
+            values.add(relativePath(value.asText(), "requestedPaths"));
+        }
+        if (values.size() != Set.copyOf(values).size()) {
+            throw validation("requestedPaths contains duplicates.");
+        }
+        return List.copyOf(values);
+    }
+
+    private static void validateToolArguments(String toolName, JsonNode arguments) {
+        switch (toolName) {
+            case "read_file" -> {
+                requireObjectFields(arguments, Set.of("path"), "tool arguments");
+                relativePath(text(arguments, "path"), "path");
+            }
+            case "search_code" -> {
+                Set<String> actual = objectFields(arguments, "tool arguments");
+                if (!actual.contains("query")
+                        || !Set.of("query", "roots", "maxResults").containsAll(actual)
+                        || text(arguments, "query").length() > 1_000) {
+                    throw validation("search_code arguments are invalid.");
+                }
+                if (arguments.has("roots")) {
+                    requestedPaths(arguments.path("roots"));
+                }
+                if (arguments.has("maxResults")) {
+                    int maximum = integer(arguments, "maxResults");
+                    if (maximum < 1 || maximum > 500) {
+                        throw validation("search_code maxResults is invalid.");
+                    }
+                }
+            }
+            case "read_diff", "check_package_allowlist", "scan_changed_files" ->
+                    requireObjectFields(arguments, Set.of(), "tool arguments");
+            case "apply_patch" -> {
+                requireObjectFields(arguments, Set.of("patch"), "tool arguments");
+                String patch = text(arguments, "patch");
+                if (patch.length() > 50_000 || !patch.startsWith("--- ")) {
+                    throw validation("apply_patch patch is invalid.");
+                }
+            }
+            case "run_check" -> {
+                requireObjectFields(arguments, Set.of("checkId"), "tool arguments");
+                if (!Set.of("git-diff-check", "python-syntax")
+                        .contains(text(arguments, "checkId"))) {
+                    throw new CodingToolException(
+                            "CHECK_PROFILE_NOT_ALLOWED",
+                            "The requested check profile is not registered.",
+                            HttpStatus.FORBIDDEN);
+                }
+            }
+            default -> throw validation("Tool name is not registered.");
+        }
+    }
+
+    private static void validateRequestedPaths(
+            String toolName, JsonNode arguments, List<String> requestedPaths) {
+        if ("read_file".equals(toolName)
+                && !requestedPaths.equals(List.of(text(arguments, "path")))) {
+            throw pathDenied();
+        }
+        if ("search_code".equals(toolName)) {
+            if (arguments.has("roots")
+                    && (arguments.path("roots").size() != 1
+                    || !requestedPaths.equals(requestedPaths(arguments.path("roots"))))) {
+                throw pathDenied();
+            }
+            if (!arguments.has("roots") && !requestedPaths.equals(List.of("."))) {
+                throw pathDenied();
+            }
+        }
+        if (!Set.of("read_file", "search_code").contains(toolName)
+                && !requestedPaths.equals(List.of("."))) {
+            throw pathDenied();
+        }
+    }
+
+    private static void validateMcpResult(ParsedRequest request, JsonNode result) {
+        switch (request.toolName()) {
+            case "read_file" -> {
+                if (!result.path("content").isTextual()
+                        || !request.requestedPaths().get(0).equals(result.path("path").asText())) {
+                    throw failedResult();
+                }
+            }
+            case "search_code" -> {
+                if (!result.path("query").isTextual() || !result.path("matches").isArray()
+                        || !result.path("truncated").isBoolean()
+                        || !result.path("scope").isTextual()
+                        || !result.path("scope").asText().equals(
+                                request.arguments().has("roots")
+                                        ? request.arguments().path("roots").get(0).asText()
+                                        : ".")) {
+                    throw failedResult();
+                }
+            }
+            case "read_diff" -> requireResultDigest(result, "digest");
+            case "apply_patch", "check_package_allowlist", "scan_changed_files" ->
+                    requireResultDigest(result, "diffDigest");
+            case "run_check" -> {
+                requireResultDigest(result, "detailsDigest");
+                if (!Set.of("PASSED", "FAILED").contains(result.path("status").asText())) {
+                    throw failedResult();
+                }
+            }
+            default -> throw failedResult();
+        }
+    }
+
+    private static void requireResultDigest(JsonNode result, String field) {
+        if (!result.path(field).isTextual()
+                || !SHA256_DIGEST.matcher(result.path(field).asText()).matches()) {
+            throw failedResult();
+        }
+    }
+
+    private static void requireDiffDigest(ToolBinding binding) {
+        if (binding.expectedDiffDigest() == null) {
+            throw new CodingToolException(
+                    "TOOL_RESULT_NOT_READY",
+                    "read_diff must establish the current diff digest first.",
+                    HttpStatus.CONFLICT);
+        }
+    }
+
+    private static Set<String> objectFields(JsonNode node, String label) {
+        if (!node.isObject()) {
+            throw validation(label + " must be an object.");
+        }
+        Set<String> actual = new HashSet<>();
+        node.fieldNames().forEachRemaining(actual::add);
+        return actual;
+    }
+
+    private static String relativePath(String value, String field) {
+        if (value.isBlank() || value.length() > 1_000 || value.startsWith("/")
+                || value.matches("^[A-Za-z]:.*") || value.contains("\\")
+                || value.contains(":") || value.matches(".*%[0-9A-Fa-f]{2}.*")
+                || Arrays.asList(value.split("/", -1)).contains("..")
+                || value.chars().anyMatch(character -> character < 0x20 || character == 0x7f)) {
+            throw pathDenied();
+        }
+        return value;
+    }
+
+    private static CodingToolException pathDenied() {
+        return new CodingToolException(
+                "PATH_POLICY_DENIED",
+                "The Coding tool request exceeds the approved workspace path scope.",
+                HttpStatus.FORBIDDEN);
+    }
+
+    private static CodingToolException failedResult() {
+        return new CodingToolException(
+                "TOOL_EXECUTION_FAILED",
+                "The MCP coding tool returned an invalid result.",
+                HttpStatus.BAD_GATEWAY);
+    }
+
+    private static String gitHash(String value) {
+        int separator = value.indexOf(':');
+        return separator < 0 ? value : value.substring(separator + 1);
+    }
+
     private static String version() { return CodingToolContract.SCHEMA_VERSION; }
     private static CodingToolException validation(String message) {
         return new CodingToolException("TOOL_ARGUMENTS_INVALID", message, HttpStatus.BAD_REQUEST);
@@ -377,12 +741,26 @@ public final class CodingToolService {
             Instant deadlineAt, UUID actorId, UUID projectId, String role,
             UUID repositoryId, String baseSha, String candidateSha,
             String contextDigest, String policyHash, UUID approvalId,
-            String approvalScopeDigest, Instant approvalExpiresAt, String jobState) { }
+            String approvalScopeDigest, Instant approvalExpiresAt, String jobState,
+            String toolName, JsonNode arguments, List<String> requestedPaths) { }
     private record JobAuthority(
             UUID traceId, String status, int stateVersion, UUID leaseId, Instant leaseExpiresAt,
             UUID actorId, UUID projectId, UUID repositoryId, String graphStep, String baseSha,
-            String contextDigest, String policyHash, Set<String> allowedCapabilities,
+            String contextDigest, String policyHash, String promptVersion,
+            Set<String> allowedCapabilities,
             Set<String> allowedNodes, Instant expiresAt) { }
+    record StageAuthority(
+            UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
+            UUID repositoryId, String graphStep, String baseSha, String contextDigest,
+            String policyHash, String promptVersion, Set<String> allowedCapabilities,
+            Set<String> allowedNodes, Instant expiresAt) {
+        StageAuthority {
+            allowedCapabilities = Set.copyOf(allowedCapabilities);
+            allowedNodes = Set.copyOf(allowedNodes);
+        }
+    }
+    private record ToolBinding(UUID workspaceId, String expectedHead, String expectedDiffDigest) { }
+    private record ToolOutput(String mediaType, String content) { }
     private record ExecutionRow(
             UUID executionId, UUID requestId, UUID toolCallId, UUID jobId, UUID traceId,
             String idempotencyKey, String mediaType, int sizeBytes, String digest,

@@ -1348,6 +1348,14 @@
       "validationLayer": "SCHEMA"
     },
     {
+      "id": "orchestration.llm-ops-coding-handler.snapshot.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/VersionedSnapshot",
+      "fixture": "orchestration/llm-ops-coding-handler.snapshot.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
       "id": "orchestration.profile-version.contract-validation-error.valid",
       "contract": "orchestration/profile-version.openapi.yaml",
       "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",

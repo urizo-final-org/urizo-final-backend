@@ -11,6 +11,20 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingWorkerContract;
 
 class CodingWorkerLeaseTest {
 
+    @Test
+    void terminatesPipelineAttemptOnlyWithAnAcceptedTerminalWorkerOutcome() {
+        assertThat(CodingWorkerService.terminalAttemptStatus(
+                "WAITING_APPROVAL", "WAITING_APPROVAL")).isNull();
+        assertThat(CodingWorkerService.terminalAttemptStatus(
+                "RETRYABLE_FAILURE", "PENDING")).isNull();
+        assertThat(CodingWorkerService.terminalAttemptStatus(
+                "COMPLETED", "COMPLETED")).isEqualTo("COMPLETED");
+        assertThat(CodingWorkerService.terminalAttemptStatus(
+                "PERMANENT_FAILURE", "FAILED")).isEqualTo("FAILED");
+        assertThat(CodingWorkerService.terminalAttemptStatus(
+                "RETRYABLE_FAILURE", "FAILED")).isEqualTo("FAILED");
+    }
+
     private static final Instant NOW = Instant.parse("2026-08-11T12:00:00Z");
 
     @Test

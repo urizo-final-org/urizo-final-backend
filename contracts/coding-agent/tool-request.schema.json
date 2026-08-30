@@ -115,13 +115,26 @@
             "roots": {
               "type": "array",
               "minItems": 1,
-              "maxItems": 50,
+              "maxItems": 1,
               "uniqueItems": true,
               "description": "When omitted, the effective roots are exactly requestedPaths.",
               "items": { "$ref": "#/$defs/RelativePath" }
             },
             "maxResults": { "type": "integer", "minimum": 1, "maximum": 500 }
           }
+        }
+      }
+    },
+    "ReadDiffTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "read_diff" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
         }
       }
     },
@@ -168,12 +181,41 @@
         }
       }
     },
+    "CheckPackageAllowlistTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "check_package_allowlist" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    },
+    "ScanChangedFilesTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "arguments"],
+      "properties": {
+        "name": { "type": "string", "const": "scan_changed_files" },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": false,
+          "maxProperties": 0
+        }
+      }
+    },
     "ToolCandidate": {
       "oneOf": [
         { "$ref": "#/$defs/ReadFileTool" },
         { "$ref": "#/$defs/SearchCodeTool" },
+        { "$ref": "#/$defs/ReadDiffTool" },
         { "$ref": "#/$defs/ApplyPatchTool" },
-        { "$ref": "#/$defs/RunCheckTool" }
+        { "$ref": "#/$defs/RunCheckTool" },
+        { "$ref": "#/$defs/CheckPackageAllowlistTool" },
+        { "$ref": "#/$defs/ScanChangedFilesTool" }
       ]
     },
     "ToolRequest": {

@@ -68,6 +68,7 @@ public final class CodingWorkerService {
                 ClaimSource source = claimSource(
                         job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId(),
                         approvalTransition);
+                PipelineBinding pipeline = latestPipelineBinding(jobId);
                 return new CodingWorkerContract.ClaimContextResponse(
                         version(),
                         claimEventId(jobId, source.stateVersion()),
@@ -79,9 +80,9 @@ public final class CodingWorkerService {
                         source.stateVersion(),
                         job.createdAt(),
                         profileVersionId,
-                        1,
+                        pipeline.pipelineAttempt(),
                         source.attempt(),
-                        null,
+                        pipeline.workspaceId(),
                         null,
                         new CodingWorkerContract.JobPayload(
                                 job.actorId(), job.projectId(), job.repositoryId(),
@@ -96,6 +97,24 @@ public final class CodingWorkerService {
         finally {
             Arrays.fill(credentialDigest, (byte) 0);
         }
+    }
+
+    private PipelineBinding latestPipelineBinding(UUID jobId) {
+        jdbc.update("""
+                INSERT INTO app.coding_pipeline_attempt (job_id, pipeline_attempt, status)
+                VALUES (?, 1, 'ACTIVE')
+                ON CONFLICT (job_id, pipeline_attempt) DO NOTHING
+                """, jobId);
+        List<PipelineBinding> rows = jdbc.query("""
+                SELECT pipeline_attempt, workspace_id
+                FROM app.coding_pipeline_attempt
+                WHERE job_id = ?
+                ORDER BY pipeline_attempt DESC
+                LIMIT 1
+                """, (rs, row) -> new PipelineBinding(
+                        rs.getInt("pipeline_attempt"),
+                        rs.getObject("workspace_id", UUID.class)), jobId);
+        return rows.isEmpty() ? new PipelineBinding(1, null) : rows.get(0);
     }
 
     public CodingWorkerContract.HeartbeatResponse heartbeat(
@@ -234,8 +253,32 @@ public final class CodingWorkerService {
             }
             default -> throw new IllegalArgumentException("Unsupported outcome.");
         }
+        String terminalAttemptStatus = terminalAttemptStatus(request.outcome(), status);
+        if (terminalAttemptStatus != null) {
+            updateActivePipelineAttempt(request.jobId(), terminalAttemptStatus, now);
+        }
         return new CodingWorkerContract.OutcomeResponse(
                 version(), request.jobId(), request.traceId(), nextVersion, status);
+    }
+
+    static String terminalAttemptStatus(String outcome, String resultingJobStatus) {
+        if ("COMPLETED".equals(outcome) && "COMPLETED".equals(resultingJobStatus)) {
+            return "COMPLETED";
+        }
+        if (("PERMANENT_FAILURE".equals(outcome)
+                || "RETRYABLE_FAILURE".equals(outcome))
+                && "FAILED".equals(resultingJobStatus)) {
+            return "FAILED";
+        }
+        return null;
+    }
+
+    private void updateActivePipelineAttempt(UUID jobId, String attemptStatus, Instant now) {
+        jdbc.update("""
+                UPDATE app.coding_pipeline_attempt
+                SET status = ?, finished_at = ?, updated_at = ?
+                WHERE job_id = ? AND status = 'ACTIVE'
+                """, attemptStatus, Timestamp.from(now), Timestamp.from(now), jobId);
     }
 
     private void updateOutcome(
@@ -629,6 +672,7 @@ public final class CodingWorkerService {
 
     private record StoredCommand(byte[] digest, String response) { }
     record ClaimSource(int stateVersion, int attempt) { }
+    private record PipelineBinding(int pipelineAttempt, UUID workspaceId) { }
     private record JobRow(
             UUID traceId, UUID profileVersionId, String status, int stateVersion,
             UUID actorId, UUID projectId, UUID repositoryId,

@@ -18,7 +18,9 @@ import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -40,6 +42,7 @@ class CodingModelTurnServiceTest {
     private static final String MODEL = "local-google-chat-model";
 
     private final ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+    private final ObjectMapper objectMapper = new ObjectMapper();
     private CodingModelTurnService service;
 
     @BeforeEach
@@ -53,6 +56,7 @@ class CodingModelTurnServiceTest {
         service = new CodingModelTurnService(
                 registry(List.of(google)),
                 gateway,
+                objectMapper,
                 Clock.fixed(NOW, ZoneOffset.UTC),
                 false);
     }
@@ -96,7 +100,7 @@ class CodingModelTurnServiceTest {
                 chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
                 chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
                 chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"), chat.messages(),
-                List.of(toolSchema()),
+                List.of(invalidToolSchema()),
                 chat.responseFormat(), chat.deadlineAt());
 
         assertThatThrownBy(() -> service.execute(toolRequest))
@@ -116,7 +120,8 @@ class CodingModelTurnServiceTest {
                 Duration.ofSeconds(30),
                 2);
         CodingModelTurnService localMockService = new CodingModelTurnService(
-                registry(List.of(google)), gateway, Clock.fixed(NOW, ZoneOffset.UTC), true);
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), true);
         CodingModelTurnContract.Request chat = chatRequest();
         CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
                 chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
@@ -141,9 +146,45 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
+    void parsesOneApprovedProviderToolCallFromTheStrictEnvelope() {
+        ProviderModelRegistration google = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService providerToolService = new CodingModelTurnService(
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        CodingModelTurnContract.Request chat = chatRequest();
+        CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
+                chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
+                chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"), chat.messages(),
+                List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+        when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_file\","
+                        + "\"arguments\":{\"path\":\"src/App.java\"}}]}",
+                8,
+                3,
+                Duration.ZERO));
+
+        CodingModelTurnContract.Response response = providerToolService.execute(toolRequest);
+
+        assertThat(response.finishReason()).isEqualTo("TOOL_CALLS");
+        assertThat(response.toolCalls()).singleElement().satisfies(call -> {
+            assertThat(call.name()).isEqualTo("read_file");
+            assertThat(call.arguments().path("path").asText()).isEqualTo("src/App.java");
+        });
+    }
+
+    @Test
     void failsClosedWhenNoConfiguredModelCanSatisfyChat() {
         CodingModelTurnService empty = new CodingModelTurnService(
-                registry(List.of()), gateway, Clock.fixed(NOW, ZoneOffset.UTC), false);
+                registry(List.of()), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
 
         assertThatThrownBy(() -> empty.execute(chatRequest()))
                 .isInstanceOfSatisfying(ProviderGatewayException.class,
@@ -208,5 +249,11 @@ class CodingModelTurnServiceTest {
                 .set("path", JsonNodeFactory.instance.objectNode().put("type", "string")));
         toolSchema.set("inputSchema", inputSchema);
         return toolSchema;
+    }
+
+    private static JsonNode invalidToolSchema() {
+        ObjectNode schema = (ObjectNode) toolSchema().deepCopy();
+        schema.put("name", "arbitrary_shell");
+        return schema;
     }
 }

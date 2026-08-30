@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.coding.dto;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -34,6 +35,14 @@ public final class CodingHandlerContract {
         PULL_REQUEST,
         DEPLOY_REQUEST
     }
+
+    private static final Map<String, ResultType> HANDLER_RESULTS = Map.of(
+            "coding.analyze", ResultType.ANALYSIS,
+            "coding.code", ResultType.CANDIDATE,
+            "coding.review", ResultType.REVIEW,
+            "coding.preview", ResultType.DIFF,
+            "coding.pr_request", ResultType.PULL_REQUEST,
+            "coding.deploy_request", ResultType.DEPLOY_REQUEST);
 
     public enum AttemptStatus {
         ACTIVE,
@@ -273,6 +282,60 @@ public final class CodingHandlerContract {
                     + ", pendingApprovals=REDACTED"
                     + ", decisions=REDACTED"
                     + ", createdAt=" + createdAt + ", finishedAt=" + finishedAt + "]";
+        }
+    }
+
+    public record StageExecutionRequest(
+            @NotBlank String schemaVersion,
+            @NotNull UUID traceId,
+            @Min(1) int expectedStateVersion,
+            @Min(1) int executionAttempt,
+            @NotBlank @Pattern(regexp = "^[a-z][a-z0-9._-]{0,119}$") String handlerKey,
+            @NotNull UUID resultId) {
+
+        public StageExecutionRequest {
+            requireVersion(schemaVersion);
+            if (!HANDLER_RESULTS.containsKey(handlerKey)) {
+                throw new IllegalArgumentException("handlerKey is not an AI04 stage handler.");
+            }
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record StageExecutionResponse(
+            String schemaVersion,
+            UUID resultId,
+            String handlerKey,
+            String resultPort,
+            UUID workspaceId,
+            String candidateSha,
+            String diffDigest,
+            String validationHash,
+            JsonNode payload) {
+
+        public StageExecutionResponse {
+            requireVersion(schemaVersion);
+            if (payload == null || !payload.isObject()) {
+                throw new IllegalArgumentException("payload must be an object.");
+            }
+            ResultType resultType = HANDLER_RESULTS.get(handlerKey);
+            if (resultType == null) {
+                throw new IllegalArgumentException("handlerKey is not an AI04 stage handler.");
+            }
+            requireRegisteredResult(handlerKey, resultType, resultPort);
+            if (resultType != ResultType.ANALYSIS && candidateSha == null) {
+                throw new IllegalArgumentException("candidateSha is required for this stage.");
+            }
+            if (resultType == ResultType.DIFF
+                    && (diffDigest == null || validationHash == null)) {
+                throw new IllegalArgumentException("DIFF stage binding is incomplete.");
+            }
+            if ((resultType == ResultType.PULL_REQUEST
+                    || resultType == ResultType.DEPLOY_REQUEST)
+                    && validationHash == null) {
+                throw new IllegalArgumentException(
+                        "Side-effect stage validationHash is required.");
+            }
         }
     }
 

@@ -3,12 +3,18 @@ package org.urizo.axmodulestudio.backend.coding.service;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -33,28 +39,36 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+    private static final Set<String> CODING_TOOL_NAMES = Set.of(
+            "read_file", "search_code", "read_diff", "apply_patch", "run_check",
+            "check_package_allowlist", "scan_changed_files");
 
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
+    private final ObjectMapper objectMapper;
     private final Clock clock;
     private final boolean localMockToolCandidateEnabled;
 
     public CodingModelTurnService(
             ProviderCapabilityRegistry capabilityRegistry,
             ProviderChatGatewayPort chatGateway,
+            ObjectMapper objectMapper,
             Clock clock,
             @Value("${ax.coding.model-turn-bridge.local-mock-tool-candidate-enabled:false}")
             boolean localMockToolCandidateEnabled) {
         this.capabilityRegistry = Objects.requireNonNull(capabilityRegistry, "capabilityRegistry is required");
         this.chatGateway = Objects.requireNonNull(chatGateway, "chatGateway is required");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.localMockToolCandidateEnabled = localMockToolCandidateEnabled;
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
         Objects.requireNonNull(request, "request is required");
-        boolean toolCandidateRequested = requireLocalChatSubset(request);
-        ProviderModelRegistration selected = capabilityRegistry.candidates(ModelUseCase.CHAT).stream()
+        ToolMode toolMode = requireSupportedSubset(request);
+        ModelUseCase useCase = toolMode == ToolMode.PROVIDER
+                ? ModelUseCase.TOOL_CALL : ModelUseCase.CHAT;
+        ProviderModelRegistration selected = capabilityRegistry.candidates(useCase).stream()
                 .findFirst()
                 .orElseThrow(() -> new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
@@ -62,7 +76,7 @@ public class CodingModelTurnService {
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),
-                normalizedPrompt(request.messages()),
+                normalizedPrompt(request, toolMode),
                 request.deadlineAt()));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
@@ -73,20 +87,23 @@ public class CodingModelTurnService {
                     "Model provider returned an invalid normalized response.");
         }
         int totalTokens = providerResponse.inputTokens() + providerResponse.outputTokens();
-        List<CodingModelTurnContract.ToolCall> toolCalls = toolCandidateRequested
+        ParsedAssistant parsed = toolMode == ToolMode.PROVIDER
+                ? parseProviderToolEnvelope(request, providerResponse.content())
+                : new ParsedAssistant(providerResponse.content(), List.of());
+        List<CodingModelTurnContract.ToolCall> toolCalls = toolMode == ToolMode.LOCAL_FIXTURE
                 ? List.of(new CodingModelTurnContract.ToolCall(
                         UUID.nameUUIDFromBytes((request.turnId() + ":" + LOCAL_TOOL_NAME)
                                 .getBytes(StandardCharsets.UTF_8)),
                         LOCAL_TOOL_NAME,
                         JsonNodeFactory.instance.objectNode().put("path", LOCAL_TOOL_PATH)))
-                : List.of();
+                : parsed.toolCalls();
         return new CodingModelTurnContract.Response(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 request.turnId(),
                 request.jobId(),
                 request.traceId(),
                 request.idempotencyKey(),
-                new CodingModelTurnContract.Assistant("assistant", providerResponse.content()),
+                new CodingModelTurnContract.Assistant("assistant", parsed.content()),
                 toolCalls,
                 CodingModelTurnContract.TextResponseFormat.text(),
                 new CodingModelTurnContract.SelectedModel(
@@ -97,11 +114,11 @@ public class CodingModelTurnService {
                         providerResponse.outputTokens(),
                         totalTokens),
                 providerResponse.latency().toMillis(),
-                toolCandidateRequested ? "TOOL_CALLS" : "STOP",
+                toolCalls.isEmpty() ? "STOP" : "TOOL_CALLS",
                 clock.instant());
     }
 
-    private boolean requireLocalChatSubset(CodingModelTurnContract.Request request) {
+    private ToolMode requireSupportedSubset(CodingModelTurnContract.Request request) {
         JsonNode responseFormat = request.responseFormat();
         boolean textFormat = responseFormat.isObject()
                 && responseFormat.size() == 1
@@ -112,12 +129,17 @@ public class CodingModelTurnService {
         boolean localToolCandidate = localMockToolCandidateEnabled
                 && capabilities.equals(CHAT_WITH_TOOLS)
                 && validLocalToolSchema(request.toolSchemas());
-        if ((!chatOnly && !localToolCandidate) || !textFormat) {
+        boolean providerToolCandidate = capabilities.equals(CHAT_WITH_TOOLS)
+                && validCodingToolSchemas(request.toolSchemas());
+        if ((!chatOnly && !localToolCandidate && !providerToolCandidate) || !textFormat) {
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
                     "The local Model Turn bridge cannot satisfy the requested capability set.");
         }
-        return localToolCandidate;
+        if (localToolCandidate) {
+            return ToolMode.LOCAL_FIXTURE;
+        }
+        return providerToolCandidate ? ToolMode.PROVIDER : ToolMode.NONE;
     }
 
     private static boolean validLocalToolSchema(List<JsonNode> toolSchemas) {
@@ -142,27 +164,140 @@ public class CodingModelTurnService {
                 && "string".equals(path.path("type").textValue());
     }
 
-    private static String normalizedPrompt(List<JsonNode> messages) {
-        StringBuilder prompt = new StringBuilder();
-        for (JsonNode message : messages) {
-            if (!message.isObject() || message.size() != 2
-                    || !message.path("role").isTextual()
-                    || !message.path("content").isTextual()) {
-                throw new ProviderGatewayException(
-                        ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
-                        "CHAT messages must contain exactly role and content.");
+    private static boolean validCodingToolSchemas(List<JsonNode> toolSchemas) {
+        if (toolSchemas.isEmpty()) {
+            return false;
+        }
+        Set<String> names = new HashSet<>();
+        for (JsonNode toolSchema : toolSchemas) {
+            String name = toolSchema.path("name").asText();
+            String expectedDigest = CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name);
+            if (!CODING_TOOL_NAMES.contains(name)
+                    || expectedDigest == null
+                    || !expectedDigest.equals(toolSchema.path("schemaDigest").asText())
+                    || !names.add(name)) {
+                return false;
             }
+        }
+        return true;
+    }
+
+    private String normalizedPrompt(CodingModelTurnContract.Request request, ToolMode toolMode) {
+        StringBuilder prompt = new StringBuilder();
+        for (JsonNode message : request.messages()) {
             String role = message.path("role").textValue();
-            String content = message.path("content").textValue();
-            if (!Set.of("system", "user", "assistant").contains(role)
-                    || content.isBlank() || content.length() > 200_000) {
-                throw new ProviderGatewayException(
-                        ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
-                        "CHAT message role or content is invalid.");
+            String content;
+            if ("tool".equals(role) || message.has("toolCalls")) {
+                try {
+                    content = objectMapper.writeValueAsString(message);
+                }
+                catch (JsonProcessingException failure) {
+                    throw invalidContract();
+                }
+            }
+            else {
+                content = message.path("content").textValue();
             }
             prompt.append('[').append(role).append("]\n").append(content).append("\n\n");
         }
+        if (toolMode == ToolMode.PROVIDER) {
+            try {
+                prompt.append("[system]\n")
+                        .append("Return exactly one JSON object with fields assistant and toolCalls. ")
+                        .append("assistant must be a string and toolCalls must contain zero or one ")
+                        .append("declared tool call with name and arguments. Do not add markdown.\n")
+                        .append("Declared tools: ")
+                        .append(objectMapper.writeValueAsString(request.toolSchemas()));
+            }
+            catch (JsonProcessingException failure) {
+                throw invalidContract();
+            }
+        }
         return prompt.toString().stripTrailing();
+    }
+
+    private ParsedAssistant parseProviderToolEnvelope(
+            CodingModelTurnContract.Request request, String content) {
+        try {
+            JsonNode envelope = objectMapper.readTree(content);
+            if (!envelope.isObject()
+                    || envelope.size() != 2
+                    || !envelope.path("assistant").isTextual()
+                    || !envelope.path("toolCalls").isArray()
+                    || envelope.path("toolCalls").size() > 1) {
+                throw new IllegalArgumentException();
+            }
+            Map<String, JsonNode> declared = new HashMap<>();
+            for (JsonNode schema : request.toolSchemas()) {
+                declared.put(schema.path("name").asText(), schema.path("inputSchema"));
+            }
+            List<CodingModelTurnContract.ToolCall> calls = new ArrayList<>();
+            for (JsonNode call : envelope.path("toolCalls")) {
+                if (!call.isObject() || call.size() != 2
+                        || !call.path("name").isTextual()
+                        || !call.path("arguments").isObject()) {
+                    throw new IllegalArgumentException();
+                }
+                String name = call.path("name").asText();
+                JsonNode schema = declared.get(name);
+                if (schema == null || !matchesInputSchema(call.path("arguments"), schema)) {
+                    throw new IllegalArgumentException();
+                }
+                byte[] identity = objectMapper.writeValueAsBytes(List.of(
+                        request.turnId().toString(), name, call.path("arguments")));
+                calls.add(new CodingModelTurnContract.ToolCall(
+                        UUID.nameUUIDFromBytes(identity), name,
+                        call.path("arguments").deepCopy()));
+            }
+            String assistant = envelope.path("assistant").asText();
+            if (assistant.isBlank() && calls.isEmpty()) {
+                throw new IllegalArgumentException();
+            }
+            return new ParsedAssistant(assistant, List.copyOf(calls));
+        }
+        catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                    "Model provider returned an invalid Coding tool envelope.");
+        }
+    }
+
+    private static boolean matchesInputSchema(JsonNode arguments, JsonNode schema) {
+        if (!schema.isObject()
+                || !"object".equals(schema.path("type").asText())
+                || !schema.path("additionalProperties").isBoolean()
+                || schema.path("additionalProperties").asBoolean()
+                || !schema.path("properties").isObject()
+                || !schema.path("required").isArray()) {
+            return false;
+        }
+        Set<String> actual = new HashSet<>();
+        arguments.fieldNames().forEachRemaining(actual::add);
+        Set<String> allowed = new HashSet<>();
+        schema.path("properties").fieldNames().forEachRemaining(allowed::add);
+        if (!allowed.containsAll(actual)) {
+            return false;
+        }
+        for (JsonNode required : schema.path("required")) {
+            if (!required.isTextual() || !actual.contains(required.asText())) {
+                return false;
+            }
+        }
+        for (String field : actual) {
+            JsonNode definition = schema.path("properties").path(field);
+            JsonNode value = arguments.path(field);
+            if (("string".equals(definition.path("type").asText()) && !value.isTextual())
+                    || ("integer".equals(definition.path("type").asText()) && !value.isInt())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static ProviderGatewayException invalidContract() {
+        return new ProviderGatewayException(
+                ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
+                "Coding Model Turn messages could not be normalized.");
     }
 
     private static String contractProvider(ModelProvider provider) {
@@ -172,4 +307,9 @@ public class CodingModelTurnService {
             case GOOGLE_GENAI, VERTEX_AI_GEMINI -> "GOOGLE";
         };
     }
+
+    private enum ToolMode { NONE, LOCAL_FIXTURE, PROVIDER }
+
+    private record ParsedAssistant(
+            String content, List<CodingModelTurnContract.ToolCall> toolCalls) { }
 }

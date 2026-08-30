@@ -52,6 +52,26 @@ class CodingHandlerContractTest {
     }
 
     @Test
+    void stageExecutionUsesOnlyExistingAi04HandlersAndResultPorts() {
+        UUID resultId = UUID.randomUUID();
+        CodingHandlerContract.StageExecutionRequest request =
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE_ID, 3, 1, "coding.code", resultId);
+        CodingHandlerContract.StageExecutionResponse response =
+                new CodingHandlerContract.StageExecutionResponse(
+                        "1.0", resultId, "coding.code", "completed",
+                        UUID.randomUUID(), CANDIDATE, DIGEST, null,
+                        JsonNodeFactory.instance.objectNode());
+
+        assertThat(request.handlerKey()).isEqualTo("coding.code");
+        assertThat(response.diffDigest()).isEqualTo(DIGEST);
+        assertThatThrownBy(() -> new CodingHandlerContract.StageExecutionRequest(
+                "1.0", TRACE_ID, 3, 1, "coding.dynamic", resultId))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("AI04");
+    }
+
+    @Test
     void redactsNaturalLanguageRequestsFromStringRepresentations() {
         CodingHandlerContract.InitializeRequest request =
                 new CodingHandlerContract.InitializeRequest(

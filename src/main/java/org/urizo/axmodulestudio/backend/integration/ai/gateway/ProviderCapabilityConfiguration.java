@@ -45,13 +45,13 @@ public class ProviderCapabilityConfiguration {
                 new ProviderModelRegistration(
                         ModelProvider.OPENAI,
                         Stage2ProviderModels.OPENAI_CHAT,
-                        Set.of(ModelCapability.CHAT),
+                        Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
                         Duration.ofSeconds(30),
                         2),
                 new ProviderModelRegistration(
                         ModelProvider.GOOGLE_GENAI,
                         Stage2ProviderModels.GOOGLE_GENAI_CHAT,
-                        Set.of(ModelCapability.CHAT),
+                        Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
                         Duration.ofSeconds(30),
                         2));
     }

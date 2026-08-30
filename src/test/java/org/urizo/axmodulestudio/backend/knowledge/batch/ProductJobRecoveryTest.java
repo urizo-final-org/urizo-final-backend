@@ -12,7 +12,9 @@ import static org.mockito.Mockito.when;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.UUID;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.batch.core.Job;
@@ -26,6 +28,20 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.config.ProductRuntimeProperties;
 
 class ProductJobRecoveryTest {
+
+    @Test
+    void productQueueAcceptsOnlyTheSingleJobIdField() throws Exception {
+        ObjectMapper objectMapper = new ObjectMapper();
+        UUID jobId = UUID.fromString("11111111-1111-4111-8111-111111111111");
+
+        assertThat(ProductJobWorker.queueJobId(
+                objectMapper, "{\"jobId\":\"" + jobId + "\"}"))
+                .isEqualTo(jobId);
+        assertThat(ProductJobWorker.queueJobId(
+                objectMapper,
+                "{\"schemaVersion\":\"1.0\",\"jobId\":\"" + jobId + "\"}"))
+                .isNull();
+    }
 
     @Test
     void recoversOnlyOwnedRunningJobsAndFencesExhaustedAttempts() {

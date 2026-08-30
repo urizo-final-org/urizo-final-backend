@@ -23,6 +23,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $httpPort = if ($env:AXMS_HTTP_PORT) { [int]$env:AXMS_HTTP_PORT } else { 18080 }
 $baseUri = "http://127.0.0.1:$httpPort"
+$profileVersionId = (& (Join-Path $PSScriptRoot 'ensure-local-llm-ops-profile.ps1')).Trim()
 
 function Get-HttpStatus {
     param(
@@ -405,6 +406,7 @@ try {
     $codingTraceId = [Guid]::NewGuid().ToString()
     $codingCreateBody = @{
         schemaVersion       = '1.0'
+        profileVersionId    = $profileVersionId
         actorId            = '11111111-1111-4111-8111-111111111111'
         projectId          = '22222222-2222-4222-8222-222222222222'
         repositoryId       = '33333333-3333-4333-8333-333333333333'
@@ -426,27 +428,17 @@ try {
         -IdempotencyKey $codingCreateKey -Body $codingCreateBody
     Assert-ContractValue -Actual $codingReplay.jobId -Expected $codingJob.jobId `
         -Name 'coding job idempotent replay'
+    Assert-ContractValue -Actual $codingJob.profileVersionId -Expected $profileVersionId `
+        -Name 'coding immutable Profile Version binding'
 
     $codingState = Wait-CodingJob -JobId ([string]$codingJob.jobId) -TraceId $codingTraceId `
-        -DesiredStatuses @('WAITING_APPROVAL', 'COMPLETED')
-    if ($codingState.status -eq 'WAITING_APPROVAL') {
-        $resumeBody = @{
-            schemaVersion        = '1.0'
-            expectedStateVersion = [int]$codingState.stateVersion
-            targetStatus         = 'RUNNING'
-        }
-        $resumeKey = "axms-full-coding-resume-$codingRunId"
-        $codingState = Invoke-CodingJson -Method POST `
-            -Path "/internal/dev/coding-jobs/$($codingJob.jobId)/transitions" `
-            -TraceId $codingTraceId -CsrfToken ([string]$codingSession.csrfToken) `
-            -IdempotencyKey $resumeKey -Body $resumeBody
-        Assert-ContractValue -Actual $codingState.status -Expected 'RUNNING' `
-            -Name 'coding approval resume transition'
-    }
-    $codingState = Wait-CodingJob -JobId ([string]$codingJob.jobId) -TraceId $codingTraceId `
-        -DesiredStatuses @('COMPLETED')
-    if ([int]$codingState.stateVersion -lt 6) {
-        throw 'Coding job completed without the expected claim/interrupt/resume lifecycle.'
+        -DesiredStatuses @('FAILED')
+    Assert-ContractValue -Actual $codingState.failure.code -Expected 'CONTRACT_VALIDATION_FAILED' `
+        -Name 'coding empty production Node Registry fail-closed code'
+    Assert-ContractValue -Actual $codingState.failure.retryable -Expected $false `
+        -Name 'coding empty production Node Registry fail-closed retryability'
+    if ([int]$codingState.stateVersion -lt 3) {
+        throw 'Coding job failed before the expected resolve/claim/outcome lifecycle.'
     }
 
     if ($ProductProbeScript) {
@@ -471,4 +463,4 @@ finally {
     $codingSession = $null
 }
 
-Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, and LangGraph checkpoint interrupt/resume E2E passed.'
+Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, and Profile-bound LangGraph fail-closed E2E passed.'

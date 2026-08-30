@@ -50,7 +50,7 @@ public final class TransactionalOutboxDispatcher {
             }
             ClaimedOutbox outbox = claimed.get();
             try {
-                redis.opsForList().leftPush(outbox.destination(), outbox.payload());
+                redis.opsForList().leftPush(outbox.destination(), queuePayload(outbox.jobId()));
                 markPublished(outbox);
             }
             catch (RedisConnectionFailureException | IllegalStateException failure) {
@@ -79,13 +79,13 @@ public final class TransactionalOutboxDispatcher {
         return transactions.execute(status -> {
             Instant now = Instant.now(clock);
             List<ClaimedOutbox> rows = jdbc.query(
-                    "SELECT outbox_id, destination, payload::text FROM app.transactional_outbox "
+                    "SELECT outbox_id, destination, aggregate_id FROM app.transactional_outbox "
                             + "WHERE available_at <= ? AND (status IN ('PENDING', 'FAILED') "
                             + "OR (status = 'PUBLISHING' AND lease_expires_at < ?)) "
                             + "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
                     (rs, row) -> new ClaimedOutbox(
                             rs.getObject(1, UUID.class), UUID.randomUUID(),
-                            rs.getString(2), rs.getString(3)),
+                            rs.getString(2), rs.getObject(3, UUID.class)),
                     Timestamp.from(now), Timestamp.from(now));
             if (rows.isEmpty()) {
                 return Optional.empty();
@@ -119,6 +119,10 @@ public final class TransactionalOutboxDispatcher {
                 outbox.outboxId(), outbox.leaseId()));
     }
 
+    static String queuePayload(UUID jobId) {
+        return "{\"jobId\":\"" + jobId + "\"}";
+    }
+
     private record ClaimedOutbox(
-            UUID outboxId, UUID leaseId, String destination, String payload) { }
+            UUID outboxId, UUID leaseId, String destination, UUID jobId) { }
 }

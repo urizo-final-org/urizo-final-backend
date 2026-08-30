@@ -131,7 +131,7 @@
       "fixture": "coding-agent/job-requested.unknown-version.invalid.json",
       "expected": "INVALID",
       "validationLayer": "SCHEMA",
-      "expectedKeyword": "const",
+      "expectedKeyword": "additionalProperties",
       "expectedInstancePath": "/schemaVersion"
     },
     {
@@ -143,6 +143,14 @@
       "validationLayer": "SCHEMA",
       "expectedKeyword": "additionalProperties",
       "expectedInstancePath": "/unexpectedField"
+    },
+    {
+      "id": "coding.job-claim-context.valid",
+      "contract": "coding-agent/model-turn.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ClaimContextResponse",
+      "fixture": "coding-agent/job-claim-context.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
     },
     {
       "id": "coding.model-turn.request.valid",

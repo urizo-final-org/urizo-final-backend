@@ -2039,6 +2039,9 @@ def validate_error_status_maps(
         model_path.resolve(): {
             "ContractError": "error-code.schema.json#/$defs/PreContextErrorEnvelope",
             "AuthenticationError": "error-code.schema.json#/$defs/PreContextErrorEnvelope",
+            "ClaimContextNotFound": "error-code.schema.json#/$defs/PreContextErrorEnvelope",
+            "ClaimContextConflict": "error-code.schema.json#/$defs/PreContextErrorEnvelope",
+            "ResolutionUnavailable": "error-code.schema.json#/$defs/PreContextErrorEnvelope",
             "AuthorizationError": "error-code.schema.json#/$defs/ErrorEnvelope",
             "JobNotFound": "error-code.schema.json#/$defs/JobScopedErrorEnvelope",
             "StateConflict": "error-code.schema.json#/$defs/JobScopedErrorEnvelope",

@@ -28,7 +28,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycleRepository {
 
     private static final String JOB_COLUMNS = """
-            job_id, trace_id, actor_id, project_id, repository_id, graph_step,
+            job_id, trace_id, profile_version_id, actor_id, project_id, repository_id, graph_step,
             status, state_version, prompt_version, allowed_capabilities, allowed_nodes,
             expires_at, created_at, started_at, updated_at, finished_at,
             failure_code, failure_retryable
@@ -64,12 +64,14 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                 return decodeResponse(replay.responseJson());
             }
 
+            requireActiveLlmOpsProfile(request.profileVersionId());
             Instant now = databaseInstant();
             UUID jobId = UUID.randomUUID();
             CodingJobLifecycleContract.JobResponse response = new CodingJobLifecycleContract.JobResponse(
                     CodingJobLifecycleContract.SCHEMA_VERSION,
                     jobId,
                     traceId,
+                    request.profileVersionId(),
                     request.actorId(),
                     request.projectId(),
                     request.repositoryId(),
@@ -151,6 +153,7 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                     CodingJobLifecycleContract.SCHEMA_VERSION,
                     current.jobId(),
                     current.traceId(),
+                    current.profileVersionId(),
                     current.actorId(),
                     current.projectId(),
                     current.repositoryId(),
@@ -241,9 +244,9 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                         job_id, trace_id, status, state_version, context_digest,
                         prompt_version, allowed_capabilities, allowed_nodes, expires_at,
                         created_at, updated_at, authority_source, actor_id, project_id,
-                        repository_id, graph_step, base_sha, policy_hash
+                        repository_id, graph_step, base_sha, policy_hash, profile_version_id
                     ) VALUES (?, ?, 'PENDING', 1, ?, ?, ?, ?, ?, ?, ?,
-                              'SPRING_CONTROL_PLANE', ?, ?, ?, ?, ?, ?)
+                              'SPRING_CONTROL_PLANE', ?, ?, ?, ?, ?, ?, ?)
                     """);
             int index = 1;
             statement.setObject(index++, response.jobId());
@@ -262,7 +265,8 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
             statement.setObject(index++, response.repositoryId());
             statement.setString(index++, response.graphStep());
             statement.setString(index++, request.baseSha());
-            statement.setString(index, request.policyHash());
+            statement.setString(index++, request.policyHash());
+            statement.setObject(index, response.profileVersionId());
             return statement;
         });
         if (updated != 1) {
@@ -358,6 +362,7 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                 CodingJobLifecycleContract.SCHEMA_VERSION,
                 resultSet.getObject("job_id", UUID.class),
                 resultSet.getObject("trace_id", UUID.class),
+                resultSet.getObject("profile_version_id", UUID.class),
                 resultSet.getObject("actor_id", UUID.class),
                 resultSet.getObject("project_id", UUID.class),
                 resultSet.getObject("repository_id", UUID.class),
@@ -373,6 +378,28 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                 instant(resultSet, "updated_at"),
                 instant(resultSet, "finished_at"),
                 failure);
+    }
+
+    private void requireActiveLlmOpsProfile(UUID profileVersionId) {
+        List<ProfileState> rows = jdbcTemplate.query(
+                "SELECT profile_key, status FROM app.ai_profile_version "
+                        + "WHERE profile_version_id = ?",
+                (resultSet, rowNumber) -> new ProfileState(
+                        resultSet.getString("profile_key"), resultSet.getString("status")),
+                profileVersionId);
+        if (rows.isEmpty()) {
+            throw new CodingJobLifecycleException(
+                    "PROFILE_VERSION_NOT_FOUND",
+                    "The requested AI Profile Version was not found.",
+                    HttpStatus.NOT_FOUND);
+        }
+        ProfileState profile = rows.get(0);
+        if (!"LLM_OPS".equals(profile.profileKey()) || !"ACTIVE".equals(profile.status())) {
+            throw new CodingJobLifecycleException(
+                    "PROFILE_VERSION_NOT_ACTIVE",
+                    "An ACTIVE LLM_OPS Profile Version is required.",
+                    HttpStatus.CONFLICT);
+        }
     }
 
     private static List<String> strings(Array sqlArray) throws SQLException {
@@ -401,5 +428,8 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
     }
 
     private record CommandReplay(UUID jobId, byte[] requestDigest, String responseJson) {
+    }
+
+    private record ProfileState(String profileKey, String status) {
     }
 }

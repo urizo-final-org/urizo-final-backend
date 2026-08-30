@@ -103,6 +103,17 @@ public final class DeterministicConnectorFixture {
      * <p>절단 매칭은 어간이 일반명사로 붕괴할 수 있는 알려진 비용이 있어(예: "스시거제는"→"스시"),
      * 몇 글자를 깎아 매칭됐는지 INFO 로그로 남겨 추적 가능하게 한다.
      */
+    /** 필터·문장 추출이 공유하는 질의 토큰화 — 분리 정규식·소문자화·2자 이상 규칙의 단일 출처. */
+    public static List<String> groundingTokens(String query) {
+        List<String> tokens = new ArrayList<>();
+        for (String token : query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1)) {
+            if (token.length() >= 2) {
+                tokens.add(token);
+            }
+        }
+        return tokens;
+    }
+
     public static boolean hasGroundingOverlap(String query, String content) {
         String normalizedContent = content.toLowerCase(Locale.ROOT);
         for (String token : query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1)) {

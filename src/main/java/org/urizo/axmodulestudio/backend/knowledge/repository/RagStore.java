@@ -6,6 +6,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -21,6 +24,15 @@ import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
 @Repository
 @Profile("local-full")
 public class RagStore {
+
+    /** citations 노출 수. retrieval K(기본 10)와는 별개의 표시 결정이다. */
+    private static final int CITATION_LIMIT = 3;
+
+    /**
+     * citations 표시용 score 하한 — 꼬리 절단 전용. 정답/오답 판별 장치가 아니며
+     * (D3 실측 역전: 비정답 0.6143 > 정답 0.5943), 거절 조건으로도 쓰지 않는다.
+     */
+    private static final double CITATION_SCORE_FLOOR = 0.52;
 
     private final JdbcTemplate jdbc;
     private final Clock clock;
@@ -122,16 +134,88 @@ public class RagStore {
                     "REFUSED", "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.",
                     List.of(), active.versionId(), now);
         }
-        GroundingRow first = grounded.get(0);
-        List<ProductApiContract.Citation> citations = grounded.stream()
+        // 노출 3건 + score 하한 0.52. 이 하한은 정답/오답 판별 장치가 아니라 꼬리 노이즈
+        // 절단 전용이다 — 실측에서 비정답(0.6143)이 정답(0.5943)보다 높은 역전이 확인돼
+        // 전역 하한으로는 정밀도를 얻을 수 없다. 이 값을 올려 정밀도를 노리지 말 것.
+        // 거절(REFUSED)은 위의 필터 전원 탈락일 때만이며, 하한은 거절 조건이 아니다.
+        List<GroundingRow> displayed = grounded.stream()
+                .limit(CITATION_LIMIT)
+                .filter(row -> row.score() >= CITATION_SCORE_FLOOR)
+                .toList();
+        // 하한이 상위 3건을 전부 잘라내는 경우는 이론상만 존재한다(실측 1위 score 최저 0.59).
+        // 그때도 REFUSED로 바꾸지 않고 최상위 근거로 답변만 구성한다.
+        List<GroundingRow> answerSource = displayed.isEmpty()
+                ? grounded.subList(0, 1) : displayed;
+        List<ProductApiContract.Citation> citations = displayed.stream()
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
                         excerpt(row.content()), row.score()))
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
-                "ANSWERED", "활성 지식의 근거에 따르면 " + first.content(),
+                "ANSWERED", composeAnswer(request.query(), answerSource),
                 citations, active.versionId(), now);
+    }
+
+    /**
+     * 강등형 답변(D5 확정): LLM 없이, 근거 문서에서 질의 토큰이 포함된 문장을 그대로 뽑아
+     * 구성한다. 문장 매칭은 W3 접미절단 로직(hasGroundingOverlap)을 토큰 단위로 재사용한다.
+     *
+     * <p>1위 문서에서 매칭 문장 최대 2개를 뽑고, 하나뿐이면 2위 문서의 최고 매칭 문장을
+     * 보탠다. 매칭 문장이 없으면 1위 문서의 첫 문장으로 폴백한다. 답변의 각 줄은 근거
+     * 문서 본문에 실제로 존재하는 문자열이다(생성·요약 없음).
+     */
+    private static String composeAnswer(String query, List<GroundingRow> rows) {
+        List<String> tokens = DeterministicConnectorFixture.groundingTokens(query);
+        List<String> sentences = new ArrayList<>();
+        List<String> primary = matchingSegments(tokens, rows.get(0).content());
+        if (primary.isEmpty()) {
+            List<String> all = segments(rows.get(0).content());
+            if (!all.isEmpty()) {
+                sentences.add(all.get(0));
+            }
+        }
+        else {
+            sentences.addAll(primary.subList(0, Math.min(2, primary.size())));
+        }
+        if (sentences.size() < 2 && rows.size() > 1) {
+            List<String> secondary = matchingSegments(tokens, rows.get(1).content());
+            if (!secondary.isEmpty()) {
+                sentences.add(secondary.get(0));
+            }
+        }
+        return String.join("\n", sentences);
+    }
+
+    /** 매칭 토큰 수 내림차순, 동률이면 본문 등장 순. 매칭된 문장만 반환한다. */
+    private static List<String> matchingSegments(List<String> tokens, String content) {
+        record Scored(int count, int position, String text) {
+        }
+        List<String> all = segments(content);
+        List<Scored> scored = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            String segment = all.get(i);
+            int count = 0;
+            for (String token : tokens) {
+                if (DeterministicConnectorFixture.hasGroundingOverlap(token, segment)) {
+                    count++;
+                }
+            }
+            if (count > 0) {
+                scored.add(new Scored(count, i, segment));
+            }
+        }
+        scored.sort(Comparator.comparingInt(Scored::count).reversed()
+                .thenComparingInt(Scored::position));
+        return scored.stream().map(Scored::text).toList();
+    }
+
+    /** 줄바꿈·문장부호 경계로 나누고, "[분류]" 같은 필드 라벨 줄은 제외한다. */
+    private static List<String> segments(String content) {
+        return Arrays.stream(content.split("(?<=[.!?])\\s+|\\R+"))
+                .map(String::trim)
+                .filter(segment -> !segment.isEmpty() && !segment.startsWith("["))
+                .toList();
     }
 
     private ProductApiContract.ChatbotResponse chatbot(ResultSet rs, UUID traceId)

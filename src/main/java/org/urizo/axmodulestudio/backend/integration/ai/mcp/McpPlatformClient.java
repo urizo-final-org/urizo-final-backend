@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -15,6 +16,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 public final class McpPlatformClient {
+
+    private static final Pattern WORKSPACE = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$");
+    private static final Pattern GIT_HEAD = Pattern.compile("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+    private static final Pattern DIFF_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");
 
     private static final String SERVER_INFO_META_KEY = "io.modelcontextprotocol/serverInfo";
     private static final String PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion";
@@ -54,13 +59,77 @@ public final class McpPlatformClient {
                 exposedTools);
     }
 
+    public JsonNode callTool(String toolName, JsonNode arguments) {
+        if (!McpPlatformContract.codingToolNames().contains(toolName)
+                || arguments == null
+                || !arguments.isObject()) {
+            throw new McpPlatformException("MCP coding tool call contract was rejected.");
+        }
+        validateCodingArguments(toolName, arguments);
+        JsonNode result = invoke("tools/call", toolName, arguments);
+        if (!result.path("isError").isBoolean()
+                || !result.path("structuredContent").isObject()) {
+            throw new McpPlatformException("MCP coding tool result contract was rejected.");
+        }
+        return result;
+    }
+
+    private static void validateCodingArguments(String toolName, JsonNode arguments) {
+        Set<String> required = switch (toolName) {
+            case "read_file" -> Set.of("workspace", "expectedHead", "path");
+            case "search_code" -> Set.of("workspace", "expectedHead", "query");
+            case "read_diff" -> Set.of("workspace", "expectedHead");
+            case "apply_patch" -> Set.of(
+                    "workspace", "expectedHead", "expectedDiffDigest", "patch");
+            case "run_check" -> Set.of(
+                    "workspace", "expectedHead", "expectedDiffDigest", "profile");
+            case "check_package_allowlist", "scan_changed_files" -> Set.of(
+                    "workspace", "expectedHead", "expectedDiffDigest");
+            default -> throw new McpPlatformException(
+                    "MCP coding tool call contract was rejected.");
+        };
+        Set<String> allowed = "search_code".equals(toolName)
+                ? Set.of("workspace", "expectedHead", "query", "scope")
+                : required;
+        Set<String> actual = new HashSet<>();
+        arguments.fieldNames().forEachRemaining(actual::add);
+        if (!actual.containsAll(required) || !allowed.containsAll(actual)
+                || !matches(arguments, "workspace", WORKSPACE)
+                || !matches(arguments, "expectedHead", GIT_HEAD)
+                || (required.contains("expectedDiffDigest")
+                    && !matches(arguments, "expectedDiffDigest", DIFF_DIGEST))) {
+            throw new McpPlatformException("MCP coding tool call contract was rejected.");
+        }
+        for (String field : actual) {
+            if (!Set.of("workspace", "expectedHead", "expectedDiffDigest").contains(field)
+                    && (!arguments.path(field).isTextual()
+                        || arguments.path(field).asText().isBlank())) {
+                throw new McpPlatformException("MCP coding tool call contract was rejected.");
+            }
+        }
+    }
+
+    private static boolean matches(JsonNode arguments, String field, Pattern pattern) {
+        return arguments.path(field).isTextual()
+                && pattern.matcher(arguments.path(field).asText()).matches();
+    }
+
     private JsonNode invoke(String method) {
+        return invoke(method, null, null);
+    }
+
+    private JsonNode invoke(String method, String toolName, JsonNode arguments) {
         String requestId = "axms-mcp-" + requestSequence.incrementAndGet();
         ObjectNode request = objectMapper.createObjectNode();
         request.put("jsonrpc", "2.0");
         request.put("id", requestId);
         request.put("method", method);
-        ObjectNode metadata = request.putObject("params").putObject("_meta");
+        ObjectNode params = request.putObject("params");
+        if (toolName != null) {
+            params.put("name", toolName);
+            params.set("arguments", arguments.deepCopy());
+        }
+        ObjectNode metadata = params.putObject("_meta");
         metadata.put(PROTOCOL_VERSION_META_KEY, McpPlatformContract.PROTOCOL_VERSION);
         metadata.putObject(CLIENT_INFO_META_KEY)
                 .put("name", McpPlatformContract.CLIENT_NAME)
@@ -73,6 +142,9 @@ public final class McpPlatformClient {
         headers.put("Accept", "application/json, text/event-stream");
         headers.put("MCP-Protocol-Version", McpPlatformContract.PROTOCOL_VERSION);
         headers.put("Mcp-Method", method);
+        if (toolName != null) {
+            headers.put("Mcp-Name", toolName);
+        }
 
         McpHttpTransport.Response response;
         try {

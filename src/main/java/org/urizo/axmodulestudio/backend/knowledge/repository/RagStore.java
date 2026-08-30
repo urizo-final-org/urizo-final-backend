@@ -16,6 +16,7 @@ import org.springframework.stereotype.Repository;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.exception.ProductApiException;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
+import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
 
 @Repository
 @Profile("local-full")
@@ -25,16 +26,19 @@ public class RagStore {
     private final Clock clock;
     private final ProjectStore projects;
     private final KnowledgeStore knowledge;
+    private final EmbeddingClient embeddings;
 
     RagStore(
             JdbcTemplate productJdbcTemplate,
             Clock clock,
             ProjectStore projects,
-            KnowledgeStore knowledge) {
+            KnowledgeStore knowledge,
+            EmbeddingClient embeddings) {
         this.jdbc = productJdbcTemplate;
         this.clock = clock;
         this.projects = projects;
         this.knowledge = knowledge;
+        this.embeddings = embeddings;
     }
 
     public ProductApiContract.ChatbotResponse createChatbot(
@@ -90,6 +94,8 @@ public class RagStore {
                     "ACTIVE_KNOWLEDGE_REQUIRED", "The chatbot has no active knowledge version.");
         }
         int topK = request.topK() == null ? 3 : request.topK();
+        // 질의 임베딩은 HTTP 호출이므로 한 번만 계산해 정렬과 점수 계산에 함께 쓴다.
+        String queryVector = embeddings.queryVector(request.query());
         List<GroundingRow> rows = jdbc.query(
                 "SELECT sd.external_document_id, sd.title, sd.source_url, dc.content, "
                         + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score "
@@ -100,8 +106,7 @@ public class RagStore {
                 (rs, row) -> new GroundingRow(
                         rs.getString(1), rs.getString(2), URI.create(rs.getString(3)),
                         rs.getString(4), rs.getDouble(5)),
-                DeterministicConnectorFixture.vector(request.query()), active.versionId(),
-                DeterministicConnectorFixture.vector(request.query()), topK);
+                queryVector, active.versionId(), queryVector, topK);
         List<GroundingRow> grounded = rows.stream()
                 .filter(row -> DeterministicConnectorFixture.hasGroundingOverlap(
                         request.query(), row.content()))

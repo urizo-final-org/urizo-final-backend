@@ -1,0 +1,301 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "AX Module Studio Profile Version Read Contract",
+    "version": "1.0.0",
+    "description": "Private Spring-to-Orchestrator contract for reading one immutable active Versioned Snapshot. The success body is the raw snapshot consumed by the Orchestrator loader, without a transport wrapper."
+  },
+  "servers": [
+    {
+      "url": "http://spring-app:8080",
+      "description": "Private runtime network only"
+    }
+  ],
+  "paths": {
+    "/internal/ai/profile-versions/{profileVersionId}": {
+      "get": {
+        "operationId": "getActiveProfileVersionSnapshot",
+        "summary": "Read one immutable active Versioned Snapshot",
+        "security": [{ "serviceCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/ProfileVersionIdPath" }],
+        "responses": {
+          "200": {
+            "description": "Raw immutable Versioned Snapshot",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VersionedSnapshot" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractValidationError" },
+          "401": { "$ref": "#/components/responses/AuthenticationError" },
+          "404": { "$ref": "#/components/responses/ProfileVersionNotFound" },
+          "409": { "$ref": "#/components/responses/ProfileVersionNotActive" },
+          "503": { "$ref": "#/components/responses/InternalTransientError" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "serviceCredential": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "rotating-opaque-service-credential",
+        "description": "A rotating service credential. Its value never appears in a payload, fixture, trace, or error."
+      }
+    },
+    "parameters": {
+      "ProfileVersionIdPath": {
+        "name": "profileVersionId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      }
+    },
+    "headers": {
+      "BearerChallenge": {
+        "required": true,
+        "schema": { "type": "string", "const": "Bearer" }
+      }
+    },
+    "responses": {
+      "ContractValidationError": {
+        "description": "The Profile Version identifier is not a valid UUID",
+        "x-error-codes": ["CONTRACT_VALIDATION_FAILED"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ProfileVersionErrorEnvelope" }
+          }
+        }
+      },
+      "AuthenticationError": {
+        "description": "Service authentication failed before profile context was established",
+        "x-error-codes": ["SERVICE_AUTHENTICATION_FAILED"],
+        "headers": {
+          "WWW-Authenticate": { "$ref": "#/components/headers/BearerChallenge" }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ProfileVersionErrorEnvelope" }
+          }
+        }
+      },
+      "ProfileVersionNotFound": {
+        "description": "No Profile Version exists for the supplied identifier",
+        "x-error-codes": ["PROFILE_VERSION_NOT_FOUND"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ProfileVersionErrorEnvelope" }
+          }
+        }
+      },
+      "ProfileVersionNotActive": {
+        "description": "The Profile Version exists but is not ACTIVE",
+        "x-error-codes": ["PROFILE_VERSION_NOT_ACTIVE"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ProfileVersionErrorEnvelope" }
+          }
+        }
+      },
+      "InternalTransientError": {
+        "description": "The authoritative Profile Version store is temporarily unavailable",
+        "x-error-codes": ["INTERNAL_TRANSIENT_ERROR"],
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/ProfileVersionErrorEnvelope" }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "SchemaVersion": { "type": "string", "const": "1.0" },
+      "ContractVersion": { "type": "string", "const": "1.0" },
+      "Uuid": { "type": "string", "format": "uuid" },
+      "NodeId": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+      },
+      "HandlerKey": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
+      },
+      "ResultPort": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+      },
+      "JsonValue": {
+        "anyOf": [
+          { "type": "null" },
+          { "type": "boolean" },
+          { "type": "number" },
+          { "type": "string" },
+          { "$ref": "#/components/schemas/JsonObject" },
+          { "$ref": "#/components/schemas/JsonArray" }
+        ]
+      },
+      "JsonObject": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/components/schemas/JsonValue" },
+        "not": {
+          "anyOf": [
+            { "type": "object", "additionalProperties": {}, "required": ["jobId"] },
+            { "type": "object", "additionalProperties": {}, "required": ["pipelineAttempt"] },
+            { "type": "object", "additionalProperties": {}, "required": ["executionAttempt"] },
+            { "type": "object", "additionalProperties": {}, "required": ["stateVersion"] },
+            { "type": "object", "additionalProperties": {}, "required": ["workspaceId"] },
+            { "type": "object", "additionalProperties": {}, "required": ["toolCallId"] },
+            { "type": "object", "additionalProperties": {}, "required": ["traceId"] }
+          ]
+        }
+      },
+      "JsonArray": {
+        "type": "array",
+        "items": { "$ref": "#/components/schemas/JsonValue" }
+      },
+      "SnapshotNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "type", "handlerKey", "resultPorts", "config"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/NodeId" },
+          "type": {
+            "type": "string",
+            "enum": ["start", "agent", "tool", "approval", "check", "guardrail", "end"]
+          },
+          "handlerKey": { "$ref": "#/components/schemas/HandlerKey" },
+          "resultPorts": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/ResultPort" }
+          },
+          "config": { "$ref": "#/components/schemas/JsonObject" }
+        }
+      },
+      "SnapshotEdge": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "resultPort", "to"],
+        "properties": {
+          "from": { "$ref": "#/components/schemas/NodeId" },
+          "resultPort": { "$ref": "#/components/schemas/ResultPort" },
+          "to": { "$ref": "#/components/schemas/NodeId" }
+        }
+      },
+      "SnapshotLoopLimit": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["from", "resultPort", "to", "maxIterations"],
+        "properties": {
+          "from": { "$ref": "#/components/schemas/NodeId" },
+          "resultPort": { "$ref": "#/components/schemas/ResultPort" },
+          "to": { "$ref": "#/components/schemas/NodeId" },
+          "maxIterations": { "type": "integer", "minimum": 1 }
+        }
+      },
+      "SnapshotConfig": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxNodes", "maxAttempts", "loopLimits"],
+        "properties": {
+          "maxNodes": { "type": "integer", "minimum": 1 },
+          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "loopLimits": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/SnapshotLoopLimit" }
+          }
+        }
+      },
+      "ModelBindings": {
+        "type": "object",
+        "additionalProperties": { "$ref": "#/components/schemas/JsonObject" }
+      },
+      "VersionedSnapshot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["contractVersion", "profileVersionId", "profileKey", "profileVersion", "nodes", "edges", "config", "modelBindings", "toolPolicy", "guardrailProfileKey"],
+        "properties": {
+          "contractVersion": { "$ref": "#/components/schemas/ContractVersion" },
+          "profileVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "profileKey": { "type": "string", "enum": ["LLM_OPS", "NATURAL_CMS"] },
+          "profileVersion": { "type": "integer", "minimum": 1 },
+          "nodes": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "$ref": "#/components/schemas/SnapshotNode" }
+          },
+          "edges": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SnapshotEdge" }
+          },
+          "config": { "$ref": "#/components/schemas/SnapshotConfig" },
+          "modelBindings": { "$ref": "#/components/schemas/ModelBindings" },
+          "toolPolicy": { "$ref": "#/components/schemas/JsonObject" },
+          "guardrailProfileKey": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[a-z][a-z0-9_.:-]{0,127}$"
+          }
+        }
+      },
+      "ProfileVersionError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable", "executionState"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": ["CONTRACT_VALIDATION_FAILED", "PROFILE_VERSION_NOT_FOUND", "PROFILE_VERSION_NOT_ACTIVE", "SERVICE_AUTHENTICATION_FAILED", "INTERNAL_TRANSIENT_ERROR"]
+          },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "retryable": { "type": "boolean" },
+          "retryAfterMs": { "type": "integer", "minimum": 1, "maximum": 3600000 },
+          "executionState": { "type": "string", "const": "NOT_STARTED" }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": { "code": { "const": "INTERNAL_TRANSIENT_ERROR" } },
+              "required": ["code"]
+            },
+            "then": {
+              "properties": { "retryable": { "const": true } },
+              "required": ["retryAfterMs"]
+            },
+            "else": {
+              "properties": { "retryable": { "const": false } },
+              "not": { "required": ["retryAfterMs"] }
+            }
+          }
+        ]
+      },
+      "ProfileVersionErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "not": {
+          "anyOf": [
+            { "type": "object", "additionalProperties": {}, "required": ["jobId"] },
+            { "type": "object", "additionalProperties": {}, "required": ["idempotencyKey"] }
+          ]
+        },
+        "required": ["schemaVersion", "requestId", "traceId", "error"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "requestId": { "$ref": "#/components/schemas/Uuid" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "error": { "$ref": "#/components/schemas/ProfileVersionError" }
+        }
+      }
+    }
+  }
+}

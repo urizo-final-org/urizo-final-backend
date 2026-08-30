@@ -14,8 +14,10 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -39,6 +41,15 @@ public class CodingWorkerController {
 
     public CodingWorkerController(CodingWorkerService service) {
         this.service = service;
+    }
+
+    @GetMapping("/claim-context")
+    CodingWorkerContract.ClaimContextResponse claimContext(
+            @PathVariable UUID jobId,
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
+            HttpServletRequest request) {
+        request.setAttribute(ERROR_JOB_ID, jobId);
+        return service.claimContext(authorization, jobId);
     }
 
     @PostMapping("/claim")
@@ -88,6 +99,7 @@ public class CodingWorkerController {
     @ExceptionHandler({
             HttpMessageNotReadableException.class,
             MethodArgumentNotValidException.class,
+            MethodArgumentTypeMismatchException.class,
             IllegalArgumentException.class
     })
     ResponseEntity<Object> validationFailure(

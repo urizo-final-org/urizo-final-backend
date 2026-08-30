@@ -52,6 +52,8 @@ $activeCredentialCount = (& $docker exec $databaseContainer psql `
 if ($LASTEXITCODE -ne 0 -or $activeCredentialCount -ne '1') {
     throw 'Exactly one active local coding service credential is required.'
 }
+$profileVersionId = (& (Join-Path $PSScriptRoot 'ensure-local-llm-ops-profile.ps1') `
+    -DatabaseContainer $databaseContainer).Trim()
 
 if (-not $env:JAVA_HOME) {
     $knownJdk = 'C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'
@@ -153,6 +155,7 @@ try {
     $createHeaders['Idempotency-Key'] = "local.smoke.create.$([Guid]::NewGuid())"
     $createBody = @{
         schemaVersion = '1.0'
+        profileVersionId = $profileVersionId
         actorId = [Guid]::NewGuid().ToString()
         projectId = [Guid]::NewGuid().ToString()
         repositoryId = [Guid]::NewGuid().ToString()

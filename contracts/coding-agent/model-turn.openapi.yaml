@@ -13,6 +13,29 @@
     }
   ],
   "paths": {
+    "/internal/coding/worker/jobs/{jobId}/claim-context": {
+      "get": {
+        "operationId": "resolveCodingJobClaimContext",
+        "summary": "Resolve one DB-authoritative coding claim context from a queued jobId",
+        "security": [{ "serviceCredential": [] }],
+        "parameters": [{ "$ref": "#/components/parameters/JobIdPath" }],
+        "responses": {
+          "200": {
+            "description": "Stable claim input and immutable Profile Version binding",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ClaimContextResponse" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ContractError" },
+          "401": { "$ref": "#/components/responses/AuthenticationError" },
+          "404": { "$ref": "#/components/responses/ClaimContextNotFound" },
+          "409": { "$ref": "#/components/responses/ClaimContextConflict" },
+          "503": { "$ref": "#/components/responses/ResolutionUnavailable" }
+        }
+      }
+    },
     "/internal/coding/model-turns": {
       "post": {
         "operationId": "createCodingModelTurn",
@@ -155,6 +178,12 @@
       }
     },
     "parameters": {
+      "JobIdPath": {
+        "name": "jobId",
+        "in": "path",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Uuid" }
+      },
       "ExecutionIdPath": {
         "name": "executionId",
         "in": "path",
@@ -180,6 +209,21 @@
         "headers": {
           "WWW-Authenticate": { "$ref": "#/components/headers/BearerChallenge" }
         },
+        "content": { "application/json": { "schema": { "$ref": "error-code.schema.json#/$defs/PreContextErrorEnvelope" } } }
+      },
+      "ClaimContextNotFound": {
+        "description": "The queued identifier does not resolve to an authoritative coding job",
+        "x-error-codes": ["JOB_NOT_FOUND"],
+        "content": { "application/json": { "schema": { "$ref": "error-code.schema.json#/$defs/PreContextErrorEnvelope" } } }
+      },
+      "ClaimContextConflict": {
+        "description": "The job cannot reconstruct a trustworthy claim context",
+        "x-error-codes": ["JOB_STATE_VERSION_CONFLICT"],
+        "content": { "application/json": { "schema": { "$ref": "error-code.schema.json#/$defs/PreContextErrorEnvelope" } } }
+      },
+      "ResolutionUnavailable": {
+        "description": "The authoritative claim-context store is temporarily unavailable",
+        "x-error-codes": ["INTERNAL_TRANSIENT_ERROR"],
         "content": { "application/json": { "schema": { "$ref": "error-code.schema.json#/$defs/PreContextErrorEnvelope" } } }
       },
       "AuthorizationError": {
@@ -266,6 +310,47 @@
       "Sha256Digest": {
         "type": "string",
         "pattern": "^sha256:[0-9a-f]{64}$"
+      },
+      "GitObjectId": {
+        "type": "string",
+        "pattern": "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$"
+      },
+      "ClaimContextResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["schemaVersion", "eventId", "eventType", "jobId", "traceId", "idempotencyKey", "attempt", "expectedStateVersion", "occurredAt", "profileVersionId", "pipelineAttempt", "executionAttempt", "workspaceId", "toolCallId", "payload"],
+        "properties": {
+          "schemaVersion": { "$ref": "#/components/schemas/SchemaVersion" },
+          "eventId": { "$ref": "#/components/schemas/Uuid" },
+          "eventType": { "type": "string", "const": "CODING_JOB_REQUESTED" },
+          "jobId": { "$ref": "#/components/schemas/Uuid" },
+          "traceId": { "$ref": "#/components/schemas/Uuid" },
+          "idempotencyKey": { "$ref": "#/components/schemas/IdempotencyKey" },
+          "attempt": { "type": "integer", "minimum": 1 },
+          "expectedStateVersion": { "type": "integer", "minimum": 1 },
+          "occurredAt": { "type": "string", "format": "date-time" },
+          "profileVersionId": { "$ref": "#/components/schemas/Uuid" },
+          "pipelineAttempt": { "type": "integer", "minimum": 1 },
+          "executionAttempt": { "type": "integer", "minimum": 1 },
+          "workspaceId": { "type": ["string", "null"], "format": "uuid" },
+          "toolCallId": { "type": ["string", "null"], "format": "uuid" },
+          "payload": { "$ref": "#/components/schemas/ClaimJobPayload" }
+        }
+      },
+      "ClaimJobPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["actorId", "projectId", "repositoryId", "graphStep", "baseSha", "contextDigest", "policyHash", "expiresAt"],
+        "properties": {
+          "actorId": { "$ref": "#/components/schemas/Uuid" },
+          "projectId": { "$ref": "#/components/schemas/Uuid" },
+          "repositoryId": { "$ref": "#/components/schemas/Uuid" },
+          "graphStep": { "type": "string", "minLength": 1, "maxLength": 120, "pattern": "^[a-z][a-z0-9_-]*$" },
+          "baseSha": { "$ref": "#/components/schemas/GitObjectId" },
+          "contextDigest": { "$ref": "#/components/schemas/Sha256Digest" },
+          "policyHash": { "$ref": "#/components/schemas/Sha256Digest" },
+          "expiresAt": { "type": "string", "format": "date-time" }
+        }
       },
       "Capability": {
         "type": "string",

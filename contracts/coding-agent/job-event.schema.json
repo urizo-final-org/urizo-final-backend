@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://schemas.ax-module-studio.local/coding-agent/1.0/job-event.schema.json",
   "title": "AX Module Studio coding job events",
-  "description": "Strict at-least-once event payloads. eventId deduplicates delivery; idempotencyKey deduplicates a logical side effect.",
+  "description": "Strict at-least-once events. The coding queue reference carries only jobId; Spring owns all execution context.",
   "oneOf": [
     { "$ref": "#/$defs/CodingJobRequested" },
     { "$ref": "#/$defs/ToolExecutionCompleted" },
@@ -28,38 +28,9 @@
     "CodingJobRequested": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schemaVersion", "eventId", "eventType", "jobId", "traceId", "idempotencyKey", "attempt", "expectedStateVersion", "occurredAt", "payload"],
+      "required": ["jobId"],
       "properties": {
-        "schemaVersion": { "$ref": "#/$defs/SchemaVersion" },
-        "eventId": { "$ref": "#/$defs/Uuid" },
-        "eventType": { "type": "string", "const": "CODING_JOB_REQUESTED" },
-        "jobId": { "$ref": "#/$defs/Uuid" },
-        "traceId": { "$ref": "#/$defs/Uuid" },
-        "idempotencyKey": { "$ref": "#/$defs/IdempotencyKey" },
-        "attempt": { "type": "integer", "minimum": 1 },
-        "expectedStateVersion": { "type": "integer", "minimum": 1 },
-        "occurredAt": { "type": "string", "format": "date-time" },
-        "payload": { "$ref": "#/$defs/CodingJobRequestedPayload" }
-      }
-    },
-    "CodingJobRequestedPayload": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["actorId", "projectId", "repositoryId", "graphStep", "baseSha", "contextDigest", "policyHash", "expiresAt"],
-      "properties": {
-        "actorId": { "$ref": "#/$defs/Uuid" },
-        "projectId": { "$ref": "#/$defs/Uuid" },
-        "repositoryId": { "$ref": "#/$defs/Uuid" },
-        "graphStep": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 120,
-          "pattern": "^[a-z][a-z0-9_-]*$"
-        },
-        "baseSha": { "$ref": "#/$defs/GitObjectId" },
-        "contextDigest": { "$ref": "#/$defs/Sha256Digest" },
-        "policyHash": { "$ref": "#/$defs/Sha256Digest" },
-        "expiresAt": { "type": "string", "format": "date-time" }
+        "jobId": { "$ref": "#/$defs/Uuid" }
       }
     },
     "ToolExecutionCompleted": {

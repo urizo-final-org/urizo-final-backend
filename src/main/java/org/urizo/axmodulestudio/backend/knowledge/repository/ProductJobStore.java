@@ -16,7 +16,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -72,7 +71,7 @@ public class ProductJobStore {
                 new ProductApiContract.ResourceRef(
                         "CONNECTOR_VERSION", request.connectorVersionId(), config.configDigest()));
         insertProductJob(jobId, traceId, config.projectId(), "CONNECTOR_SYNC", refs, now);
-        insertProductOutbox(jobId, traceId, "CONNECTOR_SYNC", 1);
+        insertProductOutbox(jobId, 1);
         return accepted(
                 traceId, jobId, "CONNECTOR_SYNC", now, null,
                 request.connectorVersionId(), null);
@@ -128,7 +127,7 @@ public class ProductJobStore {
                         + "VALUES (?, ?, ?, ?, ?, ?, 'BUILD_REQUESTED', ?, ?)",
                 knowledgeVersionId, knowledgeBaseId, request.connectorVersionId(), jobId,
                 nextVersion, blankToNull(request.label()), digest, Timestamp.from(now));
-        insertProductOutbox(jobId, traceId, "KNOWLEDGE_BUILD", 1);
+        insertProductOutbox(jobId, 1);
         return accepted(
                 traceId, jobId, "KNOWLEDGE_BUILD", now,
                 knowledgeVersionId, request.connectorVersionId(), digest);
@@ -178,7 +177,7 @@ public class ProductJobStore {
                         + "failure_message = NULL, failure_retryable = NULL, started_at = NULL, "
                         + "finished_at = NULL, updated_at = ? WHERE job_id = ?",
                 Timestamp.from(now), Timestamp.from(now), jobId);
-        insertProductOutbox(jobId, traceId, row.jobType(), row.stateVersion() + 1);
+        insertProductOutbox(jobId, row.stateVersion() + 1);
         return getJob(jobId, traceId);
     }
 
@@ -208,15 +207,8 @@ public class ProductJobStore {
                 Timestamp.from(now), Timestamp.from(now), Timestamp.from(now));
     }
 
-    private void insertProductOutbox(UUID jobId, UUID traceId, String jobType, int attempt) {
+    private void insertProductOutbox(UUID jobId, int attempt) {
         UUID outboxId = UUID.randomUUID();
-        ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("schemaVersion", version());
-        payload.put("eventId", outboxId.toString());
-        payload.put("jobId", jobId.toString());
-        payload.put("traceId", traceId.toString());
-        payload.put("jobType", jobType);
-        payload.put("attempt", attempt);
         jdbc.update(
                 "INSERT INTO app.transactional_outbox "
                         + "(outbox_id, aggregate_type, aggregate_id, event_type, event_key, "
@@ -224,7 +216,7 @@ public class ProductJobStore {
                         + "VALUES (?, 'PRODUCT_JOB', ?, 'PRODUCT_JOB_REQUESTED', ?, ?, ?::jsonb, "
                         + "'PENDING', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
                 outboxId, jobId, jobId + ":requested:v" + attempt,
-                properties.productQueue(), encode(payload));
+                properties.productQueue(), "{\"jobId\":\"" + jobId + "\"}");
     }
 
     private ProductApiContract.JobAcceptedResponse accepted(

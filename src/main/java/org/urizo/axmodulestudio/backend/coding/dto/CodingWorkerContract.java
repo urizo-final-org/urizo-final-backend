@@ -65,11 +65,39 @@ public final class CodingWorkerContract {
             String schemaVersion,
             UUID jobId,
             UUID traceId,
+            UUID profileVersionId,
             UUID leaseId,
             Instant leaseExpiresAt,
             int stateVersion,
             boolean resume,
             @Valid Snapshot snapshot) { }
+
+    public record ClaimContextResponse(
+            String schemaVersion,
+            UUID eventId,
+            String eventType,
+            UUID jobId,
+            UUID traceId,
+            String idempotencyKey,
+            int attempt,
+            int expectedStateVersion,
+            Instant occurredAt,
+            UUID profileVersionId,
+            int pipelineAttempt,
+            int executionAttempt,
+            UUID workspaceId,
+            UUID toolCallId,
+            @Valid JobPayload payload) { }
+
+    public record JobPayload(
+            UUID actorId,
+            UUID projectId,
+            UUID repositoryId,
+            String graphStep,
+            String baseSha,
+            String contextDigest,
+            String policyHash,
+            Instant expiresAt) { }
 
     public record Snapshot(
             Actor actor,

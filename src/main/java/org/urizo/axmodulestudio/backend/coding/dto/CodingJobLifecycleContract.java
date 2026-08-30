@@ -42,6 +42,7 @@ public final class CodingJobLifecycleContract {
 
     public record CreateRequest(
             @NotBlank String schemaVersion,
+            @NotNull UUID profileVersionId,
             @NotNull UUID actorId,
             @NotNull UUID projectId,
             @NotNull UUID repositoryId,
@@ -107,6 +108,7 @@ public final class CodingJobLifecycleContract {
             String schemaVersion,
             UUID jobId,
             UUID traceId,
+            UUID profileVersionId,
             UUID actorId,
             UUID projectId,
             UUID repositoryId,

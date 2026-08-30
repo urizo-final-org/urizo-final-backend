@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "error": {
+    "code": "CONTRACT_VALIDATION_FAILED",
+    "message": "profileVersionId must be a valid UUID.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

@@ -38,6 +38,8 @@ class CodingJobLifecycleControllerTest {
 
     private static final UUID TRACE_ID = UUID.fromString("55555555-5555-4555-8555-555555555555");
     private static final UUID JOB_ID = UUID.fromString("44444444-4444-4444-8444-444444444444");
+    private static final UUID PROFILE_VERSION_ID =
+            UUID.fromString("77777777-7777-4777-8777-777777777777");
 
     @Autowired
     private MockMvc mockMvc;
@@ -72,6 +74,7 @@ class CodingJobLifecycleControllerTest {
                 .andExpect(header().string("Location", "/internal/dev/coding-jobs/" + JOB_ID))
                 .andExpect(jsonPath("$.status").value("PENDING"))
                 .andExpect(jsonPath("$.stateVersion").value(1))
+                .andExpect(jsonPath("$.profileVersionId").value(PROFILE_VERSION_ID.toString()))
                 .andExpect(jsonPath("$.contextDigest").doesNotExist())
                 .andExpect(jsonPath("$.policyHash").doesNotExist());
 
@@ -121,6 +124,7 @@ class CodingJobLifecycleControllerTest {
     private static CodingJobLifecycleContract.CreateRequest createRequest() {
         return new CodingJobLifecycleContract.CreateRequest(
                 "1.0",
+                PROFILE_VERSION_ID,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
                 UUID.fromString("22222222-2222-4222-8222-222222222222"),
                 UUID.fromString("33333333-3333-4333-8333-333333333333"),
@@ -143,6 +147,7 @@ class CodingJobLifecycleControllerTest {
                 "1.0",
                 JOB_ID,
                 TRACE_ID,
+                request.profileVersionId(),
                 request.actorId(),
                 request.projectId(),
                 request.repositoryId(),

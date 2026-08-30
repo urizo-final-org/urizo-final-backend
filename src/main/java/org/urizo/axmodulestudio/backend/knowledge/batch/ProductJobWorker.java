@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.knowledge.batch;
 
 import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.batch.core.BatchStatus;
@@ -78,10 +79,9 @@ final class ProductJobWorker {
         try {
             String payload = redis.opsForList().rightPop(properties.productQueue());
             if (payload != null) {
-                JsonNode event = objectMapper.readTree(payload);
-                if ("1.0".equals(event.path("schemaVersion").asText())
-                        && event.path("jobId").isTextual()) {
-                    return UUID.fromString(event.path("jobId").asText());
+                UUID jobId = queueJobId(objectMapper, payload);
+                if (jobId != null) {
+                    return jobId;
                 }
             }
         }
@@ -92,5 +92,13 @@ final class ProductJobWorker {
             return batchService.staleQueuedJob();
         }
         return batchService.staleQueuedJob();
+    }
+
+    static UUID queueJobId(ObjectMapper objectMapper, String payload)
+            throws JsonProcessingException {
+        JsonNode event = objectMapper.readTree(payload);
+        return event.isObject() && event.size() == 1 && event.path("jobId").isTextual()
+                ? UUID.fromString(event.path("jobId").asText())
+                : null;
     }
 }

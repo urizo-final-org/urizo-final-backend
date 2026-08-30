@@ -188,6 +188,7 @@ WHERE namespace.nspname = 'app'
       'ck_coding_job_authoritative_timestamps',
       'ck_coding_job_authoritative_failure',
       'ck_coding_job_authoritative_time_order',
+      'fk_coding_job_profile_version',
       'coding_model_turn_idempotency_turn_id_key',
       'fk_coding_model_turn_idempotency_job',
       'ck_coding_model_turn_completion',
@@ -200,7 +201,7 @@ WHERE namespace.nspname = 'app'
       'ck_coding_job_lifecycle_command_response'
   )
 '@
-    if ($criticalConstraintCount -ne '20') {
+    if ($criticalConstraintCount -ne '21') {
         throw "Critical coding constraints are incomplete for $databaseName."
     }
 
@@ -220,10 +221,11 @@ WHERE table_schema = 'app'
       'started_at',
       'finished_at',
       'failure_code',
-      'failure_retryable'
+      'failure_retryable',
+      'profile_version_id'
   )
 '@
-    if ($lifecycleColumnCount -ne '11') {
+    if ($lifecycleColumnCount -ne '12') {
         throw "Authoritative coding lifecycle columns are incomplete for $databaseName."
     }
 
@@ -364,6 +366,66 @@ SELECT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'SELECT')
         throw "AI Profile Version access is not read-only for ai_workspace in $databaseName."
     }
 
+    $jobProfileBindingContract = Get-AdminScalar $databaseName @'
+SELECT EXISTS (
+           SELECT 1
+           FROM pg_trigger AS trigger_record
+           JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
+           JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+           JOIN pg_proc AS function_record ON function_record.oid = trigger_record.tgfoid
+           WHERE namespace.nspname = 'app'
+             AND relation.relname = 'coding_job'
+             AND trigger_record.tgname = 'trg_coding_job_profile_binding'
+             AND function_record.prosecdef
+             AND NOT trigger_record.tgisinternal)
+       AND EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = 'app'
+             AND table_name = 'coding_job_status'
+             AND column_name = 'profile_version_id')
+       AND EXISTS (
+           SELECT 1
+           FROM information_schema.columns
+           WHERE table_schema = 'app'
+             AND table_name = 'coding_worker_lease_status'
+             AND column_name = 'profile_version_id')
+       AND has_table_privilege('dev_operator', 'app.ai_profile_version', 'SELECT')
+'@
+    if ($jobProfileBindingContract -ne 't') {
+        throw "Coding Job Profile Version binding is incomplete for $databaseName."
+    }
+
+    Invoke-AdminSql $databaseName @'
+INSERT INTO app.coding_job (
+    job_id, trace_id, status, state_version, context_digest, prompt_version,
+    allowed_capabilities, allowed_nodes, expires_at, authority_source,
+    actor_id, project_id, repository_id, graph_step, base_sha, policy_hash
+) VALUES (
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaab',
+    'PENDING',
+    1,
+    'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'legacy-fixture-v1',
+    ARRAY['CHAT']::VARCHAR(32)[],
+    ARRAY['plan']::VARCHAR(120)[],
+    CURRENT_TIMESTAMP + INTERVAL '1 hour',
+    'LEGACY_FIXTURE',
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    'plan',
+    'sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+);
+'@
+    Assert-AdminSqlFails $databaseName 'Unbound Coding Job authority promotion' @'
+UPDATE app.coding_job
+SET authority_source = 'SPRING_CONTROL_PLANE'
+WHERE job_id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+'@
+
     Invoke-AdminSql $databaseName @'
 INSERT INTO app.ai_profile_version (
     profile_version_id, profile_key, profile_version, snapshot_json
@@ -376,6 +438,50 @@ INSERT INTO app.ai_profile_version (
 UPDATE app.ai_profile_version
 SET status = 'ACTIVE'
 WHERE profile_version_id = '77777777-7777-4777-8777-777777777777';
+
+INSERT INTO app.coding_job (
+    job_id, trace_id, status, state_version, context_digest, prompt_version,
+    allowed_capabilities, allowed_nodes, expires_at, authority_source,
+    actor_id, project_id, repository_id, graph_step, base_sha, policy_hash,
+    profile_version_id
+) VALUES (
+    '88888888-8888-4888-8888-888888888888',
+    '88888888-8888-4888-8888-888888888889',
+    'PENDING',
+    1,
+    'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'coding-plan-v1',
+    ARRAY['CHAT']::VARCHAR(32)[],
+    ARRAY['plan']::VARCHAR(120)[],
+    CURRENT_TIMESTAMP + INTERVAL '1 hour',
+    'SPRING_CONTROL_PLANE',
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    'plan',
+    'sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+    '77777777-7777-4777-8777-777777777777'
+);
+'@
+
+    $codingQueuePayload = Get-AdminScalar $databaseName @'
+SELECT payload = jsonb_build_object('jobId', aggregate_id)
+FROM app.transactional_outbox
+WHERE aggregate_type = 'CODING_JOB'
+  AND aggregate_id = '88888888-8888-4888-8888-888888888888'
+'@
+    if ($codingQueuePayload -ne 't') {
+        throw "Coding queue payload is not jobId-only for $databaseName."
+    }
+
+    Assert-AdminSqlFails $databaseName 'Coding Job Profile Version rebinding' @'
+UPDATE app.coding_job
+SET profile_version_id = NULL
+WHERE job_id = '88888888-8888-4888-8888-888888888888'
+'@
+
+    Invoke-AdminSql $databaseName @'
 UPDATE app.ai_profile_version
 SET status = 'INACTIVE'
 WHERE profile_version_id = '77777777-7777-4777-8777-777777777777';
@@ -388,6 +494,33 @@ WHERE profile_version_id = '77777777-7777-4777-8777-777777777777'
     if ($profileVersionStatus -ne 'INACTIVE') {
         throw "AI Profile Version forward status transitions failed for $databaseName."
     }
+
+    Assert-AdminSqlFails $databaseName 'Inactive Coding Job Profile Version binding' @'
+INSERT INTO app.coding_job (
+    job_id, trace_id, status, state_version, context_digest, prompt_version,
+    allowed_capabilities, allowed_nodes, expires_at, authority_source,
+    actor_id, project_id, repository_id, graph_step, base_sha, policy_hash,
+    profile_version_id
+) VALUES (
+    '99999999-9999-4999-8999-999999999999',
+    '99999999-9999-4999-8999-999999999998',
+    'PENDING',
+    1,
+    'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    'coding-plan-v1',
+    ARRAY['CHAT']::VARCHAR(32)[],
+    ARRAY['plan']::VARCHAR(120)[],
+    CURRENT_TIMESTAMP + INTERVAL '1 hour',
+    'SPRING_CONTROL_PLANE',
+    '11111111-1111-4111-8111-111111111111',
+    '22222222-2222-4222-8222-222222222222',
+    '33333333-3333-4333-8333-333333333333',
+    'plan',
+    'sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+    '77777777-7777-4777-8777-777777777777'
+)
+'@
 
     Assert-AdminSqlFails $databaseName 'AI Profile Version payload mutation' @'
 UPDATE app.ai_profile_version

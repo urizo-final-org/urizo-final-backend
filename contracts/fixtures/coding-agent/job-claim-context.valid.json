@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "1.0",
+  "eventId": "66666666-6666-4666-8666-666666666666",
+  "eventType": "CODING_JOB_REQUESTED",
+  "jobId": "44444444-4444-4444-8444-444444444444",
+  "traceId": "55555555-5555-4555-8555-555555555555",
+  "idempotencyKey": "coding-job:44444444-4444-4444-8444-444444444444:v4",
+  "attempt": 1,
+  "expectedStateVersion": 4,
+  "occurredAt": "2026-08-11T11:00:00Z",
+  "profileVersionId": "77777777-7777-4777-8777-777777777777",
+  "pipelineAttempt": 1,
+  "executionAttempt": 1,
+  "workspaceId": null,
+  "toolCallId": null,
+  "payload": {
+    "actorId": "11111111-1111-4111-8111-111111111111",
+    "projectId": "22222222-2222-4222-8222-222222222222",
+    "repositoryId": "33333333-3333-4333-8333-333333333333",
+    "graphStep": "plan",
+    "baseSha": "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "contextDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "policyHash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "expiresAt": "2026-08-11T12:00:00Z"
+  }
+}

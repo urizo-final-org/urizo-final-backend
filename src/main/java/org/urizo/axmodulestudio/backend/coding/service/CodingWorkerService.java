@@ -55,6 +55,47 @@ public final class CodingWorkerService {
                 () -> claimCurrent(request));
     }
 
+    public CodingWorkerContract.ClaimContextResponse claimContext(
+            String authorization, UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        byte[] credentialDigest = credentialDigest(authorization);
+        try {
+            CodingWorkerContract.ClaimContextResponse result = transactions.execute(status -> {
+                authenticate(credentialDigest);
+                JobRow job = requireJob(jobId);
+                UUID profileVersionId = requireProfileVersionId(job);
+                ClaimSource source = claimSource(
+                        job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId());
+                return new CodingWorkerContract.ClaimContextResponse(
+                        version(),
+                        claimEventId(jobId, source.stateVersion()),
+                        "CODING_JOB_REQUESTED",
+                        jobId,
+                        job.traceId(),
+                        claimIdempotencyKey(jobId, source.stateVersion()),
+                        source.attempt(),
+                        source.stateVersion(),
+                        job.createdAt(),
+                        profileVersionId,
+                        1,
+                        source.attempt(),
+                        null,
+                        null,
+                        new CodingWorkerContract.JobPayload(
+                                job.actorId(), job.projectId(), job.repositoryId(),
+                                job.graphStep(), job.baseSha(), job.contextDigest(),
+                                job.policyHash(), job.expiresAt()));
+            });
+            if (result == null) {
+                throw unavailable();
+            }
+            return result;
+        }
+        finally {
+            Arrays.fill(credentialDigest, (byte) 0);
+        }
+    }
+
     public CodingWorkerContract.HeartbeatResponse heartbeat(
             String authorization, CodingWorkerContract.HeartbeatRequest request) {
         return command(authorization, "HEARTBEAT", request.jobId(), request.idempotencyKey(),
@@ -72,6 +113,7 @@ public final class CodingWorkerService {
     private CodingWorkerContract.ClaimResponse claimCurrent(
             CodingWorkerContract.ClaimRequest request) {
         JobRow job = requireJob(request.jobId());
+        UUID profileVersionId = requireProfileVersionId(job);
         Instant now = Instant.now(clock);
         requireCorrelation(job, request.traceId(), request.expectedStateVersion());
         if (!"PENDING".equals(job.status()) && !"RUNNING".equals(job.status())) {
@@ -123,7 +165,7 @@ public final class CodingWorkerService {
                         + job.graphStep() + ".",
                 "README.md", approvalId);
         return new CodingWorkerContract.ClaimResponse(
-                version(), request.jobId(), request.traceId(), leaseId,
+                version(), request.jobId(), request.traceId(), profileVersionId, leaseId,
                 leaseExpiresAt, nextVersion, job.workerAttempt() > 0 || job.stateVersion() > 2,
                 snapshot);
     }
@@ -292,7 +334,7 @@ public final class CodingWorkerService {
                     "Expired coding claim cannot be renewed.");
         }
         Instant renewedUntil = boundedLeaseExpiry(now, job.expiresAt());
-        int updated = jdbc.update("UPDATE app.coding_job SET worker_attempt = worker_attempt + 1, "
+        int updated = jdbc.update("UPDATE app.coding_job SET "
                         + "worker_lease_expires_at = ?, last_heartbeat_at = ?, updated_at = ? "
                         + "WHERE job_id = ? AND status = 'RUNNING' AND state_version = ? "
                         + "AND worker_lease_id = ? AND worker_lease_expires_at <= ?",
@@ -303,7 +345,8 @@ public final class CodingWorkerService {
                     "Expired coding claim is no longer current.");
         }
         return new CodingWorkerContract.ClaimResponse(
-                previous.schemaVersion(), previous.jobId(), previous.traceId(), previous.leaseId(),
+                previous.schemaVersion(), previous.jobId(), previous.traceId(),
+                previous.profileVersionId(), previous.leaseId(),
                 renewedUntil, previous.stateVersion(), true, previous.snapshot());
     }
 
@@ -326,21 +369,25 @@ public final class CodingWorkerService {
 
     private JobRow requireJob(UUID jobId) {
         List<JobRow> rows = jdbc.query(
-                "SELECT trace_id, status, state_version, actor_id, project_id, repository_id, "
+                "SELECT trace_id, profile_version_id, status, state_version, "
+                        + "actor_id, project_id, repository_id, "
                         + "graph_step, base_sha, context_digest, policy_hash, prompt_version, "
                         + "allowed_capabilities, allowed_nodes, expires_at, worker_attempt, "
-                        + "worker_max_attempts, next_attempt_at, worker_lease_id, worker_lease_expires_at "
+                        + "worker_max_attempts, next_attempt_at, worker_lease_id, "
+                        + "worker_lease_expires_at, created_at "
                         + "FROM app.coding_job WHERE job_id = ? "
                         + "AND authority_source = 'SPRING_CONTROL_PLANE' FOR UPDATE",
                 (rs, row) -> new JobRow(
-                        rs.getObject(1, UUID.class), rs.getString(2), rs.getInt(3),
-                        rs.getObject(4, UUID.class), rs.getObject(5, UUID.class),
-                        rs.getObject(6, UUID.class), rs.getString(7), rs.getString(8),
-                        rs.getString(9), rs.getString(10), rs.getString(11),
-                        sqlStrings(rs.getArray(12)), sqlStrings(rs.getArray(13)),
-                        rs.getTimestamp(14).toInstant(), rs.getInt(15), rs.getInt(16),
-                        rs.getTimestamp(17).toInstant(), rs.getObject(18, UUID.class),
-                        rs.getTimestamp(19) == null ? null : rs.getTimestamp(19).toInstant()),
+                        rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
+                        rs.getString(3), rs.getInt(4),
+                        rs.getObject(5, UUID.class), rs.getObject(6, UUID.class),
+                        rs.getObject(7, UUID.class), rs.getString(8), rs.getString(9),
+                        rs.getString(10), rs.getString(11), rs.getString(12),
+                        sqlStrings(rs.getArray(13)), sqlStrings(rs.getArray(14)),
+                        rs.getTimestamp(15).toInstant(), rs.getInt(16), rs.getInt(17),
+                        rs.getTimestamp(18).toInstant(), rs.getObject(19, UUID.class),
+                        rs.getTimestamp(20) == null ? null : rs.getTimestamp(20).toInstant(),
+                        rs.getTimestamp(21).toInstant()),
                 jobId);
         if (rows.isEmpty()) {
             throw new CodingWorkerException(
@@ -348,6 +395,40 @@ public final class CodingWorkerService {
                     HttpStatus.NOT_FOUND);
         }
         return rows.get(0);
+    }
+
+    private static UUID requireProfileVersionId(JobRow job) {
+        if (job.profileVersionId() == null) {
+            throw conflict(
+                    "JOB_STATE_VERSION_CONFLICT",
+                    "Coding job has no immutable Profile Version binding.");
+        }
+        return job.profileVersionId();
+    }
+
+    static UUID claimEventId(UUID jobId, int stateVersion) {
+        return UUID.nameUUIDFromBytes((jobId + ":coding-requested:v" + stateVersion)
+                .getBytes(StandardCharsets.UTF_8));
+    }
+
+    static String claimIdempotencyKey(UUID jobId, int stateVersion) {
+        return "coding-job:" + jobId + ":v" + stateVersion;
+    }
+
+    static ClaimSource claimSource(
+            String status, int stateVersion, int workerAttempt, UUID leaseId) {
+        boolean claimed = "RUNNING".equals(status) && leaseId != null;
+        if (!("PENDING".equals(status) || "RUNNING".equals(status))
+                || ("PENDING".equals(status) && leaseId != null)
+                || stateVersion < 1 || workerAttempt < 0
+                || (claimed && (stateVersion < 2 || workerAttempt < 1))) {
+            throw conflict(
+                    "JOB_STATE_VERSION_CONFLICT",
+                    "Coding job worker state cannot reconstruct a valid claim source.");
+        }
+        return claimed
+                ? new ClaimSource(stateVersion - 1, workerAttempt)
+                : new ClaimSource(stateVersion, workerAttempt + 1);
     }
 
     private static void requireCorrelation(JobRow job, UUID traceId, int stateVersion) {
@@ -453,11 +534,12 @@ public final class CodingWorkerService {
     }
 
     private record StoredCommand(byte[] digest, String response) { }
+    record ClaimSource(int stateVersion, int attempt) { }
     private record JobRow(
-            UUID traceId, String status, int stateVersion,
+            UUID traceId, UUID profileVersionId, String status, int stateVersion,
             UUID actorId, UUID projectId, UUID repositoryId,
             String graphStep, String baseSha, String contextDigest, String policyHash,
             String promptVersion, List<String> allowedCapabilities, List<String> allowedNodes,
             Instant expiresAt, int workerAttempt, int workerMaxAttempts,
-            Instant nextAttemptAt, UUID leaseId, Instant leaseExpiresAt) { }
+            Instant nextAttemptAt, UUID leaseId, Instant leaseExpiresAt, Instant createdAt) { }
 }

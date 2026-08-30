@@ -23,6 +23,7 @@ public final class CodingJobLifecycleRequestDigester {
         canonical.put("commandType", "CREATE");
         canonical.put("traceId", traceId.toString());
         canonical.put("schemaVersion", request.schemaVersion());
+        canonical.put("profileVersionId", request.profileVersionId().toString());
         canonical.put("actorId", request.actorId().toString());
         canonical.put("projectId", request.projectId().toString());
         canonical.put("repositoryId", request.repositoryId().toString());

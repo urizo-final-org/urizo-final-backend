@@ -160,6 +160,7 @@ class JdbcCodingModelTurnGuardIntegrationTest {
                 "stage4.db.job.create." + suffix,
                 new CodingJobLifecycleContract.CreateRequest(
                         "1.0",
+                        UUID.fromString("77777777-7777-4777-8777-777777777777"),
                         UUID.randomUUID(),
                         UUID.randomUUID(),
                         UUID.randomUUID(),

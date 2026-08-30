@@ -47,6 +47,7 @@ class JdbcCodingJobLifecycleIntegrationTest {
 
             CodingJobLifecycleContract.CreateRequest changed = new CodingJobLifecycleContract.CreateRequest(
                     createRequest.schemaVersion(),
+                    createRequest.profileVersionId(),
                     createRequest.actorId(),
                     createRequest.projectId(),
                     createRequest.repositoryId(),
@@ -116,6 +117,7 @@ class JdbcCodingJobLifecycleIntegrationTest {
     private static CodingJobLifecycleContract.CreateRequest createRequest() {
         return new CodingJobLifecycleContract.CreateRequest(
                 "1.0",
+                UUID.fromString("77777777-7777-4777-8777-777777777777"),
                 UUID.randomUUID(),
                 UUID.randomUUID(),
                 UUID.randomUUID(),

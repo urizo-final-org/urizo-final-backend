@@ -29,8 +29,10 @@ public class RagStore {
     private static final int CITATION_LIMIT = 3;
 
     /**
-     * citations 표시용 score 하한 — 꼬리 절단 전용. 정답/오답 판별 장치가 아니며
-     * (D3 실측 역전: 비정답 0.6143 > 정답 0.5943), 거절 조건으로도 쓰지 않는다.
+     * citations 표시용 score 하한 — 꼬리 절단 전용. 정답/오답 판별 장치가 아니다
+     * (D3 실측 역전: 비정답 0.6143 > 정답 0.5943 — 값을 올려 정밀도를 노리지 말 것).
+     * 하한 자체는 거절 기준이 아니지만, 적용 결과 citations가 0건이 되면 "인용 없는
+     * 답변"이 성립하지 않으므로 REFUSED로 처리한다(query() 참조).
      */
     private static final double CITATION_SCORE_FLOOR = 0.52;
 
@@ -129,23 +131,22 @@ public class RagStore {
                 ? UUID.randomUUID() : request.conversationId();
         Instant now = Instant.now(clock);
         if (grounded.isEmpty()) {
-            return new ProductApiContract.RagQueryResponse(
-                    version(), traceId, UUID.randomUUID(), conversationId,
-                    "REFUSED", "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.",
-                    List.of(), active.versionId(), now);
+            return refused(traceId, conversationId, active.versionId(), now);
         }
         // 노출 3건 + score 하한 0.52. 이 하한은 정답/오답 판별 장치가 아니라 꼬리 노이즈
         // 절단 전용이다 — 실측에서 비정답(0.6143)이 정답(0.5943)보다 높은 역전이 확인돼
         // 전역 하한으로는 정밀도를 얻을 수 없다. 이 값을 올려 정밀도를 노리지 말 것.
-        // 거절(REFUSED)은 위의 필터 전원 탈락일 때만이며, 하한은 거절 조건이 아니다.
         List<GroundingRow> displayed = grounded.stream()
                 .limit(CITATION_LIMIT)
                 .filter(row -> row.score() >= CITATION_SCORE_FLOOR)
                 .toList();
-        // 하한이 상위 3건을 전부 잘라내는 경우는 이론상만 존재한다(실측 1위 score 최저 0.59).
-        // 그때도 REFUSED로 바꾸지 않고 최상위 근거로 답변만 구성한다.
-        List<GroundingRow> answerSource = displayed.isEmpty()
-                ? grounded.subList(0, 1) : displayed;
+        // 인용 0건 ANSWERED는 성립하지 않는 상태다 — 근거 기반 답변인데 근거가 없다.
+        // 하한 자체는 거절 기준이 아니지만, 그 결과 citations가 비면 REFUSED가 된다
+        // (V1 실측: 코퍼스 밖 질의가 '반도체'→'반도' 절단 매칭으로 필터를 통과했으나
+        // 전 행 score < 하한이었던 케이스). 필터 전원 탈락 조건의 대체가 아니라 추가다.
+        if (displayed.isEmpty()) {
+            return refused(traceId, conversationId, active.versionId(), now);
+        }
         List<ProductApiContract.Citation> citations = displayed.stream()
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
@@ -153,8 +154,16 @@ public class RagStore {
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
-                "ANSWERED", composeAnswer(request.query(), answerSource),
+                "ANSWERED", composeAnswer(request.query(), displayed),
                 citations, active.versionId(), now);
+    }
+
+    private static ProductApiContract.RagQueryResponse refused(
+            UUID traceId, UUID conversationId, UUID versionId, Instant now) {
+        return new ProductApiContract.RagQueryResponse(
+                version(), traceId, UUID.randomUUID(), conversationId,
+                "REFUSED", "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.",
+                List.of(), versionId, now);
     }
 
     /**

@@ -102,6 +102,7 @@
       "post": {
         "operationId": "transitionLocalCodingJob",
         "summary": "Apply one idempotent expected-version state transition",
+        "description": "Approval callbacks reuse this transition contract: WAITING_APPROVAL to RUNNING records approval and requeues the same jobId, while WAITING_APPROVAL to CANCELLED records rejection as a terminal result without requeueing. Idempotency-Key and expectedStateVersion reject conflicting or stale callbacks.",
         "security": [{ "localCsrf": [] }],
         "parameters": [
           { "$ref": "#/components/parameters/JobIdPath" },

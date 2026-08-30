@@ -310,6 +310,31 @@ SELECT has_column_privilege(
         throw "Coding claim renewal does not have the required narrow column privilege for $databaseName."
     }
 
+    $approvalTransitionPrivilege = Get-AdminScalar $databaseName @'
+SELECT has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'command_type', 'SELECT')
+       AND has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'job_id', 'SELECT')
+       AND has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'from_status', 'SELECT')
+       AND has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'to_status', 'SELECT')
+       AND has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status',
+           'result_state_version', 'SELECT')
+       AND NOT has_table_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'SELECT')
+       AND NOT has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command_status', 'idempotency_key', 'SELECT')
+       AND NOT has_table_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command', 'SELECT')
+       AND NOT has_column_privilege(
+           'ai_workspace', 'app.coding_job_lifecycle_command', 'response_json', 'SELECT')
+'@
+    if ($approvalTransitionPrivilege -ne 't') {
+        throw "Coding approval transition access is broader than the required view columns for $databaseName."
+    }
+
     $migrationReadinessPrivilege = Get-AdminScalar $databaseName @'
 SELECT has_column_privilege(
            'cms_app', 'public.flyway_schema_history', 'version', 'SELECT')

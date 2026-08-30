@@ -64,8 +64,10 @@ public final class CodingWorkerService {
                 authenticate(credentialDigest);
                 JobRow job = requireJob(jobId);
                 UUID profileVersionId = requireProfileVersionId(job);
+                boolean approvalTransition = approvalTransition(jobId, job.stateVersion());
                 ClaimSource source = claimSource(
-                        job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId());
+                        job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId(),
+                        approvalTransition);
                 return new CodingWorkerContract.ClaimContextResponse(
                         version(),
                         claimEventId(jobId, source.stateVersion()),
@@ -116,6 +118,8 @@ public final class CodingWorkerService {
         UUID profileVersionId = requireProfileVersionId(job);
         Instant now = Instant.now(clock);
         requireCorrelation(job, request.traceId(), request.expectedStateVersion());
+        boolean approvalTransition = approvalTransition(
+                request.jobId(), request.expectedStateVersion());
         if (!"PENDING".equals(job.status()) && !"RUNNING".equals(job.status())) {
             throw conflict("JOB_STATE_VERSION_CONFLICT", "Coding job is not claimable.");
         }
@@ -134,13 +138,18 @@ public final class CodingWorkerService {
                     "IDEMPOTENCY_IN_PROGRESS", "Coding job has an active worker lease.",
                     HttpStatus.CONFLICT, true, retry);
         }
-        if (job.workerAttempt() >= job.workerMaxAttempts()) {
-            throw conflict("JOB_STATE_VERSION_CONFLICT", "Coding job exhausted its worker attempts.");
-        }
+        boolean approvalResume = approvalResume(
+                job.status(), job.workerAttempt(), job.leaseId(), approvalTransition);
+        ClaimSource source = claimSource(
+                job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId(),
+                approvalTransition);
+        int nextAttempt = workerAttemptForClaim(
+                job.status(), job.workerAttempt(), job.workerMaxAttempts(), job.leaseId(),
+                approvalTransition);
+        requireClaimSourceBinding(request, source, nextAttempt);
         UUID leaseId = UUID.randomUUID();
         Instant leaseExpiresAt = boundedLeaseExpiry(now, job.expiresAt());
         int nextVersion = job.stateVersion() + 1;
-        int nextAttempt = job.workerAttempt() + 1;
         int updated = jdbc.update("UPDATE app.coding_job SET status = 'RUNNING', "
                         + "state_version = ?, worker_attempt = ?, worker_lease_id = ?, "
                         + "worker_lease_expires_at = ?, last_heartbeat_at = ?, "
@@ -166,7 +175,7 @@ public final class CodingWorkerService {
                 "README.md", approvalId);
         return new CodingWorkerContract.ClaimResponse(
                 version(), request.jobId(), request.traceId(), profileVersionId, leaseId,
-                leaseExpiresAt, nextVersion, job.workerAttempt() > 0 || job.stateVersion() > 2,
+                leaseExpiresAt, nextVersion, approvalResume,
                 snapshot);
     }
 
@@ -319,17 +328,23 @@ public final class CodingWorkerService {
             CodingWorkerContract.ClaimResponse previous) {
         JobRow job = requireJob(request.jobId());
         Instant now = Instant.now(clock);
-        boolean bound = previous.jobId().equals(request.jobId())
-                && previous.traceId().equals(request.traceId())
+        ClaimSource source = claimSource(
+                job.status(), job.stateVersion(), job.workerAttempt(), job.leaseId(),
+                false);
+        boolean bound = claimReplayMatches(request, previous, source)
                 && job.traceId().equals(request.traceId())
+                && Objects.equals(job.profileVersionId(), previous.profileVersionId())
                 && "RUNNING".equals(job.status())
                 && job.stateVersion() == previous.stateVersion()
                 && Objects.equals(job.leaseId(), previous.leaseId())
                 && job.leaseExpiresAt() != null
                 && !job.leaseExpiresAt().isAfter(now)
+                && previous.snapshot() != null
+                && previous.snapshot().deadlineAt() != null
                 && previous.snapshot().deadlineAt().isAfter(now)
                 && job.expiresAt().isAfter(now);
-        if (!bound || job.workerAttempt() >= job.workerMaxAttempts()) {
+        if (!bound || !renewalAttemptAllowed(
+                job.workerAttempt(), job.workerMaxAttempts())) {
             throw conflict("JOB_STATE_VERSION_CONFLICT",
                     "Expired coding claim cannot be renewed.");
         }
@@ -344,10 +359,7 @@ public final class CodingWorkerService {
             throw conflict("JOB_STATE_VERSION_CONFLICT",
                     "Expired coding claim is no longer current.");
         }
-        return new CodingWorkerContract.ClaimResponse(
-                previous.schemaVersion(), previous.jobId(), previous.traceId(),
-                previous.profileVersionId(), previous.leaseId(),
-                renewedUntil, previous.stateVersion(), true, previous.snapshot());
+        return renewedClaimResponse(previous, renewedUntil);
     }
 
     private void authenticate(byte[] credentialDigest) {
@@ -415,8 +427,22 @@ public final class CodingWorkerService {
         return "coding-job:" + jobId + ":v" + stateVersion;
     }
 
+    private boolean approvalTransition(UUID jobId, int stateVersion) {
+        Long matches = jdbc.queryForObject("""
+                SELECT count(job_id)
+                FROM app.coding_job_lifecycle_command_status
+                WHERE job_id = ?
+                  AND result_state_version = ?
+                  AND command_type = 'TRANSITION'
+                  AND from_status = 'WAITING_APPROVAL'
+                  AND to_status = 'RUNNING'
+                """, Long.class, jobId, stateVersion);
+        return Long.valueOf(1L).equals(matches);
+    }
+
     static ClaimSource claimSource(
-            String status, int stateVersion, int workerAttempt, UUID leaseId) {
+            String status, int stateVersion, int workerAttempt, UUID leaseId,
+            boolean approvalTransition) {
         boolean claimed = "RUNNING".equals(status) && leaseId != null;
         if (!("PENDING".equals(status) || "RUNNING".equals(status))
                 || ("PENDING".equals(status) && leaseId != null)
@@ -426,9 +452,77 @@ public final class CodingWorkerService {
                     "JOB_STATE_VERSION_CONFLICT",
                     "Coding job worker state cannot reconstruct a valid claim source.");
         }
-        return claimed
-                ? new ClaimSource(stateVersion - 1, workerAttempt)
-                : new ClaimSource(stateVersion, workerAttempt + 1);
+        if (claimed) {
+            return new ClaimSource(stateVersion - 1, workerAttempt);
+        }
+        int executionAttempt = approvalResume(
+                status, workerAttempt, leaseId, approvalTransition)
+                ? workerAttempt : workerAttempt + 1;
+        return new ClaimSource(stateVersion, executionAttempt);
+    }
+
+    static int workerAttemptForClaim(
+            String status, int workerAttempt, int workerMaxAttempts, UUID leaseId,
+            boolean approvalTransition) {
+        if (workerAttempt > workerMaxAttempts) {
+            throw conflict("JOB_STATE_VERSION_CONFLICT", "Coding job exhausted its worker attempts.");
+        }
+        if (approvalResume(status, workerAttempt, leaseId, approvalTransition)) {
+            return workerAttempt;
+        }
+        if (workerAttempt >= workerMaxAttempts) {
+            throw conflict("JOB_STATE_VERSION_CONFLICT", "Coding job exhausted its worker attempts.");
+        }
+        return workerAttempt + 1;
+    }
+
+    static boolean approvalResume(
+            String status, int workerAttempt, UUID leaseId, boolean approvalTransition) {
+        return approvalTransition
+                && "RUNNING".equals(status)
+                && leaseId == null
+                && workerAttempt > 0;
+    }
+
+    static void requireClaimSourceBinding(
+            CodingWorkerContract.ClaimRequest request,
+            ClaimSource source,
+            int authoritativeAttempt) {
+        UUID eventId = claimEventId(request.jobId(), source.stateVersion());
+        String idempotencyKey = claimIdempotencyKey(request.jobId(), source.stateVersion());
+        if (authoritativeAttempt != source.attempt()
+                || request.expectedStateVersion() != source.stateVersion()
+                || request.attempt() != source.attempt()
+                || !Objects.equals(request.eventId(), eventId)
+                || !Objects.equals(request.idempotencyKey(), idempotencyKey)) {
+            throw conflict(
+                    "JOB_STATE_VERSION_CONFLICT",
+                    "Coding job claim does not match the authoritative event source.");
+        }
+    }
+
+    static boolean claimReplayMatches(
+            CodingWorkerContract.ClaimRequest request,
+            CodingWorkerContract.ClaimResponse previous,
+            ClaimSource source) {
+        return Objects.equals(previous.jobId(), request.jobId())
+                && Objects.equals(previous.traceId(), request.traceId())
+                && source.stateVersion() == request.expectedStateVersion()
+                && source.attempt() == request.attempt()
+                && previous.stateVersion() == request.expectedStateVersion() + 1;
+    }
+
+    static boolean renewalAttemptAllowed(
+            int workerAttempt, int workerMaxAttempts) {
+        return workerAttempt >= 1 && workerAttempt <= workerMaxAttempts;
+    }
+
+    static CodingWorkerContract.ClaimResponse renewedClaimResponse(
+            CodingWorkerContract.ClaimResponse previous, Instant renewedUntil) {
+        return new CodingWorkerContract.ClaimResponse(
+                previous.schemaVersion(), previous.jobId(), previous.traceId(),
+                previous.profileVersionId(), previous.leaseId(), renewedUntil,
+                previous.stateVersion(), previous.resume(), previous.snapshot());
     }
 
     private static void requireCorrelation(JobRow job, UUID traceId, int stateVersion) {

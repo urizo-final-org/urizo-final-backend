@@ -92,7 +92,7 @@ $requiredCore = @(
     'valkey'
 )
 $requiredProfile = if ($Profile -eq 'full') {
-    @($requiredCore + 'coding-runtime' + 'checkpoint_database')
+    @($requiredCore + 'coding-runtime' + 'mcp-server' + 'checkpoint_database')
 }
 else {
     $requiredCore
@@ -166,7 +166,7 @@ if ($LASTEXITCODE -ne 0 -or $databaseBinding -notmatch '^127\.0\.0\.1:\d+$') {
 
 $internalOnlyServices = @('frontend', 'spring-app', 'database', 'valkey')
 if ($Profile -eq 'full') {
-    $internalOnlyServices += @('coding-runtime', 'checkpoint_database')
+    $internalOnlyServices += @('coding-runtime', 'mcp-server', 'checkpoint_database')
 }
 foreach ($service in $internalOnlyServices) {
     $containerId = Get-ComposeContainerId -Service $service

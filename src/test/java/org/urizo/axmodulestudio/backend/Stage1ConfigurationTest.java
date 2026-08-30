@@ -11,6 +11,7 @@ import org.urizo.axmodulestudio.backend.coding.controller.CodingModelTurnControl
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
 import org.urizo.axmodulestudio.backend.coding.controller.CodingJobLifecycleController;
 import org.urizo.axmodulestudio.backend.coding.service.CodingJobLifecycleService;
+import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 
 @SpringBootTest
 class Stage1ConfigurationTest {
@@ -40,5 +41,13 @@ class Stage1ConfigurationTest {
         assertThat(environment.getProperty("ax.coding.job-lifecycle.enabled")).isEqualTo("false");
         assertThat(applicationContext.getBeansOfType(CodingJobLifecycleController.class)).isEmpty();
         assertThat(applicationContext.getBeansOfType(CodingJobLifecycleService.class)).isEmpty();
+    }
+
+    @Test
+    void mcpPlatformAndAutomaticToolCallbacksAreDisabledByDefault() {
+        assertThat(environment.getProperty("ax.ai.mcp-platform.enabled")).isEqualTo("false");
+        assertThat(environment.getProperty("spring.ai.mcp.client.enabled")).isEqualTo("false");
+        assertThat(environment.getProperty("spring.ai.mcp.client.toolcallback.enabled")).isEqualTo("false");
+        assertThat(applicationContext.getBeansOfType(McpPlatformClient.class)).isEmpty();
     }
 }

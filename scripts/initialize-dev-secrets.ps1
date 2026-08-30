@@ -131,7 +131,9 @@ function New-ValkeyAclFile {
 }
 
 function New-ServiceTokenFile {
-    $path = Join-Path $secretDirectory 'coding_model_bridge_service_token'
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $path = Join-Path $secretDirectory $Name
     if (-not (Test-Path -LiteralPath $path)) {
         $bytes = New-Object byte[] 48
         $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -151,7 +153,7 @@ function New-ServiceTokenFile {
     }
     $length = (Get-Item -LiteralPath $path).Length
     if ($length -lt 43 -or $length -gt 512) {
-        throw 'The local coding service credential has an invalid length.'
+        throw "The local service credential has an invalid length: $Name"
     }
     Protect-LocalPath -LiteralPath $path
 }
@@ -169,6 +171,7 @@ New-PasswordFile -Name 'valkey_password'
 New-MasterKeyFile
 New-CheckpointEncryptionKeyFile
 New-ValkeyAclFile
-New-ServiceTokenFile
+New-ServiceTokenFile -Name 'coding_model_bridge_service_token'
+New-ServiceTokenFile -Name 'mcp_service_token'
 
 Write-Output "Local encrypted-secret material is ready under $secretDirectory (values not displayed)."

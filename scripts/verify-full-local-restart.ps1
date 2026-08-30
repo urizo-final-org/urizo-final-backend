@@ -29,7 +29,7 @@ $docker = Join-Path $dockerBin 'docker.exe'
 $compose = @('compose', '-f', $composeFile, '--profile', 'full')
 
 # Restart never removes containers or volumes. Existing Core DB identity is retained.
-& $docker @compose restart database database_gateway valkey checkpoint_database spring-app coding-runtime frontend nginx
+& $docker @compose restart database database_gateway valkey checkpoint_database spring-app coding-runtime mcp-server frontend nginx
 if ($LASTEXITCODE -ne 0) {
     throw 'One or more required services failed to restart.'
 }

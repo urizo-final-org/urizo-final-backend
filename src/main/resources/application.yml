@@ -1,6 +1,12 @@
 spring:
   application:
     name: ax-module-studio-backend
+  ai:
+    mcp:
+      client:
+        enabled: false
+        toolcallback:
+          enabled: false
   main:
     banner-mode: "off"
   autoconfigure:
@@ -36,6 +42,13 @@ management:
 ax:
   ai:
     provider-lane: ${AX_AI_PROVIDER_LANE:PRODUCT}
+    mcp-platform:
+      enabled: ${AXMS_MCP_PLATFORM_ENABLED:false}
+      endpoint: ${AXMS_MCP_PLATFORM_ENDPOINT:http://127.0.0.1:8091/mcp}
+      credential-file: ${AXMS_MCP_PLATFORM_CREDENTIAL_FILE:.local/secrets/mcp_service_token}
+      connect-timeout: ${AXMS_MCP_PLATFORM_CONNECT_TIMEOUT:3s}
+      request-timeout: ${AXMS_MCP_PLATFORM_REQUEST_TIMEOUT:5s}
+      max-response-bytes: ${AXMS_MCP_PLATFORM_MAX_RESPONSE_BYTES:65536}
   coding:
     job-lifecycle:
       enabled: false

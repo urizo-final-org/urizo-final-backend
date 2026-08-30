@@ -26,7 +26,11 @@ if (Test-Path -LiteralPath (Join-Path $workspaceRoot '.git')) {
     throw 'The shared AX Module Studio workspace must not be a Git repository.'
 }
 
-foreach ($sibling in @('urizo-final-frontend', 'urizo-final-orchestrator', 'urizo-final-backend')) {
+foreach ($sibling in @(
+        'urizo-final-frontend',
+        'urizo-final-orchestrator',
+        'urizo-final-backend',
+        'urizo-final-mcp-server')) {
     $siblingPath = Join-Path $workspaceRoot $sibling
     if (-not (Test-Path -LiteralPath $siblingPath -PathType Container)) {
         throw "Required sibling repository is missing: $sibling"

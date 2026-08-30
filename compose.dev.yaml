@@ -214,6 +214,9 @@ services:
       AXMS_OUTBOX_POLL: 250ms
       AXMS_WORKER_POLL: 300ms
       AXMS_PRODUCT_WORKER_ID: axms-spring-app-local-1
+      AXMS_MCP_PLATFORM_ENABLED: "true"
+      AXMS_MCP_PLATFORM_ENDPOINT: http://mcp-server:8091/mcp
+      AXMS_MCP_PLATFORM_CREDENTIAL_FILE: /run/secrets/mcp_service_token
     depends_on:
       database:
         condition: service_healthy
@@ -228,6 +231,7 @@ services:
       - ai_workspace_password
       - valkey_password
       - auth_jwt_signing_key
+      - mcp_service_token
     expose:
       - "8080"
     healthcheck:
@@ -248,6 +252,45 @@ services:
       - axms_internal
       - axms_frontend
       - axms_egress
+      - axms_mcp
+
+  mcp-server:
+    profiles: ["coding-agent", "full"]
+    image: axms/mcp-server:dev
+    build:
+      context: ${AXMS_MCP_SOURCE_ROOT:-../urizo-final-mcp-server}
+      dockerfile: Dockerfile
+      args:
+        UV_INSECURE_HOST: ${AXMS_UV_INSECURE_HOST:-}
+    restart: unless-stopped
+    init: true
+    environment:
+      AXMS_MCP_HOST: 0.0.0.0
+      AXMS_MCP_PORT: "8091"
+      AXMS_MCP_ALLOWED_HOSTS: mcp-server,mcp-server:*
+      AXMS_MCP_SERVICE_TOKEN_FILE: /run/secrets/mcp_service_token
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    secrets:
+      - mcp_service_token
+    expose:
+      - "8091"
+    healthcheck:
+      test: ["CMD", "python", "-m", "axms_mcp_server.healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    mem_limit: 384m
+    cpus: 0.50
+    pids_limit: 128
+    stop_grace_period: 20s
+    logging: *default-logging
+    networks:
+      - axms_mcp
 
   coding-runtime:
     profiles: ["coding-agent", "full"]
@@ -417,6 +460,8 @@ secrets:
     file: ./.local/secrets/dev_operator_password
   coding_model_bridge_service_token:
     file: ./.local/secrets/coding_model_bridge_service_token
+  mcp_service_token:
+    file: ./.local/secrets/mcp_service_token
   checkpoint_postgres_password:
     file: ./.local/secrets/checkpoint_postgres_password
   checkpoint_encryption_key:
@@ -447,3 +492,6 @@ networks:
     internal: true
   axms_egress:
     name: axms-spring-dev-egress
+  axms_mcp:
+    name: axms-spring-dev-mcp
+    internal: true

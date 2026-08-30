@@ -85,6 +85,7 @@ try {
             'ai_workspace_password',
             'dev_operator_password',
             'coding_model_bridge_service_token',
+            'mcp_service_token',
             'checkpoint_postgres_password',
             'checkpoint_encryption_key',
             'valkey_password',

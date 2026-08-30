@@ -25,6 +25,11 @@ services:
   spring-app:
     image: axms/preview-backend:latest
 
+  mcp-server:
+    image: axms/preview-mcp-server:latest
+    build:
+      context: ${AXMS_PREVIEW_MCP_SOURCE:-../urizo-final-mcp-server}
+
   frontend:
     image: axms/preview-frontend:latest
     build:
@@ -60,6 +65,8 @@ secrets:
     file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/dev_operator_password
   coding_model_bridge_service_token:
     file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/coding_model_bridge_service_token
+  mcp_service_token:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/mcp_service_token
   checkpoint_postgres_password:
     file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/checkpoint_postgres_password
   checkpoint_encryption_key:
@@ -92,3 +99,6 @@ networks:
     internal: true
   axms_egress:
     name: ${AXMS_PREVIEW_NAME:-axms-preview}-egress
+  axms_mcp:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-mcp
+    internal: true

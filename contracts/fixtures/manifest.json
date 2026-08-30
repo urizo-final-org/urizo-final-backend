@@ -1330,6 +1330,59 @@
       "fixture": "public/agent-job-list.response.valid.json",
       "expected": "VALID",
       "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "orchestration.profile-version.snapshot.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/VersionedSnapshot",
+      "fixture": "orchestration/profile-version.snapshot.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
+      "id": "orchestration.profile-version.contract-validation-error.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",
+      "fixture": "orchestration/profile-version.contract-validation-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "CONTRACT_VALIDATION_FAILED"
+    },
+    {
+      "id": "orchestration.profile-version.not-found-error.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",
+      "fixture": "orchestration/profile-version.not-found-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "PROFILE_VERSION_NOT_FOUND"
+    },
+    {
+      "id": "orchestration.profile-version.not-active-error.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",
+      "fixture": "orchestration/profile-version.not-active-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "PROFILE_VERSION_NOT_ACTIVE"
+    },
+    {
+      "id": "orchestration.profile-version.authentication-error.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",
+      "fixture": "orchestration/profile-version.authentication-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "SERVICE_AUTHENTICATION_FAILED"
+    },
+    {
+      "id": "orchestration.profile-version.transient-error.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",
+      "fixture": "orchestration/profile-version.transient-error.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA",
+      "expectedErrorCode": "INTERNAL_TRANSIENT_ERROR"
     }
   ]
 }

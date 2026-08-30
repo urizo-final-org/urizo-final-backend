@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "requestId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "traceId": "66666666-6666-4666-8666-666666666666",
+  "error": {
+    "code": "PROFILE_VERSION_NOT_FOUND",
+    "message": "The requested Profile Version was not found.",
+    "retryable": false,
+    "executionState": "NOT_STARTED"
+  }
+}

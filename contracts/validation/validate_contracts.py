@@ -804,7 +804,26 @@ def require_schema_version(schema: Any, document_path: Path, label: str) -> None
         raise ContractFailure(f"{label} does not require exact schemaVersion {PAYLOAD_VERSION}")
 
 
-def validate_openapi_profile(path: Path, expected_prefix: str) -> int:
+def require_contract_version(schema: Any, document_path: Path, label: str) -> None:
+    schema, schema_path = resolve_object(schema, document_path)
+    required = schema.get("required", [])
+    version_schema = schema.get("properties", {}).get("contractVersion")
+    if "contractVersion" not in required or version_schema is None:
+        raise ContractFailure(
+            f"{label} does not require exact contractVersion {PAYLOAD_VERSION}"
+        )
+    version_schema, _ = resolve_object(version_schema, schema_path)
+    if version_schema.get("const") != PAYLOAD_VERSION:
+        raise ContractFailure(
+            f"{label} does not require exact contractVersion {PAYLOAD_VERSION}"
+        )
+
+
+def validate_openapi_profile(
+    path: Path,
+    expected_prefix: str,
+    raw_contract_version_responses: frozenset[tuple[str, str]] = frozenset(),
+) -> int:
     document = STORE.load(path)
     if document.get("openapi") != OPENAPI_VERSION:
         raise ContractFailure(f"{path.name}: openapi must be {OPENAPI_VERSION}")
@@ -962,9 +981,11 @@ def validate_openapi_profile(path: Path, expected_prefix: str) -> int:
                     .get("schema")
                 )
                 if response_schema is not None:
-                    require_schema_version(
-                        response_schema, response_path, f"{operation_id} {status} response"
-                    )
+                    label = f"{operation_id} {status} response"
+                    if (operation_id, status) in raw_contract_version_responses:
+                        require_contract_version(response_schema, response_path, label)
+                    else:
+                        require_schema_version(response_schema, response_path, label)
     return operation_count
 
 
@@ -1642,6 +1663,7 @@ def required_operation_fixture_targets() -> set[tuple[str, str]]:
         "public/openapi.yaml",
         "coding-agent/model-turn.openapi.yaml",
         "coding-agent/job-lifecycle.openapi.yaml",
+        "orchestration/profile-version.openapi.yaml",
     ):
         document_path = CONTRACT_ROOT / contract_name
         document = STORE.load(document_path)
@@ -1791,6 +1813,7 @@ def validate_fixtures() -> tuple[int, int]:
         "coding-agent/job-event.schema.json",
         "coding-agent/tool-request.schema.json",
         "coding-agent/error-code.schema.json",
+        "orchestration/profile-version.openapi.yaml",
     }
     allowed_case_fields = {
         "id",
@@ -2446,8 +2469,15 @@ def main() -> int:
     public_path = CONTRACT_ROOT / "public" / "openapi.yaml"
     model_path = CONTRACT_ROOT / "coding-agent" / "model-turn.openapi.yaml"
     job_lifecycle_path = CONTRACT_ROOT / "coding-agent" / "job-lifecycle.openapi.yaml"
+    profile_version_path = CONTRACT_ROOT / "orchestration" / "profile-version.openapi.yaml"
     schema_paths = sorted((CONTRACT_ROOT / "coding-agent").glob("*.schema.json"))
-    contract_paths = [public_path, model_path, job_lifecycle_path, *schema_paths]
+    contract_paths = [
+        public_path,
+        model_path,
+        job_lifecycle_path,
+        profile_version_path,
+        *schema_paths,
+    ]
 
     try:
         regression_probe_count = validate_local_evaluator_regressions()
@@ -2457,6 +2487,11 @@ def main() -> int:
         operation_count = validate_openapi_profile(public_path, "/api")
         operation_count += validate_openapi_profile(model_path, "/internal")
         operation_count += validate_openapi_profile(job_lifecycle_path, "/internal/dev")
+        operation_count += validate_openapi_profile(
+            profile_version_path,
+            "/internal/ai",
+            frozenset({("getActiveProfileVersionSnapshot", "200")}),
+        )
         reference_count = validate_local_references(contract_paths)
         strict_object_count = validate_schema_profile(contract_paths)
         valid_count, invalid_count = validate_fixtures()

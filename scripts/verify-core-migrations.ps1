@@ -25,7 +25,7 @@ $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
 $migrationDirectory = Join-Path $repositoryRoot 'src\main\resources\db\migration'
 $migrationVersions = @(Get-ChildItem -LiteralPath $migrationDirectory -File -Filter 'V*__*.sql' |
     ForEach-Object {
-        if ($_.Name -notmatch '^V([0-9]{14})__.+\.sql$') {
+        if ($_.Name -notmatch '^V([0-9]{14}|[0-9]{17})__.+\.sql$') {
             throw "Invalid versioned migration filename: $($_.Name)"
         }
         $Matches[1]
@@ -73,6 +73,19 @@ function Invoke-AdminSql([string] $databaseName, [string] $sql) {
     if ($LASTEXITCODE -ne 0) {
         throw "PostgreSQL verification command failed for $databaseName."
     }
+}
+
+function Assert-AdminSqlFails([string] $databaseName, [string] $description, [string] $sql) {
+    & $docker exec $databaseContainer psql `
+        -U bootstrap_admin `
+        -d $databaseName `
+        -v ON_ERROR_STOP=1 `
+        -P pager=off `
+        -c $sql
+    if ($LASTEXITCODE -eq 0) {
+        throw "$description unexpectedly succeeded for $databaseName."
+    }
+    Write-Host "$description rejection verified for $databaseName."
 }
 
 function Get-AdminScalar([string] $databaseName, [string] $sql) {
@@ -312,6 +325,79 @@ SELECT has_column_privilege(
     if ($migrationReadinessPrivilege -ne 't') {
         throw "Runtime migration readiness access is not limited to version/success for $databaseName."
     }
+
+    $profileVersionContract = Get-AdminScalar $databaseName @'
+SELECT EXISTS (
+           SELECT 1
+           FROM information_schema.tables
+           WHERE table_schema = 'app'
+             AND table_name = 'ai_profile_version')
+       AND (
+           SELECT count(*) = 6
+           FROM information_schema.columns
+           WHERE table_schema = 'app'
+             AND table_name = 'ai_profile_version'
+             AND column_name IN (
+                 'profile_version_id', 'profile_key', 'profile_version',
+                 'status', 'snapshot_json', 'created_at'))
+       AND EXISTS (
+           SELECT 1
+           FROM pg_trigger AS trigger_record
+           JOIN pg_class AS relation ON relation.oid = trigger_record.tgrelid
+           JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+           WHERE namespace.nspname = 'app'
+             AND relation.relname = 'ai_profile_version'
+             AND trigger_record.tgname = 'trg_ai_profile_version_immutable'
+             AND NOT trigger_record.tgisinternal)
+'@
+    if ($profileVersionContract -ne 't') {
+        throw "AI Profile Version table or immutable trigger is incomplete for $databaseName."
+    }
+
+    $profileVersionPrivilege = Get-AdminScalar $databaseName @'
+SELECT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'SELECT')
+       AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'INSERT')
+       AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'UPDATE')
+       AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'DELETE')
+'@
+    if ($profileVersionPrivilege -ne 't') {
+        throw "AI Profile Version access is not read-only for ai_workspace in $databaseName."
+    }
+
+    Invoke-AdminSql $databaseName @'
+INSERT INTO app.ai_profile_version (
+    profile_version_id, profile_key, profile_version, snapshot_json
+) VALUES (
+    '77777777-7777-4777-8777-777777777777',
+    'LLM_OPS',
+    1,
+    '{"contractVersion":"1.0","profileVersionId":"77777777-7777-4777-8777-777777777777","profileKey":"LLM_OPS","profileVersion":1}'::jsonb
+);
+UPDATE app.ai_profile_version
+SET status = 'ACTIVE'
+WHERE profile_version_id = '77777777-7777-4777-8777-777777777777';
+UPDATE app.ai_profile_version
+SET status = 'INACTIVE'
+WHERE profile_version_id = '77777777-7777-4777-8777-777777777777';
+'@
+    $profileVersionStatus = Get-AdminScalar $databaseName @'
+SELECT status
+FROM app.ai_profile_version
+WHERE profile_version_id = '77777777-7777-4777-8777-777777777777'
+'@
+    if ($profileVersionStatus -ne 'INACTIVE') {
+        throw "AI Profile Version forward status transitions failed for $databaseName."
+    }
+
+    Assert-AdminSqlFails $databaseName 'AI Profile Version payload mutation' @'
+UPDATE app.ai_profile_version
+SET snapshot_json = snapshot_json || '{"unexpected":true}'::jsonb
+WHERE profile_version_id = '77777777-7777-4777-8777-777777777777'
+'@
+    Assert-AdminSqlFails $databaseName 'AI Profile Version deletion' @'
+DELETE FROM app.ai_profile_version
+WHERE profile_version_id = '77777777-7777-4777-8777-777777777777'
+'@
 
     $criticalIndexCount = Get-AdminScalar $databaseName @'
 SELECT count(*)

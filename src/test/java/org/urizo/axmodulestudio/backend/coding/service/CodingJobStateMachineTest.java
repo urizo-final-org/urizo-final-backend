@@ -30,6 +30,11 @@ class CodingJobStateMachineTest {
                 NOW,
                 FUTURE);
         CodingJobStateMachine.requireTransition(
+                CodingJobLifecycleContract.Status.WAITING_APPROVAL,
+                CodingJobLifecycleContract.Status.CANCELLED,
+                NOW,
+                FUTURE);
+        CodingJobStateMachine.requireTransition(
                 CodingJobLifecycleContract.Status.RUNNING,
                 CodingJobLifecycleContract.Status.COMPLETED,
                 NOW,

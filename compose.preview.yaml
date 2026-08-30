@@ -1,0 +1,94 @@
+# Isolated preview stack for LLM DevOps approval review.
+# Overlay only. compose.dev.yaml stays untouched and keeps owning the dev stack.
+#
+# The base file pins absolute volume and network names, so a different project
+# name alone would still reuse the real dev database. Every stateful name is
+# redefined here.
+#
+# Usage:
+#   docker compose -p axms-preview --profile spring-core \
+#     -f compose.dev.yaml -f compose.preview.yaml config
+#   docker compose -p axms-preview --profile spring-core \
+#     -f compose.dev.yaml -f compose.preview.yaml up -d --no-build --wait
+
+services:
+  flyway-migration:
+    # Shares the Backend Dockerfile, so a preview rebuild would otherwise
+    # overwrite the dev migration image.
+    image: axms/preview-migration:latest
+
+  database_gateway:
+    # ports is concatenated on merge, so the base 15432 mapping must be replaced.
+    ports: !override
+      - "127.0.0.1:${AXMS_PREVIEW_DB_PORT:-15433}:15432"
+
+  spring-app:
+    image: axms/preview-backend:latest
+
+  frontend:
+    image: axms/preview-frontend:latest
+    build:
+      # The base context is relative to the project directory, so building from
+      # an AI worktree would look for a sibling that does not exist there.
+      # Same variable as the volume below, so both always point at one checkout.
+      context: ${AXMS_PREVIEW_FRONTEND_SOURCE:-../urizo-final-frontend}
+    volumes:
+      - ${AXMS_PREVIEW_FRONTEND_SOURCE:-../urizo-final-frontend}/src:/app/src:ro
+
+  nginx:
+    ports: !override
+      - "127.0.0.1:${AXMS_PREVIEW_HTTP_PORT:-18081}:80"
+
+# Secrets live next to the compose file, so running from a worktree resolves them
+# to a path that does not exist. Docker then creates empty directories and every
+# password reads as blank. AXMS_PREVIEW_SECRETS_ROOT points back at the checked-out
+# repository instead, and the worktree never holds a copy of the secrets.
+secrets:
+  postgres_superuser_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/postgres_superuser_password
+  migration_owner_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/migration_owner_password
+  cms_app_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/cms_app_password
+  cms_master_key:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/cms_master_key
+  dbeaver_reader_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/dbeaver_reader_password
+  ai_workspace_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/ai_workspace_password
+  dev_operator_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/dev_operator_password
+  coding_model_bridge_service_token:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/coding_model_bridge_service_token
+  checkpoint_postgres_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/checkpoint_postgres_password
+  checkpoint_encryption_key:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/checkpoint_encryption_key
+  valkey_password:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/valkey_password
+  valkey_acl:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/valkey_acl
+  auth_jwt_signing_key:
+    file: ${AXMS_PREVIEW_SECRETS_ROOT:-./.local/secrets}/auth_jwt_signing_key
+
+# Every stateful name carries the stack name, so two preview stacks can run at
+# once without sharing a volume. The default keeps the existing names unchanged.
+volumes:
+  axms_spring_core_db:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-core-db
+  axms_spring_checkpoint_db:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-checkpoint-db
+  axms_spring_valkey:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-valkey
+
+networks:
+  axms_internal:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-internal
+    internal: true
+  axms_loopback:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-loopback
+  axms_frontend:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-frontend
+    internal: true
+  axms_egress:
+    name: ${AXMS_PREVIEW_NAME:-axms-preview}-egress

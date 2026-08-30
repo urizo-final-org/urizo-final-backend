@@ -8,6 +8,8 @@ import org.urizo.axmodulestudio.backend.cms.entity.CmsMenuEntity;
 public interface CmsMenuJpaRepository extends JpaRepository<CmsMenuEntity, Long> {
     List<CmsMenuEntity> findAllByOrderByDisplayOrderAscMenuIdAsc();
 
+    List<CmsMenuEntity> findAllByParentMenuIdOrderByDisplayOrderAscMenuIdAsc(Long parentMenuId);
+
     List<CmsMenuEntity> findAllByTargetTypeAndTargetId(String targetType, Long targetId);
 
     List<CmsMenuEntity> findAllByPath(String path);

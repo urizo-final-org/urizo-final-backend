@@ -72,6 +72,12 @@ public class CmsRepository {
         return menuRepository.findById(id).map(CmsRepository::menu);
     }
 
+    public List<MenuView> findChildMenus(long parentId) {
+        return menuRepository.findAllByParentMenuIdOrderByDisplayOrderAscMenuIdAsc(parentId).stream()
+                .map(CmsRepository::menu)
+                .toList();
+    }
+
     public long insertMenu(
             String name, String path, Long parentId, int displayOrder,
             String targetType, Long targetId) {

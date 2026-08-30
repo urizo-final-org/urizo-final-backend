@@ -70,8 +70,18 @@ public class CmsService {
         return repository.findMenu(id).orElseThrow(() -> notFound("메뉴를 찾을 수 없습니다."));
     }
 
+    /**
+     * 하위메뉴를 먼저 지운 뒤 대상 메뉴를 지운다.
+     *
+     * <p>FK가 {@code ON DELETE SET NULL}이라 부모를 먼저 지우면 하위의 상위 메뉴가 비면서
+     * 대메뉴로 승격된다. 하위를 앞서 지우면 그 경로를 밟지 않는다. 계층이 2단계라 한 번만 조회한다.
+     */
     @Transactional(transactionManager = "authJpaTransactionManager")
     public void deleteMenu(long id) {
+        menu(id);
+        for (MenuView child : repository.findChildMenus(id)) {
+            repository.deleteMenu(child.id());
+        }
         if (repository.deleteMenu(id) == 0) {
             throw notFound("메뉴를 찾을 수 없습니다.");
         }
@@ -89,15 +99,13 @@ public class CmsService {
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView createContent(UUID authorId, String title, String body) {
-        requireText(title, "제목");
-        requireText(body, "내용");
+        validateArticle(title, body);
         return content(repository.insertContent(authorId, title.trim(), body));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView updateContent(long id, String title, String body) {
-        requireText(title, "제목");
-        requireText(body, "내용");
+        validateArticle(title, body);
         if (repository.updateContent(id, title.trim(), body) == 0) {
             throw notFound("콘텐츠를 찾을 수 없습니다.");
         }
@@ -124,13 +132,13 @@ public class CmsService {
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public BoardView createBoard(String name, String description) {
-        requireText(name, "게시판명");
+        validateBoard(name);
         return board(repository.insertBoard(name.trim(), text(description)));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public BoardView updateBoard(long id, String name, String description) {
-        requireText(name, "게시판명");
+        validateBoard(name);
         if (repository.updateBoard(id, name.trim(), text(description)) == 0) {
             throw notFound("게시판을 찾을 수 없습니다.");
         }
@@ -161,15 +169,13 @@ public class CmsService {
     @Transactional(transactionManager = "authJpaTransactionManager")
     public PostView createPost(UUID authorId, long boardId, String title, String body) {
         board(boardId);
-        requireText(title, "제목");
-        requireText(body, "내용");
+        validateArticle(title, body);
         return post(repository.insertPost(authorId, boardId, title.trim(), body));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public PostView updatePost(long id, String title, String body) {
-        requireText(title, "제목");
-        requireText(body, "내용");
+        validateArticle(title, body);
         if (repository.updatePost(id, title.trim(), body) == 0) {
             throw notFound("게시물을 찾을 수 없습니다.");
         }
@@ -199,14 +205,7 @@ public class CmsService {
             String key, String layout, String color, String siteName, String header, String footer,
             String heroImageUrl, String heroTitle, String heroSubtitle,
             String heroButtonLabel, String heroButtonUrl) {
-        requireText(layout, "레이아웃");
-        requireText(color, "색상");
-        requireText(siteName, "사이트명");
-        requireText(heroImageUrl, "메인 이미지");
-        requireText(heroTitle, "메인 문구");
-        if (!color.matches("^#[0-9A-Fa-f]{6}$")) {
-            throw invalidRequest("색상은 #RRGGBB 형식이어야 합니다.");
-        }
+        validateTemplate(layout, color, siteName, heroImageUrl, heroTitle);
         if (!repository.templateExists(key)) {
             throw notFound("템플릿을 찾을 수 없습니다.");
         }
@@ -289,6 +288,27 @@ public class CmsService {
             throw invalidRequest("지원하지 않는 메뉴 연결 유형입니다.");
         }
         return target;
+    }
+
+    private void validateArticle(String title, String body) {
+        requireText(title, "제목");
+        requireText(body, "내용");
+    }
+
+    private void validateBoard(String name) {
+        requireText(name, "게시판명");
+    }
+
+    private void validateTemplate(
+            String layout, String color, String siteName, String heroImageUrl, String heroTitle) {
+        requireText(layout, "레이아웃");
+        requireText(color, "색상");
+        requireText(siteName, "사이트명");
+        requireText(heroImageUrl, "메인 이미지");
+        requireText(heroTitle, "메인 문구");
+        if (!color.matches("^#[0-9A-Fa-f]{6}$")) {
+            throw invalidRequest("색상은 #RRGGBB 형식이어야 합니다.");
+        }
     }
 
     private long ensureContent(UUID author, String title, String body) {

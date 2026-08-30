@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
+import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocumentLoader;
 
 @Service
 @Profile("local-full")
@@ -153,7 +154,7 @@ final class ProductBatchService {
                     + "WHERE knowledge_version_id = ? AND status IN ('BUILD_REQUESTED', 'FAILED', 'BUILDING')",
                     versionId);
             for (ProductApiContract.PreviewDocument document
-                    : DeterministicConnectorFixture.documents(20)) {
+                    : TourismSampleDocumentLoader.documents()) {
                 UUID documentId = stableId(versionId + ":document:" + document.documentId());
                 jdbc.update("INSERT INTO app.source_document "
                                 + "(source_document_id, knowledge_version_id, external_document_id, title, "
@@ -167,8 +168,8 @@ final class ProductBatchService {
                         String.join(",", document.category()), document.sourceUrl().toString(),
                         Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now));
             }
-            updateProgress(jobId, "COLLECT", 15, DeterministicConnectorFixture.totalCount(),
-                    DeterministicConnectorFixture.totalCount());
+            updateProgress(jobId, "COLLECT", 15, TourismSampleDocumentLoader.totalCount(),
+                    TourismSampleDocumentLoader.totalCount());
         });
     }
 

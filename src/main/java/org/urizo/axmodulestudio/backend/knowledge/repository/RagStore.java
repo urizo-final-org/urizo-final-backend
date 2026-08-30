@@ -93,7 +93,9 @@ public class RagStore {
             throw conflict(
                     "ACTIVE_KNOWLEDGE_REQUIRED", "The chatbot has no active knowledge version.");
         }
-        int topK = request.topK() == null ? 3 : request.topK();
+        // 기본 10: C유형 정답 수가 3을 넘는 문항이 있어 3은 구조적 상한이었다(X2, R@10 0.973).
+        // 접미절단 필터(W3) 전제. 요청이 topK를 명시하면 그 값을 그대로 쓴다(@Max 20).
+        int topK = request.topK() == null ? 10 : request.topK();
         // 질의 임베딩은 HTTP 호출이므로 한 번만 계산해 정렬과 점수 계산에 함께 쓴다.
         String queryVector = embeddings.queryVector(request.query());
         List<GroundingRow> rows = jdbc.query(

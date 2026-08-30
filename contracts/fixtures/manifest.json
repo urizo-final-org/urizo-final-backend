@@ -1356,6 +1356,14 @@
       "validationLayer": "SCHEMA"
     },
     {
+      "id": "orchestration.natural-cms-handler.snapshot.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/VersionedSnapshot",
+      "fixture": "orchestration/natural-cms-handler.snapshot.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
       "id": "orchestration.profile-version.contract-validation-error.valid",
       "contract": "orchestration/profile-version.openapi.yaml",
       "schemaPointer": "#/components/schemas/ProfileVersionErrorEnvelope",

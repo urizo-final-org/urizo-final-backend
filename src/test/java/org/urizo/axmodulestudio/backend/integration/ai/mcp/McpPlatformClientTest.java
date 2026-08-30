@@ -109,7 +109,7 @@ class McpPlatformClientTest {
                 .put("path", "README.md");
         assertThatThrownBy(() -> client(transport).callTool("arbitrary_shell", safe))
                 .isInstanceOf(McpPlatformException.class)
-                .hasMessage("MCP coding tool call contract was rejected.");
+                .hasMessage("MCP tool call contract was rejected.");
 
         JsonNode injected = safe.deepCopy();
         ((com.fasterxml.jackson.databind.node.ObjectNode) injected)

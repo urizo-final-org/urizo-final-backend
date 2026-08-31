@@ -26,7 +26,10 @@ import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 class NaturalCmsStageServiceTest {
 
@@ -50,7 +53,7 @@ class NaturalCmsStageServiceTest {
                 new NaturalCmsStore.RuntimePolicy(Set.of(), "central.default"));
         when(harness.resources.snapshot(RESOURCE)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7));
-        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
                 "{\"operation\":\"UPDATE\",\"fields\":{"
                         + "\"title\":\"New\",\"body\":\"Body\"}}",
                 List.of()));
@@ -63,9 +66,11 @@ class NaturalCmsStageServiceTest {
 
         ArgumentCaptor<CodingModelTurnContract.Request> request =
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
-        verify(harness.models).executeNaturalCms(request.capture());
+        verify(harness.models).executeNaturalCms(request.capture(), any());
         assertThat(request.getValue().requiredCapabilities()).containsExactly("CHAT");
         assertThat(request.getValue().toolSchemas()).isEmpty();
+        verify(harness.profileModelBindings).resolve(
+                PROFILE, "preview", "cms.preview", ModelUseCase.CHAT);
         verify(harness.mcp, never()).callTool(any(), any());
     }
 
@@ -94,7 +99,7 @@ class NaturalCmsStageServiceTest {
         when(harness.resources.snapshot(RESOURCE)).thenReturn(state);
         when(harness.resources.validateCommand(eq(RESOURCE), any()))
                 .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
-        when(harness.models.executeNaturalCms(any())).thenReturn(
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
                 modelResponse("", List.of(new CodingModelTurnContract.ToolCall(
                         UUID.fromString("66666666-6666-4666-8666-666666666666"),
                         "resolve_cms_target",
@@ -130,7 +135,7 @@ class NaturalCmsStageServiceTest {
 
         ArgumentCaptor<CodingModelTurnContract.Request> turns =
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
-        verify(harness.models, times(2)).executeNaturalCms(turns.capture());
+        verify(harness.models, times(2)).executeNaturalCms(turns.capture(), any());
         assertThat(turns.getAllValues().get(1).messages())
                 .anySatisfy(message -> assertThat(message.path("role").asText())
                         .isEqualTo("tool"));
@@ -142,7 +147,7 @@ class NaturalCmsStageServiceTest {
         Harness harness = new Harness(activeJob());
         when(harness.resources.snapshot(RESOURCE)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7));
-        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
                 "Analysis result:\n```json\n"
                         + "{\"port\":\"feasible\",\"payload\":{\"reason\":\"safe\"}}\n```",
                 List.of()));
@@ -160,7 +165,7 @@ class NaturalCmsStageServiceTest {
         Harness harness = new Harness(activeJob());
         when(harness.resources.snapshot(RESOURCE)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7));
-        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
                 "prefix {\"port\":\"feasible\",\"payload\":{}} "
                         + "{\"port\":\"feasible\",\"payload\":{}}",
                 List.of()));
@@ -270,6 +275,8 @@ class NaturalCmsStageServiceTest {
         private final NaturalCmsResourceService resources =
                 mock(NaturalCmsResourceService.class);
         private final CodingModelTurnService models = mock(CodingModelTurnService.class);
+        private final ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
         private final McpPlatformClient mcp = mock(McpPlatformClient.class);
         private final ObjectProvider<McpPlatformClient> provider = mock(ObjectProvider.class);
         private final NaturalCmsStageService service;
@@ -289,10 +296,13 @@ class NaturalCmsStageServiceTest {
                                 value.previewId(), value.previewHash(), value.payload(), NOW);
                     });
             when(provider.getIfAvailable()).thenReturn(mcp);
+            when(profileModelBindings.resolve(eq(PROFILE), any(), any(), any()))
+                    .thenReturn(List.of(mock(ProviderModelRegistration.class)));
             service = new NaturalCmsStageService(
                     store,
                     resources,
                     models,
+                    profileModelBindings,
                     provider,
                     mapper,
                     Clock.fixed(NOW, ZoneOffset.UTC));

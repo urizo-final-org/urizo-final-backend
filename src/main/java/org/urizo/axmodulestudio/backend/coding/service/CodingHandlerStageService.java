@@ -24,8 +24,11 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -42,6 +45,7 @@ public final class CodingHandlerStageService {
     private final CodingToolService tools;
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
+    private final ProfileModelBindingService profileModelBindings;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
@@ -53,12 +57,15 @@ public final class CodingHandlerStageService {
             CodingToolService tools,
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
+            ProfileModelBindingService profileModelBindings,
             ObjectMapper objectMapper,
             Clock clock) {
         this.results = Objects.requireNonNull(results, "results are required");
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
         this.models = Objects.requireNonNull(models, "models are required");
+        this.profileModelBindings = Objects.requireNonNull(
+                profileModelBindings, "profileModelBindings are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -119,7 +126,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate));
+                1, List.of(), initialMessages(request.handlerKey(), aggregate),
+                modelBindings(authority, request, ModelUseCase.CHAT));
         ModelOutcome outcome = parseOutcome(
                 request.handlerKey(), response.assistant().content(),
                 Set.of("feasible", "infeasible"));
@@ -144,10 +152,13 @@ public final class CodingHandlerStageService {
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
         CodingModelTurnContract.Response modelResponse = null;
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(authority, request, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             modelResponse = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages);
+                    turn, schemas, messages, modelBindings);
             if (modelResponse.toolCalls().isEmpty()) {
                 break;
             }
@@ -273,7 +284,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             int turn,
             List<JsonNode> schemas,
-            List<JsonNode> messages) {
+            List<JsonNode> messages,
+            List<ProviderModelRegistration> modelBindings) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
@@ -302,7 +314,7 @@ public final class CodingHandlerStageService {
             return permit.cachedResponse();
         }
         try {
-            CodingModelTurnContract.Response response = models.execute(request);
+            CodingModelTurnContract.Response response = models.execute(request, modelBindings);
             modelGuard.complete(permit, response);
             return response;
         }
@@ -315,6 +327,14 @@ public final class CodingHandlerStageService {
             }
             throw failure;
         }
+    }
+
+    private List<ProviderModelRegistration> modelBindings(
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.StageExecutionRequest request,
+            ModelUseCase useCase) {
+        return profileModelBindings.resolve(
+                authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
     }
 
     private CodingToolContract.ResultContent executeTool(

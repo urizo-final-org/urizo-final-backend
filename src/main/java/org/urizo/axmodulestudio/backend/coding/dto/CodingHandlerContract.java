@@ -290,14 +290,30 @@ public final class CodingHandlerContract {
             @NotNull UUID traceId,
             @Min(1) int expectedStateVersion,
             @Min(1) int executionAttempt,
+            @NotBlank @Pattern(regexp = "^[a-z][a-z0-9_-]{0,63}$") String nodeId,
             @NotBlank @Pattern(regexp = "^[a-z][a-z0-9._-]{0,119}$") String handlerKey,
             @NotNull UUID resultId) {
 
         public StageExecutionRequest {
             requireVersion(schemaVersion);
-            if (!HANDLER_RESULTS.containsKey(handlerKey)) {
-                throw new IllegalArgumentException("handlerKey is not an AI04 stage handler.");
+            if (nodeId == null
+                    || !nodeId.matches("^[a-z][a-z0-9_-]{0,63}$")
+                    || !HANDLER_RESULTS.containsKey(handlerKey)) {
+                throw new IllegalArgumentException(
+                        "nodeId and handlerKey must identify an AI04 stage handler.");
             }
+        }
+
+        public StageExecutionRequest(
+                String schemaVersion,
+                UUID traceId,
+                int expectedStateVersion,
+                int executionAttempt,
+                String handlerKey,
+                UUID resultId) {
+            this(schemaVersion, traceId, expectedStateVersion, executionAttempt,
+                    CodingHandlerContract.nodeId(handlerKey, "coding."),
+                    handlerKey, resultId);
         }
     }
 
@@ -444,5 +460,10 @@ public final class CodingHandlerContract {
         if (!SCHEMA_VERSION.equals(value)) {
             throw new IllegalArgumentException("schemaVersion must be 1.0.");
         }
+    }
+
+    private static String nodeId(String handlerKey, String prefix) {
+        return handlerKey != null && handlerKey.startsWith(prefix)
+                ? handlerKey.substring(prefix.length()) : null;
     }
 }

@@ -3,6 +3,7 @@ package org.urizo.axmodulestudio.backend.cms.controller;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -108,6 +109,44 @@ class CmsSiteSettingsControllerTest {
         mockMvc.perform(get("/api/admin/cms/sites")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)
                         .header("X-Trace-Id", TRACE_ID))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("FORBIDDEN"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void superAdminCanCreateANonDefaultSite() throws Exception {
+        authenticate(AdminRole.SUPER_ADMIN);
+        when(service.createSite("campaign", "캠페인", "/campaign", "BOLD", true))
+                .thenReturn(new SiteView(
+                        "campaign", "캠페인", "/campaign", "BOLD",
+                        true, false, UPDATED_AT));
+
+        mockMvc.perform(post("/api/admin/cms/sites")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)
+                        .header("X-Trace-Id", TRACE_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"key":"campaign","siteName":"캠페인",
+                                 "publicPath":"/campaign","templateKey":"BOLD","enabled":true}
+                                """))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.key").value("campaign"))
+                .andExpect(jsonPath("$.defaultSite").value(false));
+    }
+
+    @Test
+    void generalAdminCannotCreateASite() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+
+        mockMvc.perform(post("/api/admin/cms/sites")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)
+                        .header("X-Trace-Id", TRACE_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"key":"campaign","siteName":"캠페인",
+                                 "publicPath":"/campaign","templateKey":"BOLD","enabled":true}
+                                """))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("FORBIDDEN"));
         verifyNoInteractions(service);

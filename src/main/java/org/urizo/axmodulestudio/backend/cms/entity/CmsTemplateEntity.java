@@ -109,16 +109,7 @@ public class CmsTemplateEntity {
         return updatedAt;
     }
 
-    public void deactivate() {
-        this.activeYn = "N";
-    }
-
-    public void markActive(Instant changedAt) {
-        this.activeYn = "Y";
-        this.updatedAt = changedAt;
-    }
-
-    public void activate(
+    public void changePresentation(
             String layout,
             String primaryColor,
             String siteName,
@@ -140,7 +131,6 @@ public class CmsTemplateEntity {
         this.heroSubtitle = heroSubtitle;
         this.heroButtonLabel = heroButtonLabel;
         this.heroButtonUrl = heroButtonUrl;
-        this.activeYn = "Y";
         this.updatedAt = changedAt;
     }
 }

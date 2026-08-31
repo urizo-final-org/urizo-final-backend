@@ -40,6 +40,18 @@ public class CmsSiteEntity {
     protected CmsSiteEntity() {
     }
 
+    public CmsSiteEntity(
+            String siteKey, String siteName, String publicPath,
+            String templateKey, boolean enabled, Instant createdAt) {
+        this.siteKey = siteKey;
+        this.siteName = siteName;
+        this.publicPath = publicPath;
+        this.templateKey = templateKey;
+        this.enabledYn = enabled ? "Y" : "N";
+        this.defaultYn = "N";
+        this.updatedAt = createdAt;
+    }
+
     public String getSiteKey() {
         return siteKey;
     }
@@ -88,8 +100,4 @@ public class CmsSiteEntity {
         this.updatedAt = changedAt;
     }
 
-    public void applyTemplate(String templateKey, Instant changedAt) {
-        this.templateKey = templateKey;
-        this.updatedAt = changedAt;
-    }
 }

@@ -37,6 +37,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRespo
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 
 class CodingModelTurnServiceTest {
 
@@ -153,7 +154,7 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
-    void repairsOneFencedApprovedProviderToolCallAndKeepsTheStrictEnvelope() {
+    void carriesNativeToolDefinitionsAndReturnsTheNativeProviderToolCall() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -172,9 +173,11 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "Here is the result.\n```json\n"
-                        + "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_file\","
-                        + "\"arguments\":{\"path\":\"src/App.java\"}}]}\n```",
+                "",
+                List.of(new ProviderChatMessage.ToolCall(
+                        "99999999-9999-4999-8999-999999999999",
+                        "read_file",
+                        "{\"path\":\"src/App.java\"}")),
                 8,
                 3,
                 Duration.ZERO));
@@ -193,11 +196,14 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER);
         assertThat(routed.getValue().messages().get(0).content())
-                .startsWith("Return exactly one JSON object")
-                .contains("Declared tools:");
+                .isEqualTo("Stay in scope.");
+        assertThat(routed.getValue().tools()).singleElement().satisfies(tool -> {
+            assertThat(tool.name()).isEqualTo("read_file");
+            assertThat(tool.schemaDigest()).isEqualTo(
+                    "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194");
+        });
     }
 
     @Test
@@ -239,7 +245,7 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "{\"assistant\":\"done\",\"toolCalls\":[]}",
+                "done",
                 8,
                 3,
                 Duration.ZERO));
@@ -253,22 +259,63 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER,
                         ProviderChatMessage.Role.ASSISTANT,
                         ProviderChatMessage.Role.TOOL);
-        assertThat(routed.getValue().messages().get(3).toolCalls())
+        assertThat(routed.getValue().messages().get(2).toolCalls())
                 .singleElement()
                 .satisfies(call -> {
                     assertThat(call.id()).isEqualTo(toolCallId);
                     assertThat(call.name()).isEqualTo("read_file");
                 });
-        assertThat(routed.getValue().messages().get(4).toolCallId())
+        assertThat(routed.getValue().messages().get(3).toolCallId())
                 .isEqualTo(toolCallId);
     }
 
     @Test
-    void rejectsAnEnvelopeThatIsStillInvalidAfterOneRepair() {
+    void preservesJsonSchemaThroughTheProviderRequestAndStructuredResponse() {
+        ProviderModelRegistration google = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                Set.of(ModelCapability.CHAT, ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService structuredService = new CodingModelTurnService(
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        CodingModelTurnContract.Request request = structuredRequest();
+        when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                "```json\n{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}\n```",
+                8,
+                3,
+                Duration.ZERO));
+
+        CodingModelTurnContract.Response response = structuredService.execute(request);
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        assertThat(routed.getValue().responseFormat().type())
+                .isEqualTo(ProviderResponseFormat.Type.JSON_SCHEMA);
+        assertThat(routed.getValue().responseFormat().schemaDigest())
+                .isEqualTo(request.responseFormat().path("schemaDigest").asText());
+        assertThat(routed.getValue().responseFormat().outputSchema())
+                .isEqualTo(request.responseFormat().path("outputSchema"));
+        JsonNode resultFormat = objectMapper.valueToTree(response.responseFormat());
+        assertThat(resultFormat.path("type").asText()).isEqualTo("JSON_SCHEMA");
+        assertThat(resultFormat.path("schemaDigest").asText())
+                .isEqualTo(request.responseFormat().path("schemaDigest").asText());
+        assertThat(resultFormat.path("structuredOutput").path("port").asText())
+                .isEqualTo("feasible");
+        assertThat(resultFormat.path("structuredOutput").path("payload")
+                .path("summary").asText()).isEqualTo("ok");
+        assertThat(response.assistant().content()).isEmpty();
+    }
+
+    @Test
+    void rejectsMalformedNativeToolArguments() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -287,8 +334,11 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "prefix {\"assistant\":\"ok\",\"toolCalls\":[]} "
-                        + "{\"assistant\":\"second\",\"toolCalls\":[]}",
+                "",
+                List.of(new ProviderChatMessage.ToolCall(
+                        "99999999-9999-4999-8999-999999999999",
+                        "read_file",
+                        "{\"path\":\"README.md\",\"path\":\"other\"}")),
                 8,
                 3,
                 Duration.ZERO));
@@ -398,6 +448,24 @@ class CodingModelTurnServiceTest {
                 List.of(),
                 JsonNodeFactory.instance.objectNode().put("type", "TEXT"),
                 NOW.plusSeconds(60));
+    }
+
+    private static CodingModelTurnContract.Request structuredRequest() {
+        CodingModelTurnContract.Request chat = chatRequest();
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        properties.putObject("payload").put("type", "object");
+        ObjectNode format = ProviderResponseFormat.jsonSchema(schema).requestContract();
+        return new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(),
+                chat.idempotencyKey(), chat.attempt(), chat.expectedStateVersion(),
+                chat.nodeName(), chat.promptVersion(), chat.contextDigest(),
+                List.of("CHAT", "STRUCTURED_OUTPUT"), chat.messages(), List.of(),
+                format, chat.deadlineAt());
     }
 
     private static JsonNode toolSchema() {

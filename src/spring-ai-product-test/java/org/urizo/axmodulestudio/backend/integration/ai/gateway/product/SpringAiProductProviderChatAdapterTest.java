@@ -18,12 +18,14 @@ import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.anthropic.AnthropicChatModel;
 import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
@@ -36,6 +38,7 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.StructuredOutputChatOptions;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.retry.TransientAiException;
@@ -54,6 +57,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentia
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.Stage2ProviderModels;
 
@@ -87,6 +91,24 @@ class SpringAiProductProviderChatAdapterTest {
     void mapsGeminiNativeFunctionDefinitionsAndNormalizesItsToolCall() throws Exception {
         verifiesNativeToolContract(
                 ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT);
+    }
+
+    @Test
+    void mapsOpenAiJsonSchemaIntoTheNativeProviderRequest() throws Exception {
+        verifiesNativeStructuredOutputContract(
+                ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT);
+    }
+
+    @Test
+    void mapsGeminiJsonSchemaIntoTheNativeProviderRequest() throws Exception {
+        verifiesNativeStructuredOutputContract(
+                ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT);
+    }
+
+    @Test
+    void mapsAnthropicJsonSchemaIntoTheNativeProviderRequest() throws Exception {
+        verifiesNativeStructuredOutputContract(
+                ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT);
     }
 
     @Test
@@ -470,6 +492,111 @@ class SpringAiProductProviderChatAdapterTest {
         }
         else {
             assertGeminiProviderRequest(prompt);
+        }
+    }
+
+    private static void verifiesNativeStructuredOutputContract(
+            ModelProvider provider, String modelId) throws Exception {
+        ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ChatModel chatModel = mock(ChatModel.class);
+        when(resolver.resolve(provider)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
+                provider, FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
+        when(factory.provider()).thenReturn(provider);
+        when(factory.open(
+                FIXTURE_CREDENTIAL,
+                modelId,
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                .thenAnswer(ignored -> new ProductChatModelSession(chatModel, () -> { }));
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(
+                        new AssistantMessage("{\"port\":\"feasible\",\"payload\":{}}")))));
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        properties.putObject("payload").put("type", "object");
+        ProviderResponseFormat format = ProviderResponseFormat.jsonSchema(schema);
+        ProviderChatRequest request = new ProviderChatRequest(
+                provider,
+                modelId,
+                List.of(
+                        ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.SYSTEM, "Stay in scope."),
+                        ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.USER, "Analyze the request.")),
+                List.of(),
+                format,
+                NOW.plusSeconds(30));
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                provider,
+                modelId,
+                Set.of(ModelCapability.CHAT, ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30),
+                1);
+        SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
+                resolver, List.of(factory), Clock.fixed(NOW, ZoneOffset.UTC));
+
+        adapter.chat(registration, request);
+
+        ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel).call(prompt.capture());
+        assertThat(prompt.getValue().getInstructions())
+                .extracting(message -> message.getMessageType().name())
+                .containsExactly("SYSTEM", "USER");
+        assertThat(prompt.getValue().getOptions())
+                .isInstanceOf(StructuredOutputChatOptions.class);
+
+        if (provider == ModelProvider.OPENAI) {
+            try (ProductChatModelSession session = new OpenAiProductChatModelFactory()
+                    .open(FIXTURE_CREDENTIAL, modelId, OUTPUT_BUDGET)) {
+                Method createRequest = OpenAiChatModel.class.getDeclaredMethod(
+                        "createRequest", Prompt.class, boolean.class);
+                createRequest.setAccessible(true);
+                OpenAiApi.ChatCompletionRequest nativeRequest =
+                        (OpenAiApi.ChatCompletionRequest) createRequest.invoke(
+                                session.chatModel(), prompt.getValue(), false);
+                assertThat(nativeRequest.responseFormat().getType().name())
+                        .isEqualTo("JSON_SCHEMA");
+                JsonNode nativeSchema = new ObjectMapper().valueToTree(
+                        nativeRequest.responseFormat().getJsonSchema().getSchema());
+                assertThat(nativeSchema)
+                        .isEqualTo(format.outputSchema());
+                assertThat(nativeRequest.responseFormat().getJsonSchema().getStrict())
+                        .isTrue();
+            }
+        }
+        else if (provider == ModelProvider.GOOGLE_GENAI) {
+            GoogleGenAiChatModel.GeminiRequest nativeRequest =
+                    createGeminiProviderRequest(prompt.getValue());
+            assertThat(nativeRequest.config().responseMimeType())
+                    .contains("application/json");
+            assertThat(nativeRequest.config().responseJsonSchema().orElseThrow())
+                    .isInstanceOfSatisfying(com.google.genai.types.Schema.class,
+                            nativeSchema -> {
+                                assertThat(nativeSchema.type().orElseThrow().knownEnum().name())
+                                        .isEqualTo("OBJECT");
+                                assertThat(nativeSchema.properties().orElseThrow())
+                                        .containsOnlyKeys("port", "payload");
+                                assertThat(nativeSchema.required().orElseThrow())
+                                        .containsExactly("port", "payload");
+                            });
+        }
+        else {
+            try (ProductChatModelSession session = new AnthropicProductChatModelFactory()
+                    .open(FIXTURE_CREDENTIAL, modelId, OUTPUT_BUDGET)) {
+                Method createRequest = AnthropicChatModel.class.getDeclaredMethod(
+                        "createRequest", Prompt.class, boolean.class);
+                createRequest.setAccessible(true);
+                AnthropicApi.ChatCompletionRequest nativeRequest =
+                        (AnthropicApi.ChatCompletionRequest) createRequest.invoke(
+                                session.chatModel(), prompt.getValue(), false);
+                assertThat(nativeRequest.outputFormat().schema())
+                        .containsKeys("type", "properties", "required")
+                        .containsEntry("additionalProperties", false);
+            }
         }
     }
 

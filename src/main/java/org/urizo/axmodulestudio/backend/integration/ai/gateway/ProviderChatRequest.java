@@ -13,6 +13,7 @@ public record ProviderChatRequest(
         String modelId,
         List<ProviderChatMessage> messages,
         List<ProviderToolDefinition> tools,
+        ProviderResponseFormat responseFormat,
         Instant deadline) {
 
     private static final int MAX_MESSAGES = 200;
@@ -24,6 +25,7 @@ public record ProviderChatRequest(
         modelId = Objects.requireNonNull(modelId, "modelId is required");
         messages = List.copyOf(Objects.requireNonNull(messages, "messages are required"));
         tools = List.copyOf(Objects.requireNonNull(tools, "tools are required"));
+        responseFormat = Objects.requireNonNull(responseFormat, "responseFormat is required");
         deadline = Objects.requireNonNull(deadline, "deadline is required");
         if (modelId.isBlank()) {
             throw new IllegalArgumentException("modelId cannot be blank");
@@ -48,6 +50,10 @@ public record ProviderChatRequest(
         if (!tools.isEmpty()) {
             validateToolHistory(messages, definitions);
         }
+        if (!tools.isEmpty() && responseFormat.structured()) {
+            throw new IllegalArgumentException(
+                    "Structured output and tool calling cannot be combined.");
+        }
         List<ProviderChatMessage> providerMessages = legacyTools.isEmpty()
                 ? messages : messages.subList(1, messages.size());
         long characters = providerMessages.stream()
@@ -60,7 +66,9 @@ public record ProviderChatRequest(
                         .mapToLong(tool -> tool.name().length()
                                 + tool.description().length()
                                 + tool.providerInputSchema().length())
-                        .sum();
+                        .sum()
+                + (responseFormat.structured()
+                        ? responseFormat.providerOutputSchema().length() : 0);
         if (messages.isEmpty() || messages.size() > MAX_MESSAGES
                 || tools.size() > MAX_TOOLS
                 || characters > MAX_REQUEST_CHARACTERS) {
@@ -72,8 +80,17 @@ public record ProviderChatRequest(
             ModelProvider provider,
             String modelId,
             List<ProviderChatMessage> messages,
+            List<ProviderToolDefinition> tools,
             Instant deadline) {
-        this(provider, modelId, messages, List.of(), deadline);
+        this(provider, modelId, messages, tools, ProviderResponseFormat.text(), deadline);
+    }
+
+    public ProviderChatRequest(
+            ModelProvider provider,
+            String modelId,
+            List<ProviderChatMessage> messages,
+            Instant deadline) {
+        this(provider, modelId, messages, List.of(), ProviderResponseFormat.text(), deadline);
     }
 
     public ProviderChatRequest(
@@ -85,7 +102,7 @@ public record ProviderChatRequest(
                 List.of(ProviderChatMessage.plain(
                         ProviderChatMessage.Role.USER,
                         Objects.requireNonNull(prompt, "prompt is required"))),
-                List.of(), deadline);
+                List.of(), ProviderResponseFormat.text(), deadline);
     }
 
     public List<ProviderChatMessage> providerMessages() {
@@ -118,6 +135,7 @@ public record ProviderChatRequest(
         return "ProviderChatRequest[provider=" + provider
                 + ", modelId=" + modelId
                 + ", messages=REDACTED, tools=" + tools.size()
+                + ", responseFormat=" + responseFormat.type()
                 + ", deadline=" + deadline + "]";
     }
 

@@ -42,9 +42,13 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
     @Override
     public ProviderChatResponse chat(ProviderChatRequest request) {
         Objects.requireNonNull(request, "request is required");
+        ModelUseCase useCase = !request.tools().isEmpty()
+                ? ModelUseCase.TOOL_CALL
+                : request.responseFormat().structured()
+                        ? ModelUseCase.STRUCTURED_OUTPUT
+                        : ModelUseCase.CHAT;
         ProviderModelRegistration registration = capabilityRegistry.require(
-                request.provider(), request.modelId(),
-                request.tools().isEmpty() ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
+                request.provider(), request.modelId(), useCase);
         ProviderChatAdapter adapter = adapterRegistry.require(request.provider());
         Instant deadline = earlier(request.deadline(), clock.instant().plus(registration.timeout()));
 

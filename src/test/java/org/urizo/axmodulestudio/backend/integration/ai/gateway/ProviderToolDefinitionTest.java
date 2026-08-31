@@ -89,6 +89,16 @@ class ProviderToolDefinitionTest {
                 "{\"path\":\"README.md\",\"path\":\"other\",\"line\":2}"))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("Native tool call arguments are invalid.");
+
+        for (String invalid : java.util.List.of(
+                "{\"path\":\"README.md\",\"line\":2} trailing",
+                "[\"README.md\",2]",
+                "{\"path\":\"README.md\"}",
+                "{\"path\":\"README.md\",\"line\":2,\"extra\":true}")) {
+            assertThatThrownBy(() -> definition.normalizeArguments(invalid))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessage("Native tool call arguments are invalid.");
+        }
     }
 
     @Test

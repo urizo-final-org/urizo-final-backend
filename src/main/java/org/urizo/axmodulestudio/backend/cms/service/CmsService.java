@@ -22,9 +22,11 @@ import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
 public class CmsService {
 
     private final CmsRepository repository;
+    private final CmsSiteSettingsService siteSettings;
 
-    public CmsService(CmsRepository repository) {
+    public CmsService(CmsRepository repository, CmsSiteSettingsService siteSettings) {
         this.repository = repository;
+        this.siteSettings = siteSettings;
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
@@ -214,6 +216,7 @@ public class CmsService {
                 key, layout.trim(), color.toUpperCase(), siteName.trim(), text(header), text(footer),
                 heroImageUrl.trim(), heroTitle.trim(), text(heroSubtitle),
                 text(heroButtonLabel), text(heroButtonUrl));
+        siteSettings.applyTemplateToDefaultSite(key);
         return activeTemplate();
     }
 

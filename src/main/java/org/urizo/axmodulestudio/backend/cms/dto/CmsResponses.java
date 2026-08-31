@@ -65,4 +65,27 @@ public final class CmsResponses {
             boolean active,
             Instant updatedAt) {
     }
+
+    public record SiteSettingsView(
+            String defaultSiteKey,
+            String defaultTemplateKey,
+            Instant updatedAt) {
+    }
+
+    public record SiteView(
+            String key,
+            String name,
+            String publicPath,
+            String templateKey,
+            boolean enabled,
+            boolean defaultSite,
+            Instant updatedAt) {
+    }
+
+    public record PublicSiteView(
+            String key,
+            String name,
+            String publicPath,
+            TemplateView template) {
+    }
 }

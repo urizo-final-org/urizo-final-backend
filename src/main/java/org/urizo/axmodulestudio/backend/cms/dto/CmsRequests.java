@@ -41,4 +41,18 @@ public final class CmsRequests {
             @Size(max = 60) String heroButtonLabel,
             @Size(max = 180) String heroButtonUrl) {
     }
+
+    public record SiteSettingsRequest(
+            @NotBlank @Size(max = 40) String defaultSiteKey,
+            @NotBlank @Size(max = 40) String defaultTemplateKey) {
+    }
+
+    public record SiteRequest(
+            @NotBlank @Size(max = 100) String siteName,
+            @NotBlank @Size(max = 180)
+            @Pattern(regexp = "^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")
+            String publicPath,
+            @NotBlank @Size(max = 40) String templateKey,
+            boolean enabled) {
+    }
 }

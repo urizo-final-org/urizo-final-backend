@@ -31,7 +31,7 @@ import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
 @Validated
 @RequestMapping("/internal/coding/worker/jobs/{jobId}/attempts/{pipelineAttempt}")
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
-public final class CodingHandlerResultController {
+public class CodingHandlerResultController {
 
     private final CodingHandlerResultService service;
 

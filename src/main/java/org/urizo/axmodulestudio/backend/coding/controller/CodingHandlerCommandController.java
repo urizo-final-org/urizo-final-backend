@@ -37,7 +37,7 @@ import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
 @Profile("dev & local-full & !dev-session & coding-job-local-fixture")
 @RequestMapping("/api/coding-jobs")
 @ConditionalOnProperty(prefix = "ax.coding.job-lifecycle", name = "enabled", havingValue = "true")
-public final class CodingHandlerCommandController {
+public class CodingHandlerCommandController {
 
     private final CodingHandlerCommandService service;
     private final AuthService authService;

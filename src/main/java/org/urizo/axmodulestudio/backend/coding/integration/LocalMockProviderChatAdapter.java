@@ -17,6 +17,7 @@ final class LocalMockProviderChatAdapter implements ProviderChatAdapter {
 
     private static final Set<ModelProvider> PROVIDERS = Set.of(
             ModelProvider.OPENAI,
+            ModelProvider.ANTHROPIC,
             ModelProvider.GOOGLE_GENAI);
 
     @Override

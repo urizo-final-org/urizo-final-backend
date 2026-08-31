@@ -16,6 +16,7 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -230,8 +231,10 @@ class CodingHandlerStageServiceTest {
                                 + "\\\"payload\\\":{\\\"summary\\\":\\\"done\\\"}}\","
                                 + "\"toolCalls\":[]}",
                         12, 6, Duration.ofMillis(10)));
+        AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
         when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
             JsonNode request = invocation.getArgument(1);
+            submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
             return new CodingToolContract.Accepted(
                     "1.0", "TOOL_ACCEPTED",
                     UUID.fromString(request.path("requestId").asText()),
@@ -240,11 +243,11 @@ class CodingHandlerStageServiceTest {
                     "ACCEPTED", "/internal/coding/tool-executions/" + EXECUTION,
                     100, NOW);
         });
-        when(toolService.result("Bearer worker", EXECUTION)).thenReturn(
+        when(toolService.result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
                 new CodingToolContract.ResultContent(
                         "1.0",
                         UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
-                        UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                        submittedToolCall.get(),
                         JOB, TRACE, "stage-tool.result", EXECUTION,
                         "application/json", 120,
                         "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",

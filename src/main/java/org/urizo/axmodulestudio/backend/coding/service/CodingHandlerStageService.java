@@ -580,7 +580,7 @@ public final class CodingHandlerStageService {
             validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
                     raw,
                     candidate -> readOutcome(candidate, ports) != null,
-                    CodingHandlerStageService::unwrapJsonObject);
+                    StructuredOutputGuard::extractOutermostJsonObject);
         }
         catch (ProviderGatewayException failure) {
             throw contract("The Coding Model stage result is invalid.");
@@ -597,36 +597,15 @@ public final class CodingHandlerStageService {
         if (raw == null) {
             return null;
         }
-        try {
-            JsonNode value = objectMapper.readTree(raw);
-            if (!value.isObject() || value.size() != 2
-                    || !value.path("port").isTextual()
-                    || !ports.contains(value.path("port").asText())
-                    || !value.path("payload").isObject()) {
-                return null;
-            }
-            return new ModelOutcome(
-                    value.path("port").asText(), value.path("payload").deepCopy());
-        }
-        catch (JsonProcessingException failure) {
+        JsonNode value = StructuredOutputGuard.readSingleJsonObject(objectMapper, raw);
+        if (value == null || value.size() != 2
+                || !value.path("port").isTextual()
+                || !ports.contains(value.path("port").asText())
+                || !value.path("payload").isObject()) {
             return null;
         }
-    }
-
-    /**
-     * Keeps the outermost JSON object and drops whatever surrounds it, which
-     * covers both a Markdown code fence and leading or trailing prose.
-     */
-    private static String unwrapJsonObject(String raw) {
-        if (raw == null) {
-            return null;
-        }
-        int start = raw.indexOf('{');
-        int end = raw.lastIndexOf('}');
-        if (start < 0 || end <= start) {
-            return raw;
-        }
-        return raw.substring(start, end + 1);
+        return new ModelOutcome(
+                value.path("port").asText(), value.path("payload").deepCopy());
     }
 
     private static CodingHandlerContract.HandlerResultResponse latestResult(

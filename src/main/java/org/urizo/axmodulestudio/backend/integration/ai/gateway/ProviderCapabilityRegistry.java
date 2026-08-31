@@ -54,9 +54,15 @@ public final class ProviderCapabilityRegistry {
         return registrations.values().stream()
                 .filter(registration -> registration.capabilities().containsAll(useCase.requiredCapabilities()))
                 .sorted(Comparator
-                        .comparing((ProviderModelRegistration value) -> value.provider().name())
+                        .comparingInt((ProviderModelRegistration value) ->
+                                defaultSelectionOrder(value.provider()))
+                        .thenComparing(value -> value.provider().name())
                         .thenComparing(ProviderModelRegistration::modelId))
                 .toList();
+    }
+
+    private static int defaultSelectionOrder(ModelProvider provider) {
+        return provider == ModelProvider.ANTHROPIC ? 1 : 0;
     }
 
     private record ModelKey(ModelProvider provider, String modelId) {

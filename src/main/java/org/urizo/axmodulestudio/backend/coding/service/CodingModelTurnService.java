@@ -25,10 +25,12 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatGatewayPort;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRequest;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -40,6 +42,8 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+    private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
+            new StructuredOutputGuard();
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
     private final ObjectMapper objectMapper;
@@ -83,7 +87,7 @@ public class CodingModelTurnService {
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),
-                normalizedPrompt(request, toolMode),
+                normalizedMessages(request, toolMode),
                 request.deadlineAt()));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
@@ -192,45 +196,105 @@ public class CodingModelTurnService {
         return true;
     }
 
-    private String normalizedPrompt(CodingModelTurnContract.Request request, ToolMode toolMode) {
-        StringBuilder prompt = new StringBuilder();
-        for (JsonNode message : request.messages()) {
-            String role = message.path("role").textValue();
-            String content;
-            if ("tool".equals(role) || message.has("toolCalls")) {
-                try {
-                    content = objectMapper.writeValueAsString(message);
-                }
-                catch (JsonProcessingException failure) {
-                    throw invalidContract();
-                }
-            }
-            else {
-                content = message.path("content").textValue();
-            }
-            prompt.append('[').append(role).append("]\n").append(content).append("\n\n");
-        }
+    private List<ProviderChatMessage> normalizedMessages(
+            CodingModelTurnContract.Request request, ToolMode toolMode) {
+        List<ProviderChatMessage> messages = new ArrayList<>();
+        Map<String, String> pendingToolNames = new HashMap<>();
         if (toolMode == ToolMode.PROVIDER) {
             try {
-                prompt.append("[system]\n")
-                        .append("Return exactly one JSON object with fields assistant and toolCalls. ")
-                        .append("assistant must be a string and toolCalls must contain zero or one ")
-                        .append("declared tool call with name and arguments. Do not add markdown.\n")
-                        .append("Declared tools: ")
-                        .append(objectMapper.writeValueAsString(request.toolSchemas()));
+                messages.add(ProviderChatMessage.plain(
+                        ProviderChatMessage.Role.SYSTEM,
+                        "Return exactly one JSON object with fields assistant and toolCalls. "
+                                + "assistant must be a string and toolCalls must contain zero or one "
+                                + "declared tool call with name and arguments. Do not add markdown.\n"
+                                + "Declared tools: "
+                                + objectMapper.writeValueAsString(request.toolSchemas())));
             }
             catch (JsonProcessingException failure) {
                 throw invalidContract();
             }
         }
-        return prompt.toString().stripTrailing();
+        for (JsonNode message : request.messages()) {
+            String role = message.path("role").textValue();
+            String content = message.path("content").textValue();
+            try {
+                switch (role) {
+                    case "system" -> messages.add(ProviderChatMessage.plain(
+                            ProviderChatMessage.Role.SYSTEM, content));
+                    case "user" -> messages.add(ProviderChatMessage.plain(
+                            ProviderChatMessage.Role.USER, content));
+                    case "assistant" -> {
+                        List<ProviderChatMessage.ToolCall> toolCalls = new ArrayList<>();
+                        if (message.has("toolCalls")) {
+                            for (JsonNode toolCall : message.path("toolCalls")) {
+                                String toolCallId = toolCall.path("toolCallId").asText();
+                                String name = toolCall.path("name").asText();
+                                if (pendingToolNames.putIfAbsent(toolCallId, name) != null) {
+                                    throw invalidContract();
+                                }
+                                toolCalls.add(new ProviderChatMessage.ToolCall(
+                                        toolCallId,
+                                        name,
+                                        objectMapper.writeValueAsString(
+                                                toolCall.path("arguments"))));
+                            }
+                        }
+                        messages.add(ProviderChatMessage.assistant(content, toolCalls));
+                    }
+                    case "tool" -> {
+                        String toolCallId = message.path("toolCallId").asText();
+                        String name = pendingToolNames.remove(toolCallId);
+                        if (name == null) {
+                            throw invalidContract();
+                        }
+                        messages.add(ProviderChatMessage.tool(
+                                toolCallId, name, content));
+                    }
+                    default -> throw invalidContract();
+                }
+            }
+            catch (JsonProcessingException | IllegalArgumentException failure) {
+                throw invalidContract();
+            }
+        }
+        if (!pendingToolNames.isEmpty()) {
+            throw invalidContract();
+        }
+        return List.copyOf(messages);
     }
 
     private ParsedAssistant parseProviderToolEnvelope(
             CodingModelTurnContract.Request request, String content) {
+        StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
-            JsonNode envelope = objectMapper.readTree(content);
-            if (!envelope.isObject()
+            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
+                    content,
+                    candidate -> readProviderToolEnvelope(request, candidate) != null,
+                    StructuredOutputGuard::extractOutermostJsonObject);
+        }
+        catch (ProviderGatewayException failure) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                    "Model provider returned an invalid Coding tool envelope.");
+        }
+        ParsedAssistant parsed = readProviderToolEnvelope(request, validated.value());
+        if (parsed == null) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                    "Model provider returned an invalid Coding tool envelope.");
+        }
+        return parsed;
+    }
+
+    private ParsedAssistant readProviderToolEnvelope(
+            CodingModelTurnContract.Request request, String content) {
+        if (content == null) {
+            return null;
+        }
+        try {
+            JsonNode envelope = StructuredOutputGuard.readSingleJsonObject(
+                    objectMapper, content);
+            if (envelope == null
                     || envelope.size() != 2
                     || !envelope.path("assistant").isTextual()
                     || !envelope.path("toolCalls").isArray()
@@ -266,9 +330,7 @@ public class CodingModelTurnService {
             return new ParsedAssistant(assistant, List.copyOf(calls));
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
-            throw new ProviderGatewayException(
-                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid Coding tool envelope.");
+            return null;
         }
     }
 

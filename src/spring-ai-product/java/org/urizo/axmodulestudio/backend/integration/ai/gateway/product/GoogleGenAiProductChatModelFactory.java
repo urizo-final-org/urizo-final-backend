@@ -17,7 +17,8 @@ final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactor
     }
 
     @Override
-    public ProductChatModelSession open(String credential, String modelId) {
+    public ProductChatModelSession open(
+            String credential, String modelId, int maxOutputTokens) {
         Client client = Client.builder()
                 .apiKey(credential)
                 .vertexAI(false)
@@ -25,7 +26,7 @@ final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactor
         try {
             GoogleGenAiChatOptions options = GoogleGenAiChatOptions.builder()
                     .model(modelId)
-                    .maxOutputTokens(512)
+                    .maxOutputTokens(maxOutputTokens)
                     .internalToolExecutionEnabled(false)
                     .build();
             GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()

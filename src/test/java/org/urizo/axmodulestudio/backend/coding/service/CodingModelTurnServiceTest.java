@@ -30,6 +30,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatGatewayPort;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRequest;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
@@ -78,6 +79,11 @@ class CodingModelTurnServiceTest {
         verify(gateway).chat(routed.capture());
         assertThat(routed.getValue().provider()).isEqualTo(ModelProvider.GOOGLE_GENAI);
         assertThat(routed.getValue().modelId()).isEqualTo(MODEL);
+        assertThat(routed.getValue().messages())
+                .extracting(ProviderChatMessage::role)
+                .containsExactly(
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.USER);
         assertThat(routed.getValue().prompt()).isEqualTo(
                 "[system]\nStay in scope.\n\n[user]\nSummarize the approved contract.");
         assertThat(routed.getValue().toString()).doesNotContain("Stay in scope").contains("REDACTED");
@@ -146,7 +152,7 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
-    void parsesOneApprovedProviderToolCallFromTheStrictEnvelope() {
+    void repairsOneFencedApprovedProviderToolCallAndKeepsTheStrictEnvelope() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -165,8 +171,9 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_file\","
-                        + "\"arguments\":{\"path\":\"src/App.java\"}}]}",
+                "Here is the result.\n```json\n"
+                        + "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_file\","
+                        + "\"arguments\":{\"path\":\"src/App.java\"}}]}\n```",
                 8,
                 3,
                 Duration.ZERO));
@@ -178,6 +185,117 @@ class CodingModelTurnServiceTest {
             assertThat(call.name()).isEqualTo("read_file");
             assertThat(call.arguments().path("path").asText()).isEqualTo("src/App.java");
         });
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        assertThat(routed.getValue().messages())
+                .extracting(ProviderChatMessage::role)
+                .containsExactly(
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.USER);
+        assertThat(routed.getValue().messages().get(0).content())
+                .startsWith("Return exactly one JSON object")
+                .contains("Declared tools:");
+    }
+
+    @Test
+    void preservesAssistantToolAndToolResultRolesAcrossProviderTurns() {
+        ProviderModelRegistration google = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService providerToolService = new CodingModelTurnService(
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        CodingModelTurnContract.Request chat = chatRequest();
+        String toolCallId = "77777777-7777-4777-8777-777777777777";
+        ObjectNode assistant = objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", "");
+        assistant.putArray("toolCalls").addObject()
+                .put("toolCallId", toolCallId)
+                .put("name", "read_file")
+                .set("arguments", objectMapper.createObjectNode().put("path", "README.md"));
+        ObjectNode tool = objectMapper.createObjectNode()
+                .put("role", "tool")
+                .put("toolCallId", toolCallId)
+                .put("executionId", "88888888-8888-4888-8888-888888888888")
+                .put("content", "{\"content\":\"fixture\"}");
+        tool.putObject("result")
+                .put("mediaType", "application/json")
+                .put("resultRef", "/internal/coding/tool-executions/fixture/result")
+                .put("sizeBytes", 21)
+                .put("digest", "sha256:" + "c".repeat(64));
+        CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
+                chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
+                chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"),
+                List.of(chat.messages().get(0), chat.messages().get(1), assistant, tool),
+                List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+        when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                "{\"assistant\":\"done\",\"toolCalls\":[]}",
+                8,
+                3,
+                Duration.ZERO));
+
+        providerToolService.execute(toolRequest);
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        assertThat(routed.getValue().messages())
+                .extracting(ProviderChatMessage::role)
+                .containsExactly(
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.USER,
+                        ProviderChatMessage.Role.ASSISTANT,
+                        ProviderChatMessage.Role.TOOL);
+        assertThat(routed.getValue().messages().get(3).toolCalls())
+                .singleElement()
+                .satisfies(call -> {
+                    assertThat(call.id()).isEqualTo(toolCallId);
+                    assertThat(call.name()).isEqualTo("read_file");
+                });
+        assertThat(routed.getValue().messages().get(4).toolCallId())
+                .isEqualTo(toolCallId);
+    }
+
+    @Test
+    void rejectsAnEnvelopeThatIsStillInvalidAfterOneRepair() {
+        ProviderModelRegistration google = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService providerToolService = new CodingModelTurnService(
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        CodingModelTurnContract.Request chat = chatRequest();
+        CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
+                chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
+                chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"), chat.messages(),
+                List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+        when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                "prefix {\"assistant\":\"ok\",\"toolCalls\":[]} "
+                        + "{\"assistant\":\"second\",\"toolCalls\":[]}",
+                8,
+                3,
+                Duration.ZERO));
+
+        assertThatThrownBy(() -> providerToolService.execute(toolRequest))
+                .isInstanceOfSatisfying(ProviderGatewayException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID));
     }
 
     @Test

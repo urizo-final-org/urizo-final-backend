@@ -61,6 +61,7 @@ final class ProfileSnapshotValidator {
             handler("coding.preview_approval", "approval", "approved", "rejected"),
             handler("coding.pr_request", "tool", "requested"),
             handler("coding.deploy_request", "tool", "recorded"),
+            handler("coding.rework_gate", "check", "retry", "handover"),
             handler("cms.analyze", "agent", "feasible", "infeasible"),
             handler("cms.preview", "agent", "ready"),
             handler("cms.discard", "tool", "retry", "discarded"),

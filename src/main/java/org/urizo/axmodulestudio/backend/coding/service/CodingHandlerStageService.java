@@ -25,6 +25,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -41,6 +42,9 @@ public final class CodingHandlerStageService {
     private final CodingToolService tools;
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
+    private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
+            new StructuredOutputGuard();
+
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -555,21 +559,66 @@ public final class CodingHandlerStageService {
         }
     }
 
+    /**
+     * The stage prompt asks for one JSON object, but the model turn contract only
+     * carries TEXT, so nothing can force that shape. Models routinely wrap a
+     * correct answer in a Markdown fence or a sentence, which is a formatting
+     * miss rather than a wrong answer, so one repair pass is allowed before the
+     * stage is failed. A second miss is a contract violation and is not retried.
+     */
     private ModelOutcome parseOutcome(String handlerKey, String raw, Set<String> ports) {
+        StructuredOutputGuard.ValidatedOutput<String> validated;
+        try {
+            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
+                    raw,
+                    candidate -> readOutcome(candidate, ports) != null,
+                    CodingHandlerStageService::unwrapJsonObject);
+        }
+        catch (ProviderGatewayException failure) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        ModelOutcome outcome = readOutcome(validated.value(), ports);
+        if (outcome == null) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        return outcome;
+    }
+
+    /** Returns null when the text is not the declared stage result object. */
+    private ModelOutcome readOutcome(String raw, Set<String> ports) {
+        if (raw == null) {
+            return null;
+        }
         try {
             JsonNode value = objectMapper.readTree(raw);
             if (!value.isObject() || value.size() != 2
                     || !value.path("port").isTextual()
                     || !ports.contains(value.path("port").asText())
                     || !value.path("payload").isObject()) {
-                throw contract("The Coding Model stage result is invalid.");
+                return null;
             }
             return new ModelOutcome(
                     value.path("port").asText(), value.path("payload").deepCopy());
         }
         catch (JsonProcessingException failure) {
-            throw contract("The Coding Model stage result is invalid.");
+            return null;
         }
+    }
+
+    /**
+     * Keeps the outermost JSON object and drops whatever surrounds it, which
+     * covers both a Markdown code fence and leading or trailing prose.
+     */
+    private static String unwrapJsonObject(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        int start = raw.indexOf('{');
+        int end = raw.lastIndexOf('}');
+        if (start < 0 || end <= start) {
+            return raw;
+        }
+        return raw.substring(start, end + 1);
     }
 
     private static CodingHandlerContract.HandlerResultResponse latestResult(

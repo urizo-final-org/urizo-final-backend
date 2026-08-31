@@ -29,6 +29,18 @@ param(
     # Read-only source of the CMS content the preview is filled with.
     [string]$SourceDatabaseContainer = 'axms-spring-dev-database-1',
 
+    # Where the MCP Coding Tools look for their workspaces. It has to be a named
+    # volume rather than a host folder: a Docker Desktop bind mount always shows
+    # as root:root inside the container, the MCP service runs as uid 10001, and
+    # Git then refuses the repository with "dubious ownership". That cannot be
+    # waived, because Git reads safe.directory only from system/global config
+    # and the service pins both to nothing.
+    [string]$McpWorkspaceVolume = 'axms-spring-dev-mcp-workspaces',
+
+    # Used only to create and inspect workspaces. It is the same image the MCP
+    # service runs, so this adds no new dependency and keeps Git versions equal.
+    [string]$McpWorkspaceImage = 'axms/mcp-server:dev',
+
     [switch]$RunOnce
 )
 
@@ -122,6 +134,117 @@ function Get-RepositorySourcePath {
     return (Join-Path $workspaceRoot $known[$Repository])
 }
 
+function Invoke-CreateMcpWorkspace {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$BaseSha,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId
+    )
+
+    # Both values are interpolated into a shell command below, so they are
+    # checked against fixed patterns first. WORKSPACE_KEY is the same pattern the
+    # MCP server enforces, so a name it would reject fails here with a clear
+    # message instead of surfacing later as WORKSPACE_NOT_FOUND.
+    if ($WorkspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw "RUNNER_PAYLOAD_INVALID|workspaceId 형식이 올바르지 않습니다: $WorkspaceId"
+    }
+    if ($BaseSha -notmatch '^([0-9a-f]{40}|[0-9a-f]{64})$') {
+        throw "RUNNER_PAYLOAD_INVALID|baseSha 형식이 올바르지 않습니다: $BaseSha"
+    }
+
+    $source = Get-RepositorySourcePath -Repository $Repository
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "RUNNER_REPOSITORY_MISSING|저장소 폴더가 없습니다: $source"
+    }
+
+    # A linked worktree cannot be used here. Its .git is a file holding a Windows
+    # absolute path, which does not resolve inside the container, so the MCP
+    # server would reject it with REPOSITORY_SCOPE_DENIED. Only a self-contained
+    # clone works.
+    #
+    # --user 0:0 is required and deliberate. The image runs as 10001, which can
+    # neither create a directory in the volume root nor read the root-owned
+    # source mount. Ownership is handed to the service user in the same command,
+    # so the MCP service never sees a directory it does not own. The container is
+    # short-lived and has no network and no secrets.
+    # The shell commands below deliberately carry no double quotes. Windows
+    # PowerShell rewrites quoting when it hands an argument to a native command,
+    # and an embedded quote reaches sh mangled, which silently turned an earlier
+    # version of this check into a no-op.
+    #
+    # The probe runs as the service user because the workspace belongs to it;
+    # root does not own the directory and Git then refuses to read its config.
+    $probe = "if [ -d /workspaces/$WorkspaceId ]; then " `
+        + "git -C /workspaces/$WorkspaceId config --local --get axms.repository || echo AXMS_NO_MARKER; " `
+        + 'else echo AXMS_MISSING; fi'
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $state = & docker run --rm `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            --entrypoint sh $McpWorkspaceImage -c $probe 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_FAILED|작업 폴더를 확인하지 못했습니다: $(($state | Select-Object -Last 3) -join ' ')"
+    }
+    $held = "$(@($state) | Select-Object -Last 1)".Trim()
+
+    if ($held -ne 'AXMS_MISSING') {
+        # One workspace holds one repository. Spring carries a single workspace_id
+        # per pipeline attempt, so a second repository under the same id cannot be
+        # expressed today. Serving the first clone would hand the tools the wrong
+        # repository, so the mismatch is refused instead.
+        if ($held -ne $Repository) {
+            throw "RUNNER_WORKSPACE_CONFLICT|이 workspaceId 는 다른 저장소에 묶여 있습니다: $WorkspaceId ($held)"
+        }
+        return @{
+            repo = $Repository
+            workspaceId = $WorkspaceId
+            workspacePath = "/workspaces/$WorkspaceId"
+            volume = $McpWorkspaceVolume
+            reused = $true
+        }
+    }
+
+    # The clone runs as root and records the repository before handing ownership
+    # over, so the marker is written while root still owns the new directory.
+    $create = @(
+        'set -e',
+        "git clone --quiet /src /workspaces/$WorkspaceId",
+        "git -C /workspaces/$WorkspaceId checkout --quiet --detach $BaseSha",
+        "git -C /workspaces/$WorkspaceId config --local axms.repository $Repository",
+        "chown -R 10001:10001 /workspaces/$WorkspaceId"
+    ) -join '; '
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm --user 0:0 `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            -v "${source}:/src:ro" `
+            --entrypoint sh $McpWorkspaceImage -c $create 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_FAILED|작업 폴더를 만들지 못했습니다: $(($output | Select-Object -Last 3) -join ' ')"
+    }
+    $reused = $false
+
+    return @{
+        repo = $Repository
+        workspaceId = $WorkspaceId
+        workspacePath = "/workspaces/$WorkspaceId"
+        volume = $McpWorkspaceVolume
+        reused = $reused
+    }
+}
+
 function Invoke-CreateWorktree {
     param($Payload)
 
@@ -129,6 +252,14 @@ function Invoke-CreateWorktree {
     $baseSha = Get-PayloadValue -Payload $Payload -Name 'baseSha'
     if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
     if (-not $baseSha) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 baseSha 가 없습니다.' }
+
+    # A workspaceId means the Coding Job wants a room the MCP tools can reach.
+    # Without one this stays the host worktree the BUILD, TEST, PREVIEW and
+    # CREATE_PR commands already use, so their paths are untouched.
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    if ($workspaceId) {
+        return Invoke-CreateMcpWorkspace -Repository $repository -BaseSha $baseSha -WorkspaceId $workspaceId
+    }
 
     $source = Get-RepositorySourcePath -Repository $repository
     if (-not (Test-Path -LiteralPath $source -PathType Container)) {

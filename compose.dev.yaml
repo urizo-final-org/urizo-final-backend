@@ -273,6 +273,14 @@ services:
       PYTHONUNBUFFERED: "1"
     secrets:
       - mcp_service_token
+    # The Coding workspaces must be a named volume, not a host bind mount.
+    # A Docker Desktop bind mount always appears as root:root inside the
+    # container, and the service runs as uid 10001, so Git refuses the
+    # repository with "dubious ownership". That cannot be waived here: Git
+    # reads safe.directory only from system/global config, and the server
+    # pins GIT_CONFIG_GLOBAL to /dev/null with GIT_CONFIG_NOSYSTEM=1.
+    volumes:
+      - axms_mcp_workspaces:/workspaces
     expose:
       - "8091"
     healthcheck:
@@ -480,6 +488,8 @@ volumes:
     name: axms-spring-dev-checkpoint-db
   axms_spring_valkey:
     name: axms-spring-dev-valkey
+  axms_mcp_workspaces:
+    name: axms-spring-dev-mcp-workspaces
 
 networks:
   axms_internal:

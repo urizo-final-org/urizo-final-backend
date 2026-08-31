@@ -6,13 +6,16 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PublicSiteView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
+import org.urizo.axmodulestudio.backend.cms.service.CmsSiteSettingsService;
 
 @RestController
 @Profile("local-full")
@@ -20,9 +23,11 @@ import org.urizo.axmodulestudio.backend.cms.service.CmsService;
 public class CmsSiteController {
 
     private final CmsService cms;
+    private final CmsSiteSettingsService siteSettings;
 
-    public CmsSiteController(CmsService cms) {
+    public CmsSiteController(CmsService cms, CmsSiteSettingsService siteSettings) {
         this.cms = cms;
+        this.siteSettings = siteSettings;
     }
 
     @GetMapping("/menus")
@@ -56,7 +61,12 @@ public class CmsSiteController {
     }
 
     @GetMapping("/template")
-    TemplateView template() {
-        return cms.activeTemplate();
+    TemplateView template(@RequestParam(defaultValue = "/") String path) {
+        return siteSettings.resolveTemplate(path);
+    }
+
+    @GetMapping("/context")
+    PublicSiteView context(@RequestParam(defaultValue = "/") String path) {
+        return siteSettings.resolveSite(path);
     }
 }

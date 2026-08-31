@@ -212,6 +212,10 @@ public class CmsRepository {
         return templateRepository.findFirstByActiveYn(ACTIVE).map(CmsRepository::template);
     }
 
+    public Optional<TemplateView> findTemplate(String key) {
+        return templateRepository.findById(key).map(CmsRepository::template);
+    }
+
     public boolean templateExists(String key) {
         return templateRepository.existsById(key);
     }
@@ -219,6 +223,13 @@ public class CmsRepository {
     public void deactivateTemplates() {
         templateRepository.findAllByActiveYn(ACTIVE).forEach(CmsTemplateEntity::deactivate);
         templateRepository.flush();
+    }
+
+    public void activateTemplate(String key) {
+        deactivateTemplates();
+        templateRepository.findById(key)
+                .orElseThrow()
+                .markActive(Instant.now());
     }
 
     public int updateTemplate(

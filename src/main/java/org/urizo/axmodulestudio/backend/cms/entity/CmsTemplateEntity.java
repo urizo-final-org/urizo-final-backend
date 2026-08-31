@@ -113,6 +113,11 @@ public class CmsTemplateEntity {
         this.activeYn = "N";
     }
 
+    public void markActive(Instant changedAt) {
+        this.activeYn = "Y";
+        this.updatedAt = changedAt;
+    }
+
     public void activate(
             String layout,
             String primaryColor,

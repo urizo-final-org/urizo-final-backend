@@ -111,6 +111,7 @@ public class SecurityConfig {
                                 "/api/auth/login", "/api/auth/refresh").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/site/**").permitAll()
                         .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()
+                        .requestMatchers("/api/admin/cms/**").hasRole("SUPER_ADMIN")
                         .requestMatchers("/api/cms/**")
                                 .hasAnyRole("SUPER_ADMIN", "GENERAL_ADMIN")
                         .requestMatchers(

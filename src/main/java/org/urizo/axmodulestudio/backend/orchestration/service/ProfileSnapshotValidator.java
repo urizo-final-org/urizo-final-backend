@@ -38,7 +38,7 @@ final class ProfileSnapshotValidator {
     private static final Pattern MODEL_KEY = Pattern.compile("^[a-z][a-z0-9_-]{0,127}$");
     private static final Pattern TOOL_KEY = Pattern.compile("^[a-z][a-z0-9_]{0,127}$");
     private static final Pattern GUARDRAIL_KEY = Pattern.compile("^[a-z][a-z0-9_.:-]{0,127}$");
-    private static final int SUPPORTED_MAX_ATTEMPTS = 3;
+    private static final int MAX_WORKER_ATTEMPTS = 20;
     private static final String SUPPORTED_GUARDRAIL_PROFILE = "central.default";
 
     private static final Map<String, Set<String>> TOOLS = Map.of(
@@ -216,8 +216,8 @@ final class ProfileSnapshotValidator {
         exactFields(config, Set.of("maxNodes", "maxAttempts", "loopLimits"), "config");
         int maxNodes = positiveInt(config.get("maxNodes"), "config.maxNodes");
         int maxAttempts = positiveInt(config.get("maxAttempts"), "config.maxAttempts");
-        if (maxAttempts != SUPPORTED_MAX_ATTEMPTS) {
-            invalid("config.maxAttempts must be 3 for this runtime");
+        if (maxAttempts > MAX_WORKER_ATTEMPTS) {
+            invalid("config.maxAttempts must be between 1 and 20");
         }
         JsonNode rawLimits = config.get("loopLimits");
         if (rawLimits == null || !rawLimits.isArray()) {

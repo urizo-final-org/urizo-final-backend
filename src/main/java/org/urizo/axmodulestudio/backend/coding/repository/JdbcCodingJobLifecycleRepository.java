@@ -64,7 +64,7 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                 return decodeResponse(replay.responseJson());
             }
 
-            requireActiveLlmOpsProfile(request.profileVersionId());
+            ProfileState profile = requireActiveLlmOpsProfile(request.profileVersionId());
             Instant now = databaseInstant();
             UUID jobId = UUID.randomUUID();
             CodingJobLifecycleContract.JobResponse response = new CodingJobLifecycleContract.JobResponse(
@@ -87,7 +87,7 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                     now,
                     null,
                     null);
-            insertJob(response, request);
+            insertJob(response, request, profile.workerMaxAttempts());
             insertCommand(
                     "CREATE",
                     idempotencyKey,
@@ -237,16 +237,18 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
 
     private void insertJob(
             CodingJobLifecycleContract.JobResponse response,
-            CodingJobLifecycleContract.CreateRequest request) {
+            CodingJobLifecycleContract.CreateRequest request,
+            int workerMaxAttempts) {
         int updated = jdbcTemplate.update(connection -> {
             PreparedStatement statement = connection.prepareStatement("""
                     INSERT INTO app.coding_job (
                         job_id, trace_id, status, state_version, context_digest,
                         prompt_version, allowed_capabilities, allowed_nodes, expires_at,
                         created_at, updated_at, authority_source, actor_id, project_id,
-                        repository_id, graph_step, base_sha, policy_hash, profile_version_id
+                        repository_id, graph_step, base_sha, policy_hash, profile_version_id,
+                        worker_max_attempts
                     ) VALUES (?, ?, 'PENDING', 1, ?, ?, ?, ?, ?, ?, ?,
-                              'SPRING_CONTROL_PLANE', ?, ?, ?, ?, ?, ?, ?)
+                              'SPRING_CONTROL_PLANE', ?, ?, ?, ?, ?, ?, ?, ?)
                     """);
             int index = 1;
             statement.setObject(index++, response.jobId());
@@ -266,7 +268,8 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
             statement.setString(index++, response.graphStep());
             statement.setString(index++, request.baseSha());
             statement.setString(index++, request.policyHash());
-            statement.setObject(index, response.profileVersionId());
+            statement.setObject(index++, response.profileVersionId());
+            statement.setInt(index, workerMaxAttempts);
             return statement;
         });
         if (updated != 1) {
@@ -380,12 +383,17 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                 failure);
     }
 
-    private void requireActiveLlmOpsProfile(UUID profileVersionId) {
+    private ProfileState requireActiveLlmOpsProfile(UUID profileVersionId) {
         List<ProfileState> rows = jdbcTemplate.query(
-                "SELECT profile_key, status FROM app.ai_profile_version "
+                "SELECT profile_key, status, "
+                        + "(snapshot_json #>> '{config,maxAttempts}')::integer "
+                        + "AS worker_max_attempts "
+                        + "FROM app.ai_profile_version "
                         + "WHERE profile_version_id = ?",
                 (resultSet, rowNumber) -> new ProfileState(
-                        resultSet.getString("profile_key"), resultSet.getString("status")),
+                        resultSet.getString("profile_key"),
+                        resultSet.getString("status"),
+                        resultSet.getObject("worker_max_attempts", Integer.class)),
                 profileVersionId);
         if (rows.isEmpty()) {
             throw new CodingJobLifecycleException(
@@ -400,6 +408,15 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
                     "An ACTIVE LLM_OPS Profile Version is required.",
                     HttpStatus.CONFLICT);
         }
+        if (profile.workerMaxAttempts() == null
+                || profile.workerMaxAttempts() < 1
+                || profile.workerMaxAttempts() > 20) {
+            throw new CodingJobLifecycleException(
+                    "PROFILE_VERSION_INVALID",
+                    "The active LLM_OPS Profile Version has an invalid maxAttempts value.",
+                    HttpStatus.CONFLICT);
+        }
+        return profile;
     }
 
     private static List<String> strings(Array sqlArray) throws SQLException {
@@ -430,6 +447,6 @@ public final class JdbcCodingJobLifecycleRepository implements CodingJobLifecycl
     private record CommandReplay(UUID jobId, byte[] requestDigest, String responseJson) {
     }
 
-    private record ProfileState(String profileKey, String status) {
+    private record ProfileState(String profileKey, String status, Integer workerMaxAttempts) {
     }
 }

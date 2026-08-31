@@ -206,6 +206,38 @@ class NaturalCmsStageServiceTest {
         verify(harness.resources).apply(RESOURCE, command);
     }
 
+    @Test
+    void handlerResultFailureDoesNotLeaveCmsMutationOutsideTheAtomicStoreBoundary()
+            throws Exception {
+        Harness harness = new Harness(approvedJob());
+        ObjectNode command = (ObjectNode) approvedJob().structuredCommand();
+        ObjectNode current = harness.mapper.createObjectNode()
+                .put("id", 7).put("title", "Old").put("body", "Old body")
+                .put("updatedAt", NOW.toString());
+        when(harness.resources.validateCommand(RESOURCE, command)).thenReturn(command);
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(current);
+        when(harness.mcp.callTool(eq("revalidate_cms_preview"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode().put("valid", true)));
+        ObjectNode ready = harness.mapper.createObjectNode().put("applyReady", true);
+        ready.set("command", command.deepCopy());
+        when(harness.mcp.callTool(eq("apply_cms_preview"), any()))
+                .thenReturn(structured(ready));
+        when(harness.resources.apply(RESOURCE, command)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7).put("title", "New"));
+        when(harness.store.recordApplied(
+                eq("Bearer worker"), eq(JOB), eq(1), eq(RESULT), eq(1), any()))
+                .thenThrow(new IllegalStateException("handler result insert failed"));
+
+        assertThatThrownBy(() -> harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.apply", RESULT)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessage("handler result insert failed");
+
+        verify(harness.mcp).callTool(eq("revalidate_cms_preview"), any());
+        verify(harness.resources, never()).apply(RESOURCE, command);
+    }
+
     private static NaturalCmsContract.JobResponse activeJob() throws Exception {
         return job("ACTIVE", null, null, null, false);
     }
@@ -290,6 +322,18 @@ class NaturalCmsStageServiceTest {
             when(store.record(eq("Bearer worker"), eq(JOB), eq(1), any()))
                     .thenAnswer(call -> {
                         NaturalCmsContract.StageExecutionResponse value = call.getArgument(3);
+                        return new NaturalCmsContract.HandlerResult(
+                                value.resultId(), JOB, TRACE, 1, value.handlerKey(),
+                                value.resultPort(), value.resource(), value.structuredCommand(),
+                                 value.previewId(), value.previewHash(), value.payload(), NOW);
+                    });
+            when(store.recordApplied(
+                    eq("Bearer worker"), eq(JOB), eq(1), eq(RESULT), eq(1), any()))
+                    .thenAnswer(call -> {
+                        @SuppressWarnings("unchecked")
+                        java.util.function.Supplier<NaturalCmsContract.StageExecutionResponse>
+                                apply = call.getArgument(5);
+                        NaturalCmsContract.StageExecutionResponse value = apply.get();
                         return new NaturalCmsContract.HandlerResult(
                                 value.resultId(), JOB, TRACE, 1, value.handlerKey(),
                                 value.resultPort(), value.resource(), value.structuredCommand(),

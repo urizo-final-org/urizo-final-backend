@@ -10,7 +10,7 @@ services:
   database:
     image: axms/core-postgres:pg16-vector0.8.5-trusted-dev
     build:
-      context: .
+      context: ${AXMS_BACKEND_SOURCE_ROOT:-.}
       dockerfile: src/main/docker/postgres/Dockerfile
     restart: unless-stopped
     environment:
@@ -19,8 +19,8 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_superuser_password
     volumes:
       - axms_spring_core_db:/var/lib/postgresql/data
-      - ./src/main/docker/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
-      - ./src/main/docker/postgres/sync-runtime-roles.sh:/opt/axms/sync-runtime-roles.sh:ro
+      - ${AXMS_BACKEND_SOURCE_ROOT:-.}/src/main/docker/postgres/init-roles.sh:/docker-entrypoint-initdb.d/10-init-roles.sh:ro
+      - ${AXMS_BACKEND_SOURCE_ROOT:-.}/src/main/docker/postgres/sync-runtime-roles.sh:/opt/axms/sync-runtime-roles.sh:ro
     secrets:
       - postgres_superuser_password
       - migration_owner_password
@@ -54,7 +54,7 @@ services:
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:15432"
     volumes:
-      - ./src/main/docker/postgres/tcp-relay.pl:/opt/axms/tcp-relay.pl:ro
+      - ${AXMS_BACKEND_SOURCE_ROOT:-.}/src/main/docker/postgres/tcp-relay.pl:/opt/axms/tcp-relay.pl:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 15432 -d ax_module_studio"]
       interval: 2s
@@ -74,7 +74,7 @@ services:
     profiles: ["spring-core", "coding-agent", "full"]
     image: axms/spring-migration:dev
     build:
-      context: .
+      context: ${AXMS_BACKEND_SOURCE_ROOT:-.}
       dockerfile: Dockerfile
       target: migration
     restart: "no"
@@ -172,7 +172,7 @@ services:
     profiles: ["spring-core", "coding-agent", "full"]
     image: axms/spring-backend:dev
     build:
-      context: .
+      context: ${AXMS_BACKEND_SOURCE_ROOT:-.}
       dockerfile: Dockerfile
       target: runtime
     restart: unless-stopped
@@ -296,7 +296,7 @@ services:
     profiles: ["coding-agent", "full"]
     image: axms/coding-runtime:dev
     build:
-      context: ../urizo-final-orchestrator
+      context: ${AXMS_ORCHESTRATOR_SOURCE_ROOT:-../urizo-final-orchestrator}
       dockerfile: Dockerfile
       args:
         UV_INSECURE_HOST: ${AXMS_UV_INSECURE_HOST:-}
@@ -355,7 +355,7 @@ services:
     profiles: ["spring-core", "full"]
     image: axms/react-frontend:dev
     build:
-      context: ../urizo-final-frontend
+      context: ${AXMS_FRONTEND_SOURCE_ROOT:-../urizo-final-frontend}
       dockerfile: Dockerfile
       args:
         AXMS_NODE_TLS_REJECT_UNAUTHORIZED: ${AXMS_NODE_TLS_REJECT_UNAUTHORIZED:-1}
@@ -402,7 +402,7 @@ services:
     ports:
       - "127.0.0.1:${AXMS_HTTP_PORT:-18080}:80"
     volumes:
-      - ./src/main/docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${AXMS_BACKEND_SOURCE_ROOT:-.}/src/main/docker/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/nginx-health | grep -qx ok"]
       interval: 5s
@@ -435,7 +435,7 @@ services:
       - coding_model_bridge_service_token
       - dev_operator_password
     volumes:
-      - ./src/main/docker/postgres/register-coding-service-credential.sh:/opt/axms/register-coding-service-credential.sh:ro
+      - ${AXMS_BACKEND_SOURCE_ROOT:-.}/src/main/docker/postgres/register-coding-service-credential.sh:/opt/axms/register-coding-service-credential.sh:ro
     mem_limit: 256m
     cpus: 0.50
     pids_limit: 64

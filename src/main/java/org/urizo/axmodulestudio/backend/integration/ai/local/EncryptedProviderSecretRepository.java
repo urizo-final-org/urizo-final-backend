@@ -74,6 +74,13 @@ public class EncryptedProviderSecretRepository {
         }
     }
 
+    public void delete(ModelProvider provider) {
+        jdbcTemplate.update("""
+                DELETE FROM app.local_provider_secret
+                 WHERE provider = ?
+                """, provider.name());
+    }
+
     public void recordAudit(
             ModelProvider provider,
             String modelId,

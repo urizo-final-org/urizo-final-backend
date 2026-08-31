@@ -21,4 +21,10 @@ public interface RagOperations {
             UUID traceId,
             String key,
             ProductApiContract.RagQueryRequest request);
+
+    /** 공개 경로용 질의. 멱등 Key를 요구하지 않는다({@code ProductService} 구현 주석 참조). */
+    ProductApiContract.RagQueryResponse publicQuery(
+            UUID chatbotId,
+            UUID traceId,
+            ProductApiContract.RagQueryRequest request);
 }

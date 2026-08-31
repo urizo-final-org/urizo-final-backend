@@ -32,6 +32,8 @@ import org.urizo.axmodulestudio.backend.knowledge.config.EmbeddingProperties;
 @Profile("local-full")
 public class EmbeddingClient {
 
+    private static final String QUERY_PATH = "/embed/query";
+
     private final EmbeddingProperties properties;
     private final ObjectMapper objectMapper;
     private final HttpClient httpClient;
@@ -53,7 +55,7 @@ public class EmbeddingClient {
     public String queryVector(String text) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("text", text);
-        JsonNode response = send("/embed/query", body);
+        JsonNode response = send(QUERY_PATH, body);
         requireDimension(response.path("dim").asInt(-1));
         return vectorLiteral(response.path("embedding"), "query");
     }
@@ -105,7 +107,8 @@ public class EmbeddingClient {
 
     private JsonNode send(String path, ObjectNode body) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(properties.baseUrl() + path))
-                .timeout(properties.requestTimeout())
+                .timeout(QUERY_PATH.equals(path)
+                        ? properties.queryRequestTimeout() : properties.requestTimeout())
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(body.toString(), StandardCharsets.UTF_8))
                 .build();

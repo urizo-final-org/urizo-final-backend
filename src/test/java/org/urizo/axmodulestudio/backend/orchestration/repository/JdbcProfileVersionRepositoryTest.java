@@ -16,11 +16,14 @@ import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.dao.DataAccessResourceFailureException;
@@ -149,6 +152,70 @@ class JdbcProfileVersionRepositoryTest {
         verify(jdbc, never()).query(anyString(), any(RowMapper.class), any());
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void createsANewVersionWithServerOwnedIdentityUsingOnlyInsert() throws Exception {
+        ObjectNode authoring = objectMapper.createObjectNode();
+        authoring.putArray("nodes");
+        authoring.putArray("edges");
+        authoring.putObject("config");
+        authoring.putObject("modelBindings");
+        authoring.putObject("toolPolicy");
+        authoring.put("guardrailProfileKey", "central.default");
+        when(jdbc.queryForObject(
+                argThat(sql -> sql.contains("MAX(profile_version)")),
+                eq(Integer.class),
+                eq("LLM_OPS"))).thenReturn(3);
+        when(jdbc.update(
+                argThat(sql -> sql.contains("INSERT INTO app.ai_profile_version")),
+                eq(PROFILE_VERSION_ID),
+                eq("LLM_OPS"),
+                eq(3),
+                argThat(value -> value instanceof String json
+                        && json.contains(PROFILE_VERSION_ID.toString())
+                        && json.contains("\"profileVersion\":3"))))
+                .thenReturn(1);
+        when(jdbc.query(
+                argThat(sql -> sql.contains("WHERE profile_version_id = ?")),
+                any(RowMapper.class),
+                eq(PROFILE_VERSION_ID))).thenReturn(List.of(adminVersion("DRAFT", 3)));
+
+        ProfileVersionRepository.AdminStoredProfileVersion created =
+                repository.createDraft("LLM_OPS", PROFILE_VERSION_ID, authoring);
+
+        assertThat(created.profileVersion()).isEqualTo(3);
+        assertThat(created.status()).isEqualTo("DRAFT");
+        verify(jdbc).execute("LOCK TABLE app.ai_profile_version IN SHARE ROW EXCLUSIVE MODE");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void activatesADraftAndDeactivatesOnlyThePreviousActiveVersion() {
+        ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion("DRAFT", 3);
+        ProfileVersionRepository.AdminStoredProfileVersion active = adminVersion("ACTIVE", 3);
+        when(jdbc.query(
+                argThat(sql -> sql.contains("WHERE profile_version_id = ?")),
+                any(RowMapper.class),
+                eq(PROFILE_VERSION_ID))).thenReturn(List.of(draft), List.of(active));
+        when(jdbc.update(
+                argThat(sql -> sql != null && sql.contains("status = 'INACTIVE'")),
+                eq("LLM_OPS"))).thenReturn(1);
+        when(jdbc.update(
+                argThat(sql -> sql != null && sql.contains("status = 'ACTIVE'")),
+                eq(PROFILE_VERSION_ID))).thenReturn(1);
+
+        ProfileVersionRepository.AdminStoredProfileVersion activated =
+                repository.activate(PROFILE_VERSION_ID).orElseThrow();
+
+        assertThat(activated.status()).isEqualTo("ACTIVE");
+        verify(jdbc).update(
+                argThat(sql -> sql != null && sql.contains("status = 'INACTIVE'")),
+                eq("LLM_OPS"));
+        verify(jdbc).update(
+                argThat(sql -> sql != null && sql.contains("status = 'ACTIVE'")),
+                eq(PROFILE_VERSION_ID));
+    }
+
     @SuppressWarnings("unchecked")
     private void validCredential() {
         when(jdbc.query(
@@ -158,5 +225,21 @@ class JdbcProfileVersionRepositoryTest {
                 any(),
                 any())).thenReturn(List.of(CREDENTIAL_ID));
         when(jdbc.update(anyString(), any(), eq(CREDENTIAL_ID))).thenReturn(1);
+    }
+
+    private ProfileVersionRepository.AdminStoredProfileVersion adminVersion(
+            String status, int version) {
+        JsonNode snapshot = objectMapper.createObjectNode()
+                .put("contractVersion", "1.0")
+                .put("profileVersionId", PROFILE_VERSION_ID.toString())
+                .put("profileKey", "LLM_OPS")
+                .put("profileVersion", version);
+        return new ProfileVersionRepository.AdminStoredProfileVersion(
+                PROFILE_VERSION_ID,
+                "LLM_OPS",
+                version,
+                status,
+                OffsetDateTime.parse("2026-08-31T00:00:00Z").toInstant(),
+                snapshot);
     }
 }

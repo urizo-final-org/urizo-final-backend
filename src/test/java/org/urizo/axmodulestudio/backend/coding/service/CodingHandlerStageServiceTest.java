@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -18,6 +19,7 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
@@ -46,6 +48,93 @@ class CodingHandlerStageServiceTest {
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String DIFF_DIGEST =
             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    @Test
+    void acceptsAFencedStageResultAndRejectsAnUnrepairableOne() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway,
+                mapper,
+                clock,
+                false);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService, mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE,
+                4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding",
+                BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                NOW.plusSeconds(60));
+        CodingHandlerContract.AttemptAggregateResponse aggregate =
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Implement the approved change.",
+                        List.of(), List.of(), List.of(), NOW, null);
+        when(toolService.stageAuthority(eq("Bearer worker"), eq(JOB), eq(4)))
+                .thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request request = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    request.jobId(), request.idempotencyKey(), UUID.randomUUID());
+        });
+
+        // A correct answer that merely arrived inside a Markdown fence must survive.
+        String stageResult = "{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}";
+        when(gateway.chat(any())).thenReturn(
+                assistantText("```json\n" + stageResult + "\n```"));
+
+        CodingHandlerContract.StageExecutionResponse response = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("feasible");
+        assertThat(response.payload().path("summary").asText()).isEqualTo("ok");
+
+        // Prose alone carries no object to recover, so the stage still fails.
+        when(gateway.chat(any())).thenReturn(assistantText("I could not decide."));
+
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT)))
+                .isInstanceOf(CodingWorkerException.class);
+    }
+
+    /** A stage with no tools receives the model text verbatim, fence and all. */
+    private static ProviderChatResponse assistantText(String content) {
+        return new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                content,
+                12, 6, Duration.ofMillis(10));
+    }
 
     @Test
     void runsModelToApprovedToolToTerminalStageResult() {

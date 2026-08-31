@@ -210,7 +210,7 @@ public final class CodingToolService {
                         job.projectId(), job.repositoryId(), job.graphStep(), job.baseSha(),
                         job.contextDigest(), job.policyHash(), job.promptVersion(),
                         job.allowedCapabilities(), job.allowedNodes(), job.profileAllowedTools(),
-                        job.expiresAt());
+                        job.expiresAt(), job.profileVersionId());
             });
             if (authority == null) {
                 throw unavailable();
@@ -398,7 +398,8 @@ public final class CodingToolService {
                         + "job.repository_id, job.graph_step, job.base_sha, job.context_digest, "
                         + "job.policy_hash, job.prompt_version, job.allowed_capabilities, "
                         + "job.allowed_nodes, job.expires_at, "
-                        + "profile.snapshot_json::text AS profile_snapshot "
+                        + "profile.snapshot_json::text AS profile_snapshot, "
+                        + "job.profile_version_id "
                         + "FROM app.coding_job job "
                         + "JOIN app.ai_profile_version profile "
                         + "ON profile.profile_version_id = job.profile_version_id "
@@ -418,7 +419,8 @@ public final class CodingToolService {
                             Set.of((String[]) rs.getArray(14).getArray()),
                             Set.of((String[]) rs.getArray(15).getArray()),
                             policy.allowedTools(), policy.guardrailProfileKey(),
-                            rs.getTimestamp(16).toInstant());
+                            rs.getTimestamp(16).toInstant(),
+                            rs.getObject(18, UUID.class));
                 }, jobId);
         if (rows.isEmpty()) {
             throw new CodingToolException(
@@ -797,7 +799,7 @@ public final class CodingToolService {
             String contextDigest, String policyHash, String promptVersion,
             Set<String> allowedCapabilities,
             Set<String> allowedNodes, Set<String> profileAllowedTools,
-            String guardrailProfileKey, Instant expiresAt) { }
+            String guardrailProfileKey, Instant expiresAt, UUID profileVersionId) { }
     record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
         RuntimePolicy {
             allowedTools = Set.copyOf(allowedTools);
@@ -807,11 +809,13 @@ public final class CodingToolService {
             UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
             UUID repositoryId, String graphStep, String baseSha, String contextDigest,
             String policyHash, String promptVersion, Set<String> allowedCapabilities,
-            Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt) {
+            Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt,
+            UUID profileVersionId) {
         StageAuthority {
             allowedCapabilities = Set.copyOf(allowedCapabilities);
             allowedNodes = Set.copyOf(allowedNodes);
             profileAllowedTools = Set.copyOf(profileAllowedTools);
+            Objects.requireNonNull(profileVersionId, "profileVersionId is required");
         }
     }
     private record ToolBinding(UUID workspaceId, String expectedHead, String expectedDiffDigest) { }

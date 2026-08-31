@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -308,6 +309,52 @@ class CodingModelTurnServiceTest {
                 .isInstanceOfSatisfying(ProviderGatewayException.class,
                         failure -> assertThat(failure.code()).isEqualTo(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED));
         verify(gateway, never()).chat(any());
+    }
+
+    @Test
+    void usesTheBoundProviderOrderAndFallsBackOnlyAfterATransientFailure() {
+        ProviderModelRegistration primary = new ProviderModelRegistration(
+                ModelProvider.OPENAI,
+                "openai-bound-model",
+                Set.of(ModelCapability.CHAT),
+                Duration.ofSeconds(30),
+                2);
+        ProviderModelRegistration fallback = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "gemini-bound-model",
+                Set.of(ModelCapability.CHAT),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService bound = new CodingModelTurnService(
+                registry(List.of(primary, fallback)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        when(gateway.chat(any()))
+                .thenThrow(new ProviderGatewayException(
+                        ModelGatewayErrorCode.MODEL_TIMEOUT,
+                        "The primary provider timed out."))
+                .thenReturn(new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "gemini-bound-model",
+                        "fallback response",
+                        2,
+                        1,
+                        Duration.ofMillis(10)));
+
+        CodingModelTurnContract.Response response = bound.execute(
+                chatRequest(), List.of(primary, fallback));
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway, times(2)).chat(routed.capture());
+        assertThat(routed.getAllValues())
+                .extracting(ProviderChatRequest::provider, ProviderChatRequest::modelId)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.OPENAI, "openai-bound-model"),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI, "gemini-bound-model"));
+        assertThat(response.selectedModel().provider()).isEqualTo("GOOGLE");
+        assertThat(response.selectedModel().modelId()).isEqualTo("gemini-bound-model");
     }
 
     @Test

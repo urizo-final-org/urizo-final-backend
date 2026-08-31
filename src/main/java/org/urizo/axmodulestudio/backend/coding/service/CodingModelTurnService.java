@@ -20,6 +20,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.CapabilityRegistrationException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
@@ -65,25 +66,98 @@ public class CodingModelTurnService {
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
-        return execute(request, false);
+        return execute(request, false, null);
+    }
+
+    public CodingModelTurnContract.Response execute(
+            CodingModelTurnContract.Request request,
+            List<ProviderModelRegistration> boundModels) {
+        return execute(request, false, List.copyOf(boundModels));
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request) {
-        return execute(request, true);
+        return execute(request, true, null);
+    }
+
+    public CodingModelTurnContract.Response executeNaturalCms(
+            CodingModelTurnContract.Request request,
+            List<ProviderModelRegistration> boundModels) {
+        return execute(request, true, List.copyOf(boundModels));
     }
 
     private CodingModelTurnContract.Response execute(
-            CodingModelTurnContract.Request request, boolean naturalCms) {
+            CodingModelTurnContract.Request request,
+            boolean naturalCms,
+            List<ProviderModelRegistration> boundModels) {
         Objects.requireNonNull(request, "request is required");
         ToolMode toolMode = requireSupportedSubset(request, naturalCms);
         ModelUseCase useCase = toolMode == ToolMode.PROVIDER
                 ? ModelUseCase.TOOL_CALL : ModelUseCase.CHAT;
-        ProviderModelRegistration selected = capabilityRegistry.candidates(useCase).stream()
-                .findFirst()
-                .orElseThrow(() -> new ProviderGatewayException(
+        List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
+        ProviderGatewayException lastFailure = null;
+        for (ProviderModelRegistration selected : candidates) {
+            try {
+                return executeSelected(request, toolMode, selected);
+            }
+            catch (ProviderGatewayException failure) {
+                lastFailure = failure;
+                if (!fallbackEligible(failure.code())) {
+                    throw failure;
+                }
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        throw new ProviderGatewayException(
+                ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                "No configured model can satisfy the requested capability.");
+    }
+
+    private List<ProviderModelRegistration> modelCandidates(
+            List<ProviderModelRegistration> boundModels,
+            ModelUseCase useCase) {
+        if (boundModels == null) {
+            return capabilityRegistry.candidates(useCase).stream().limit(1).toList();
+        }
+        if (boundModels.isEmpty()) {
+            return List.of();
+        }
+        List<ProviderModelRegistration> validated = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ProviderModelRegistration candidate : boundModels) {
+            if (candidate == null
+                    || !seen.add(candidate.provider().name() + ":" + candidate.modelId())) {
+                throw new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
-                        "No configured model can satisfy the requested capability."));
+                        "The bound model selection is invalid.");
+            }
+            try {
+                validated.add(capabilityRegistry.require(
+                        candidate.provider(), candidate.modelId(), useCase));
+            }
+            catch (CapabilityRegistrationException failure) {
+                throw new ProviderGatewayException(failure.code(),
+                        "The bound model cannot satisfy the requested capability.");
+            }
+        }
+        return List.copyOf(validated);
+    }
+
+    private static boolean fallbackEligible(ModelGatewayErrorCode code) {
+        return Set.of(
+                ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                ModelGatewayErrorCode.MODEL_RATE_LIMITED,
+                ModelGatewayErrorCode.MODEL_TIMEOUT,
+                ModelGatewayErrorCode.MODEL_PROVIDER_UNAVAILABLE,
+                ModelGatewayErrorCode.INTERNAL_TRANSIENT_ERROR).contains(code);
+    }
+
+    private CodingModelTurnContract.Response executeSelected(
+            CodingModelTurnContract.Request request,
+            ToolMode toolMode,
+            ProviderModelRegistration selected) {
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),

@@ -19,6 +19,7 @@ public final class NaturalCmsContract {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
     private static final Pattern HANDLER_KEY = Pattern.compile(
             "^cms\\.(analyze|preview|discard|apply)$");
+    private static final Pattern NODE_ID = Pattern.compile("^[a-z][a-z0-9_-]{0,63}$");
     private static final Pattern SHA256 = Pattern.compile("^sha256:[0-9a-f]{64}$");
     private static final Set<String> DECISIONS = Set.of("APPROVED", "REJECTED");
 
@@ -69,16 +70,32 @@ public final class NaturalCmsContract {
             @NotNull UUID profileVersionId,
             int expectedStateVersion,
             int executionAttempt,
+            @NotBlank String nodeId,
             @NotBlank String handlerKey,
             @NotNull UUID resultId) {
         public StageExecutionRequest {
             requireVersion(schemaVersion);
             if (expectedStateVersion < 1
                     || executionAttempt < 1
+                    || nodeId == null
+                    || NODE_ID.matcher(nodeId).matches() == false
                     || handlerKey == null
                     || HANDLER_KEY.matcher(handlerKey).matches() == false) {
                 throw new IllegalArgumentException("Natural CMS stage request is invalid.");
             }
+        }
+
+        public StageExecutionRequest(
+                String schemaVersion,
+                UUID traceId,
+                UUID profileVersionId,
+                int expectedStateVersion,
+                int executionAttempt,
+                String handlerKey,
+                UUID resultId) {
+            this(schemaVersion, traceId, profileVersionId, expectedStateVersion,
+                    executionAttempt, NaturalCmsContract.nodeId(handlerKey),
+                    handlerKey, resultId);
         }
     }
 
@@ -182,6 +199,11 @@ public final class NaturalCmsContract {
         if (!SCHEMA_VERSION.equals(version)) {
             throw new IllegalArgumentException("Unsupported Natural CMS schemaVersion.");
         }
+    }
+
+    private static String nodeId(String handlerKey) {
+        return handlerKey != null && handlerKey.startsWith("cms.")
+                ? handlerKey.substring("cms.".length()) : null;
     }
 
     private static void requireDigest(String value, String field) {

@@ -10,6 +10,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.Message;
+import org.springframework.ai.chat.messages.SystemMessage;
+import org.springframework.ai.chat.messages.ToolResponseMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -17,6 +22,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatAdapter;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRequest;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialLease;
@@ -71,8 +77,14 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             byte[] credentialBytes = lease.copySecret();
             try {
                 String credential = new String(credentialBytes, StandardCharsets.US_ASCII);
-                try (ProductChatModelSession session = factory.open(credential, registration.modelId())) {
-                    ChatResponse response = session.chatModel().call(new Prompt(request.prompt()));
+                try (ProductChatModelSession session = factory.open(
+                        credential,
+                        registration.modelId(),
+                        registration.maxOutputTokens())) {
+                    ChatResponse response = session.chatModel().call(
+                            new Prompt(request.messages().stream()
+                                    .map(SpringAiProductProviderChatAdapter::springMessage)
+                                    .toList()));
                     return response(request, response, startedAt);
                 }
             }
@@ -80,6 +92,24 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 Arrays.fill(credentialBytes, (byte) 0);
             }
         }
+    }
+
+    private static Message springMessage(ProviderChatMessage message) {
+        return switch (message.role()) {
+            case SYSTEM -> new SystemMessage(message.content());
+            case USER -> new UserMessage(message.content());
+            case ASSISTANT -> AssistantMessage.builder()
+                    .content(message.content())
+                    .toolCalls(message.toolCalls().stream()
+                            .map(call -> new AssistantMessage.ToolCall(
+                                    call.id(), "function", call.name(), call.arguments()))
+                            .toList())
+                    .build();
+            case TOOL -> ToolResponseMessage.builder()
+                    .responses(List.of(new ToolResponseMessage.ToolResponse(
+                            message.toolCallId(), message.toolName(), message.content())))
+                    .build();
+        };
     }
 
     private ProviderChatResponse response(

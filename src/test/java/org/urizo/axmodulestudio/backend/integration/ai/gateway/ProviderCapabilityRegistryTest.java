@@ -39,6 +39,12 @@ class ProviderCapabilityRegistryTest {
         assertThat(registry.candidates(ModelUseCase.EMBEDDING))
                 .extracting(ProviderModelRegistration::provider)
                 .containsExactly(ModelProvider.GOOGLE_GENAI, ModelProvider.OPENAI);
+        assertThat(registry.candidates(ModelUseCase.CHAT))
+                .extracting(ProviderModelRegistration::provider)
+                .containsExactly(
+                        ModelProvider.GOOGLE_GENAI,
+                        ModelProvider.OPENAI,
+                        ModelProvider.ANTHROPIC);
         assertThat(registry.candidates(ModelUseCase.STRUCTURED_OUTPUT))
                 .containsExactly(openAi);
     }
@@ -131,7 +137,32 @@ class ProviderCapabilityRegistryTest {
         assertThat(Stream.of(ProviderModelRegistration.class.getRecordComponents())
                 .map(RecordComponent::getName)
                 .map(String::toLowerCase))
-                .noneMatch(name -> name.contains("secret") || name.contains("token") || name.contains("key"));
+                .noneMatch(name -> !name.equals("maxoutputtokens")
+                        && (name.contains("secret")
+                                || name.contains("credential")
+                                || name.contains("key")
+                                || name.contains("token")));
+    }
+
+    @Test
+    void registrationOwnsOneBoundedOutputBudget() {
+        ProviderModelRegistration defaulted = registration(
+                ModelProvider.OPENAI,
+                "budgeted-model",
+                Set.of(ModelCapability.CHAT));
+
+        assertThat(defaulted.maxOutputTokens())
+                .isEqualTo(ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS);
+        assertThatThrownBy(() -> new ProviderModelRegistration(
+                ModelProvider.OPENAI,
+                "budgeted-model",
+                Set.of(ModelCapability.CHAT),
+                Duration.ofSeconds(30),
+                1,
+                ProviderModelRegistration.MAX_MAX_OUTPUT_TOKENS + 1))
+                .isInstanceOf(CapabilityRegistrationException.class)
+                .extracting("code")
+                .isEqualTo(ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED);
     }
 
     private static ProviderModelRegistration registration(

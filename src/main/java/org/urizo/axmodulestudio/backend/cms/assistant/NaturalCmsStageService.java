@@ -22,6 +22,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
 
@@ -33,6 +35,8 @@ public final class NaturalCmsStageService {
 
     private static final int MAX_MODEL_TURNS = 8;
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
+    private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
+            new StructuredOutputGuard();
     private final NaturalCmsStore store;
     private final NaturalCmsResourceService resources;
     private final CodingModelTurnService models;
@@ -414,33 +418,62 @@ public final class NaturalCmsStageService {
     }
 
     private ModelOutcome parseAnalyze(String value) {
+        StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
-            JsonNode parsed = objectMapper.readTree(value);
-            if (!parsed.isObject()
-                    || parsed.size() != 2
-                    || !ANALYZE_PORTS.contains(parsed.path("port").asText())
-                    || !parsed.path("payload").isObject()) {
-                throw contract("Natural CMS analysis result is invalid.");
-            }
-            return new ModelOutcome(
-                    parsed.path("port").asText(), parsed.path("payload").deepCopy());
+            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
+                    value,
+                    candidate -> readAnalyze(candidate) != null,
+                    StructuredOutputGuard::extractOutermostJsonObject);
         }
-        catch (JsonProcessingException failure) {
+        catch (ProviderGatewayException failure) {
             throw contract("Natural CMS analysis result is invalid.");
         }
+        ModelOutcome parsed = readAnalyze(validated.value());
+        if (parsed == null) {
+            throw contract("Natural CMS analysis result is invalid.");
+        }
+        return parsed;
     }
 
     private JsonNode parseCommand(String value) {
+        StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
-            JsonNode command = objectMapper.readTree(value);
-            if (!command.isObject()) {
-                throw contract("Natural CMS structured command is invalid.");
-            }
-            return command;
+            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
+                    value,
+                    candidate -> readCommand(candidate) != null,
+                    StructuredOutputGuard::extractOutermostJsonObject);
         }
-        catch (JsonProcessingException failure) {
+        catch (ProviderGatewayException failure) {
             throw contract("Natural CMS structured command is invalid.");
         }
+        JsonNode command = readCommand(validated.value());
+        if (command == null) {
+            throw contract("Natural CMS structured command is invalid.");
+        }
+        return command;
+    }
+
+    private ModelOutcome readAnalyze(String value) {
+        if (value == null) {
+            return null;
+        }
+        JsonNode parsed = StructuredOutputGuard.readSingleJsonObject(
+                objectMapper, value);
+        if (parsed == null
+                || parsed.size() != 2
+                || !ANALYZE_PORTS.contains(parsed.path("port").asText())
+                || !parsed.path("payload").isObject()) {
+            return null;
+        }
+        return new ModelOutcome(
+                parsed.path("port").asText(), parsed.path("payload").deepCopy());
+    }
+
+    private JsonNode readCommand(String value) {
+        if (value == null) {
+            return null;
+        }
+        return StructuredOutputGuard.readSingleJsonObject(objectMapper, value);
     }
 
     private static void requireStatus(

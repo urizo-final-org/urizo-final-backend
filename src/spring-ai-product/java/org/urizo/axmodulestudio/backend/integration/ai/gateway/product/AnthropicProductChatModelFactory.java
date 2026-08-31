@@ -1,34 +1,34 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway.product;
 
 import io.micrometer.observation.ObservationRegistry;
-import org.springframework.ai.openai.OpenAiChatModel;
-import org.springframework.ai.openai.OpenAiChatOptions;
-import org.springframework.ai.openai.api.OpenAiApi;
+import org.springframework.ai.anthropic.AnthropicChatModel;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 
 @Component
-final class OpenAiProductChatModelFactory implements ProductChatModelFactory {
+final class AnthropicProductChatModelFactory implements ProductChatModelFactory {
 
     @Override
     public ModelProvider provider() {
-        return ModelProvider.OPENAI;
+        return ModelProvider.ANTHROPIC;
     }
 
     @Override
     public ProductChatModelSession open(
             String credential, String modelId, int maxOutputTokens) {
-        OpenAiApi api = OpenAiApi.builder()
+        AnthropicApi api = AnthropicApi.builder()
                 .apiKey(credential)
                 .build();
-        OpenAiChatOptions options = OpenAiChatOptions.builder()
+        AnthropicChatOptions options = AnthropicChatOptions.builder()
                 .model(modelId)
-                .maxCompletionTokens(maxOutputTokens)
+                .maxTokens(maxOutputTokens)
                 .internalToolExecutionEnabled(false)
                 .build();
-        OpenAiChatModel model = OpenAiChatModel.builder()
-                .openAiApi(api)
+        AnthropicChatModel model = AnthropicChatModel.builder()
+                .anthropicApi(api)
                 .defaultOptions(options)
                 .retryTemplate(singleAttempt())
                 .observationRegistry(ObservationRegistry.NOOP)

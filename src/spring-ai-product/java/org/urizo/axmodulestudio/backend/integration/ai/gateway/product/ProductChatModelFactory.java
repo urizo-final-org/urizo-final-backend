@@ -6,5 +6,6 @@ interface ProductChatModelFactory {
 
     ModelProvider provider();
 
-    ProductChatModelSession open(String credential, String modelId);
+    ProductChatModelSession open(
+            String credential, String modelId, int maxOutputTokens);
 }

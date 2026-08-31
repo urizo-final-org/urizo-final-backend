@@ -100,8 +100,9 @@ class NaturalCmsStageServiceTest {
                         "resolve_cms_target",
                         harness.mapper.createObjectNode()))),
                 modelResponse(
-                        "{\"operation\":\"UPDATE\",\"fields\":{"
-                                + "\"title\":\"New\",\"body\":\"Body\"}}",
+                        "Command follows.\n```json\n"
+                                + "{\"operation\":\"UPDATE\",\"fields\":{"
+                                + "\"title\":\"New\",\"body\":\"Body\"}}\n```",
                         List.of()));
         when(harness.mcp.callTool(eq("resolve_cms_target"), any())).thenReturn(
                 structured(harness.mapper.createObjectNode().put("resolved", true)),
@@ -134,6 +135,42 @@ class NaturalCmsStageServiceTest {
                 .anySatisfy(message -> assertThat(message.path("role").asText())
                         .isEqualTo("tool"));
         verify(harness.store).record(eq("Bearer worker"), eq(JOB), eq(1), any());
+    }
+
+    @Test
+    void repairsOneFencedAnalysisObjectBeforeStrictValidation() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+                "Analysis result:\n```json\n"
+                        + "{\"port\":\"feasible\",\"payload\":{\"reason\":\"safe\"}}\n```",
+                List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("feasible");
+        assertThat(response.payload().path("reason").asText()).isEqualTo("safe");
+    }
+
+    @Test
+    void rejectsAnalysisThatRemainsInvalidAfterOneRepair() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+                "prefix {\"port\":\"feasible\",\"payload\":{}} "
+                        + "{\"port\":\"feasible\",\"payload\":{}}",
+                List.of()));
+
+        assertThatThrownBy(() -> harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.analyze", RESULT)))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
     }
 
     @Test

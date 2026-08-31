@@ -63,4 +63,11 @@ class StructuredOutputGuardTest {
                 .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
         assertThat(repairs).hasValue(1);
     }
+
+    @Test
+    void outerObjectRepairHandlesFenceAndPreambleWithoutRewritingJson() {
+        assertThat(StructuredOutputGuard.extractOutermostJsonObject(
+                "Result follows.\n```json\n{\"ok\":true}\n```"))
+                .isEqualTo("{\"ok\":true}");
+    }
 }

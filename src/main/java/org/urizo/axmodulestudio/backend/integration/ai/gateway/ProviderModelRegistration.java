@@ -10,8 +10,12 @@ public record ProviderModelRegistration(
         String modelId,
         Set<ModelCapability> capabilities,
         Duration timeout,
-        int maxAttempts) {
+        int maxAttempts,
+        int maxOutputTokens) {
 
+    public static final int DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
+    public static final int MIN_MAX_OUTPUT_TOKENS = 256;
+    public static final int MAX_MAX_OUTPUT_TOKENS = 65_536;
     private static final Pattern MODEL_ID = Pattern.compile("^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$");
     private static final Duration MIN_TIMEOUT = Duration.ofSeconds(1);
     private static final Duration MAX_TIMEOUT = Duration.ofMinutes(2);
@@ -47,6 +51,22 @@ public record ProviderModelRegistration(
                     ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
                     "maxAttempts must be between one and three");
         }
+        if (maxOutputTokens < MIN_MAX_OUTPUT_TOKENS
+                || maxOutputTokens > MAX_MAX_OUTPUT_TOKENS) {
+            throw new CapabilityRegistrationException(
+                    ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
+                    "maxOutputTokens must be between 256 and 65536");
+        }
+    }
+
+    public ProviderModelRegistration(
+            ModelProvider provider,
+            String modelId,
+            Set<ModelCapability> capabilities,
+            Duration timeout,
+            int maxAttempts) {
+        this(provider, modelId, capabilities, timeout, maxAttempts,
+                DEFAULT_MAX_OUTPUT_TOKENS);
     }
 
     private static boolean requiresChat(Set<ModelCapability> capabilities) {

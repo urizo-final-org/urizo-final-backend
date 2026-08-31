@@ -45,14 +45,29 @@ public class ProviderCapabilityConfiguration {
                 new ProviderModelRegistration(
                         ModelProvider.OPENAI,
                         Stage2ProviderModels.OPENAI_CHAT,
-                        Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                        Set.of(
+                                ModelCapability.CHAT,
+                                ModelCapability.TOOL_CALLING),
                         Duration.ofSeconds(30),
-                        2),
+                        2,
+                        ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS),
                 new ProviderModelRegistration(
                         ModelProvider.GOOGLE_GENAI,
                         Stage2ProviderModels.GOOGLE_GENAI_CHAT,
-                        Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                        Set.of(
+                                ModelCapability.CHAT,
+                                ModelCapability.TOOL_CALLING),
                         Duration.ofSeconds(30),
-                        2));
+                        2,
+                        ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS),
+                new ProviderModelRegistration(
+                        ModelProvider.ANTHROPIC,
+                        Stage2ProviderModels.ANTHROPIC_CHAT,
+                        Set.of(
+                                ModelCapability.CHAT,
+                                ModelCapability.TOOL_CALLING),
+                        Duration.ofSeconds(30),
+                        2,
+                        ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS));
     }
 }

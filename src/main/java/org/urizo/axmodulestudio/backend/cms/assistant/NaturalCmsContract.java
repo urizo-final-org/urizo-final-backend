@@ -22,12 +22,15 @@ public final class NaturalCmsContract {
     private static final Pattern NODE_ID = Pattern.compile("^[a-z][a-z0-9_-]{0,63}$");
     private static final Pattern SHA256 = Pattern.compile("^sha256:[0-9a-f]{64}$");
     private static final Set<String> DECISIONS = Set.of("APPROVED", "REJECTED");
+    /** 화면 단위 Resource. 게시물은 별도 Resource가 아니라 {@code BOARD}에 포함한다. */
+    private static final Set<String> RESOURCE_TYPES =
+            Set.of("MENU", "BOARD", "CONTENT", "TEMPLATE");
 
     private NaturalCmsContract() { }
 
     public record ResourceRef(@NotBlank String type, @NotBlank String id) {
         public ResourceRef {
-            if (!"CONTENT".equals(type)
+            if (!RESOURCE_TYPES.contains(type)
                     || id == null
                     || RESOURCE_ID.matcher(id).matches() == false) {
                 throw new IllegalArgumentException("Natural CMS resource is invalid.");

@@ -80,7 +80,8 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 try (ProductChatModelSession session = factory.open(
                         credential,
                         registration.modelId(),
-                        registration.maxOutputTokens())) {
+                        registration.maxOutputTokens(),
+                        request.jsonObjectResponse())) {
                     ChatResponse response = session.chatModel().call(
                             new Prompt(request.messages().stream()
                                     .map(SpringAiProductProviderChatAdapter::springMessage)

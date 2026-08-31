@@ -33,6 +33,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatGatewayPort;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRequest;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
@@ -49,6 +50,174 @@ class CodingHandlerStageServiceTest {
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String DIFF_DIGEST =
             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    /** Shared wiring for the model-tool loop tests; the gateway and submit are per-test. */
+    private record StageFixture(
+            CodingHandlerStageService service,
+            ProviderChatGatewayPort gateway,
+            CodingToolService toolService,
+            AtomicReference<UUID> submittedToolCall,
+            CodingHandlerContract.StageExecutionRequest request) { }
+
+    private static StageFixture stageFixture(ObjectMapper mapper) {
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(new ProviderModelRegistration(
+                                ModelProvider.GOOGLE_GENAI,
+                                "coding-test-model",
+                                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                                Duration.ofSeconds(30),
+                                2))),
+                gateway, mapper, clock, false);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60));
+        CodingHandlerContract.AttemptAggregateResponse aggregate =
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Implement the approved change.",
+                        List.of(), List.of(), List.of(), NOW, null);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request turnRequest = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    turnRequest.jobId(), turnRequest.idempotencyKey(), UUID.randomUUID());
+        });
+        AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
+        when(toolService.result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent(
+                        "1.0",
+                        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        submittedToolCall.get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION,
+                        "application/json", 120,
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "{\"workspaceId\":\"" + WORKSPACE + "\","
+                                + "\"baseSha\":\"" + BASE_SHA + "\","
+                                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                                + "\"digest\":\"" + DIFF_DIGEST + "\","
+                                + "\"changedPaths\":[\"src/App.java\"]}"));
+        return new StageFixture(
+                service, gateway, toolService, submittedToolCall,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.code", RESULT));
+    }
+
+    private static org.mockito.stubbing.Answer<CodingToolContract.Accepted> acceptedSubmit(
+            AtomicReference<UUID> submittedToolCall) {
+        return invocation -> {
+            JsonNode request = invocation.getArgument(1);
+            submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
+            return new CodingToolContract.Accepted(
+                    "1.0", "TOOL_ACCEPTED",
+                    UUID.fromString(request.path("requestId").asText()),
+                    UUID.fromString(request.path("toolCallId").asText()),
+                    JOB, TRACE, request.path("idempotencyKey").asText(), EXECUTION,
+                    "ACCEPTED", "/internal/coding/tool-executions/" + EXECUTION,
+                    100, NOW);
+        };
+    }
+
+    private static ProviderChatResponse toolCallReply(String tool) {
+        return new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                "{\"assistant\":\"calling\",\"toolCalls\":[{\"name\":\"" + tool
+                        + "\",\"arguments\":{}}]}",
+                10, 5, Duration.ofMillis(10));
+    }
+
+    private static ProviderChatResponse terminalReply() {
+        return new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                "{\"assistant\":\"{\\\"port\\\":\\\"completed\\\","
+                        + "\\\"payload\\\":{\\\"summary\\\":\\\"done\\\"}}\","
+                        + "\"toolCalls\":[]}",
+                12, 6, Duration.ofMillis(10));
+    }
+
+    @Test
+    void handsAToolRefusalBackToTheModelInsteadOfEndingTheJob() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        // The refused call never ran, so the loop must survive it: the refusal reason is
+        // handed back and the corrected exchange finishes the stage.
+        when(fixture.toolService().submit(eq("Bearer worker"), any()))
+                .thenThrow(new CodingToolException(
+                        "TOOL_RESULT_NOT_READY",
+                        "read_diff must establish the current diff digest first.",
+                        org.springframework.http.HttpStatus.CONFLICT))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                        "{\"assistant\":\"calling\",\"toolCalls\":[{\"name\":"
+                                + "\"apply_patch\",\"arguments\":{\"patch\":\"diff\"}}]}",
+                        10, 5, Duration.ofMillis(10)),
+                toolCallReply("read_diff"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(1).prompt())
+                .contains("Your apply_patch call was refused: ")
+                .contains("read_diff must establish the current diff digest first.");
+    }
+
+    @Test
+    void handsAnEnvelopeMissBackToTheModelInsteadOfEndingTheJob() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submit(eq("Bearer worker"), any()))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        // toolCalls arrives as an object instead of an array: the model answered, only
+        // the envelope missed, so the miss is handed back instead of ending the Job.
+        when(fixture.gateway().chat(any())).thenReturn(
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                        "{\"assistant\":\"calling\",\"toolCalls\":"
+                                + "{\"name\":\"read_diff\",\"arguments\":{}}}",
+                        10, 5, Duration.ofMillis(10)),
+                toolCallReply("read_diff"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(1).prompt())
+                .contains("rejected for its format only");
+    }
 
     @Test
     void anEmptySnapshotAndStageToolIntersectionExposesNoTools() {
@@ -99,7 +268,8 @@ class CodingHandlerStageServiceTest {
                 clock,
                 false);
         CodingHandlerStageService service = new CodingHandlerStageService(
-                resultService, toolService, guard, modelService, mapper, clock);
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -154,6 +324,91 @@ class CodingHandlerStageServiceTest {
                 .isInstanceOf(CodingWorkerException.class);
     }
 
+    @Test
+    void reasksOnceForFormatAndKeepsTheRecoveredStageResult() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway,
+                mapper,
+                clock,
+                false);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE,
+                4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding",
+                BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60));
+        CodingHandlerContract.AttemptAggregateResponse aggregate =
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Implement the approved change.",
+                        List.of(), List.of(), List.of(), NOW, null);
+        when(toolService.stageAuthority(eq("Bearer worker"), eq(JOB), eq(4)))
+                .thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request request = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    request.jobId(), request.idempotencyKey(), UUID.randomUUID());
+        });
+
+        // Prose the local repair pass cannot recover, then the same answer in shape.
+        String stageResult = "{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}";
+        when(gateway.chat(any())).thenReturn(
+                assistantText("Sure! I think this is doable."),
+                assistantText(stageResult));
+
+        CodingHandlerContract.StageExecutionResponse response = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("feasible");
+        assertThat(response.payload().path("summary").asText()).isEqualTo("ok");
+
+        // Exactly one extra call. The re-ask replays the rejected reply and then
+        // asks for the format only, so the model can restate rather than rethink.
+        ArgumentCaptor<ProviderChatRequest> sent =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway, times(2)).chat(sent.capture());
+        List<ProviderChatMessage> reask = sent.getAllValues().get(1).messages();
+        assertThat(reask).hasSize(sent.getAllValues().get(0).messages().size() + 2);
+        assertThat(reask.get(reask.size() - 2).content())
+                .isEqualTo("Sure! I think this is doable.");
+        assertThat(reask.get(reask.size() - 1).content())
+                .contains("format only")
+                .contains("Do not use a Markdown fence");
+    }
+
     /** A stage with no tools receives the model text verbatim, fence and all. */
     private static ProviderChatResponse assistantText(String content) {
         return new ProviderChatResponse(
@@ -187,7 +442,8 @@ class CodingHandlerStageServiceTest {
                 clock,
                 false);
         CodingHandlerStageService service = new CodingHandlerStageService(
-                resultService, toolService, guard, modelService, mapper, clock);
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -299,8 +555,10 @@ class CodingHandlerStageServiceTest {
         ArgumentCaptor<ProviderChatRequest> modelRequests =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(gateway, times(2)).chat(modelRequests.capture());
+        // The tool result is replayed to the provider as plain user text, because no tool
+        // is ever declared to it on this path.
         assertThat(modelRequests.getAllValues().get(1).prompt())
-                .contains("[tool]")
+                .contains("Result of ")
                 .contains(DIFF_DIGEST);
         verify(guard, times(2)).complete(any(), any());
     }

@@ -40,6 +40,26 @@ function Protect-LocalPath {
     }
 }
 
+# Test-Path also succeeds for a directory, so generation is skipped and the size
+# check below reads .Length off a DirectoryInfo, which has no such property. The
+# raw failure only says the property is missing, naming neither the secret nor the
+# cause, so report both here. Docker leaves an empty directory behind whenever a
+# Compose bind mount points at a secret file that does not exist yet.
+function Get-SecretFileLength {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSIsContainer) {
+        throw ("The local secret '$Name' is a directory, not a file: $Path. " +
+            'Docker creates an empty directory when a Compose bind mount points at a ' +
+            'missing secret file. Remove that directory and run this script again.')
+    }
+    return $item.Length
+}
+
 function New-PasswordFile {
     param([Parameter(Mandatory = $true)][string]$Name)
 
@@ -78,7 +98,7 @@ function New-MasterKeyFile {
             $random.Dispose()
         }
     }
-    if ((Get-Item -LiteralPath $path).Length -ne 32) {
+    if ((Get-SecretFileLength -Path $path -Name 'cms_master_key') -ne 32) {
         throw 'The local CMS master key must contain exactly 32 bytes.'
     }
     Protect-LocalPath -LiteralPath $path
@@ -98,7 +118,7 @@ function New-CheckpointEncryptionKeyFile {
             $random.Dispose()
         }
     }
-    if ((Get-Item -LiteralPath $path).Length -ne 32) {
+    if ((Get-SecretFileLength -Path $path -Name 'checkpoint_encryption_key') -ne 32) {
         throw 'The local checkpoint encryption key must contain exactly 32 bytes.'
     }
     Protect-LocalPath -LiteralPath $path
@@ -151,7 +171,7 @@ function New-ServiceTokenFile {
             $value = $null
         }
     }
-    $length = (Get-Item -LiteralPath $path).Length
+    $length = Get-SecretFileLength -Path $path -Name $Name
     if ($length -lt 43 -or $length -gt 512) {
         throw "The local service credential has an invalid length: $Name"
     }

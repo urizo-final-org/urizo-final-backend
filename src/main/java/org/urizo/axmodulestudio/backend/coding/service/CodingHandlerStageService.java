@@ -31,7 +31,36 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputG
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingHandlerStageService {
 
-    private static final int MAX_MODEL_TURNS = 8;
+    /**
+     * A complete code exchange already spends about seven turns - read_diff, read_file,
+     * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
+     * bound of eight left no room for a single re-asked miss. Twelve keeps the loop
+     * bounded while allowing the re-ask layer the handful of turns it exists to spend.
+     */
+    private static final int MAX_MODEL_TURNS = 12;
+    /** Reserved so the format re-ask never shares an idempotency key with a stage turn. */
+    private static final int FORMAT_REASK_TURN = MAX_MODEL_TURNS + 1;
+    /** Tool refusals the model itself caused and can correct when told why. */
+    private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
+            "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
+            "TOOL_ARGUMENTS_INVALID");
+    /**
+     * The workspace applies a patch with git apply --check --whitespace=error-all, so a
+     * hunk is refused unless its context matches the file exactly. A model that guessed
+     * the context needs to be pointed at the real bytes, not just told to try again.
+     */
+    private static final String APPLY_PATCH_RETRY_HINT =
+            " If the patch did not apply, call read_file on the target file first and "
+            + "rebuild the patch against its exact current content: correct @@ line "
+            + "numbers, context lines copied verbatim, and no added trailing whitespace.";
+    private static final String ENVELOPE_REASK_INSTRUCTION =
+            "Your previous reply was rejected for its format only. Reply again as exactly "
+                    + "one JSON object with the fields assistant and toolCalls in the "
+                    + "declared shape, with no other text before or after it.";
+    private static final String FORMAT_REASK_INSTRUCTION =
+            "Your previous reply was rejected for its format only. Send the same answer "
+                    + "again as a single raw JSON object with exactly the fields port and "
+                    + "payload. Do not use a Markdown fence, and do not add any other text.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
     private static final Set<String> REVIEW_TOOLS = Set.of(
@@ -45,6 +74,7 @@ public final class CodingHandlerStageService {
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
+    private final CodingRunnerService runner;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -53,8 +83,10 @@ public final class CodingHandlerStageService {
             CodingToolService tools,
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
+            CodingRunnerService runner,
             ObjectMapper objectMapper,
             Clock clock) {
+        this.runner = Objects.requireNonNull(runner, "runner is required");
         this.results = Objects.requireNonNull(results, "results are required");
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
@@ -117,12 +149,14 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        List<JsonNode> messages = initialMessages(request.handlerKey(), aggregate);
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate));
-        ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), response.assistant().content(),
-                Set.of("feasible", "infeasible"));
+                1, List.of(), messages,
+                new java.util.concurrent.atomic.AtomicReference<>());
+        ModelOutcome outcome = parseOutcomeOrReask(
+                authorization, jobId, resultId, request, authority, aggregate,
+                messages, response, Set.of("feasible", "infeasible"));
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
                 null, null, null, outcome.payload());
     }
@@ -145,9 +179,26 @@ public final class CodingHandlerStageService {
         JsonNode latestDiff = null;
         CodingModelTurnContract.Response modelResponse = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            modelResponse = modelTurn(
-                    authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages);
+            java.util.concurrent.atomic.AtomicReference<JsonNode> envelopeDiagnostic =
+                    new java.util.concurrent.atomic.AtomicReference<>();
+            try {
+                modelResponse = modelTurn(
+                        authorization, jobId, resultId, request, authority, aggregate,
+                        turn, schemas, messages, envelopeDiagnostic);
+            }
+            catch (ProviderGatewayException failure) {
+                // Third layer of the JSON defence, tool edition. A structural diagnostic
+                // proves the model answered and only the envelope missed, so the miss is
+                // handed back once per turn inside the same bounded loop. A failure with
+                // no diagnostic is the provider's and stays fatal.
+                if (failure.code() != ModelGatewayErrorCode.MODEL_RESPONSE_INVALID
+                        || envelopeDiagnostic.get() == null
+                        || turn == MAX_MODEL_TURNS) {
+                    throw failure;
+                }
+                messages.add(userMessage(ENVELOPE_REASK_INSTRUCTION));
+                continue;
+            }
             if (modelResponse.toolCalls().isEmpty()) {
                 break;
             }
@@ -155,9 +206,27 @@ public final class CodingHandlerStageService {
             if (!allowedTools.contains(call.name())) {
                 throw contract("The model selected a tool outside the stage allowlist.");
             }
-            CodingToolContract.ResultContent toolResult = executeTool(
-                    authorization, jobId, request, authority, aggregate,
-                    resultId, turn, call);
+            CodingToolContract.ResultContent toolResult;
+            try {
+                toolResult = executeTool(
+                        authorization, jobId, request, authority, aggregate,
+                        resultId, turn, call);
+            }
+            catch (CodingToolException failure) {
+                // A refusal the model caused is handed back as feedback instead of ending
+                // the Job, because the refusal reason is already a correction instruction.
+                // Anything else - authority, storage, gateway - stays fatal.
+                if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
+                        || turn == MAX_MODEL_TURNS) {
+                    throw failure;
+                }
+                messages.add(plainAssistantMessage(modelResponse));
+                messages.add(userMessage("Your " + call.name() + " call was refused: "
+                        + failure.getMessage()
+                        + " Correct the call and continue the task."
+                        + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
+                continue;
+            }
             messages.add(assistantToolMessage(modelResponse));
             messages.add(toolMessage(toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
@@ -174,8 +243,9 @@ public final class CodingHandlerStageService {
         if (modelResponse == null || !modelResponse.toolCalls().isEmpty()) {
             throw contract("The Coding Model did not produce a terminal stage result.");
         }
-        ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), modelResponse.assistant().content(), ports);
+        ModelOutcome outcome = parseOutcomeOrReask(
+                authorization, jobId, resultId, request, authority, aggregate,
+                messages, modelResponse, ports);
         String candidateSha;
         String diffDigest;
         if ("coding.code".equals(request.handlerKey())) {
@@ -241,6 +311,23 @@ public final class CodingHandlerStageService {
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
                 packages, scan)));
+        // The deterministic checks passed, so the candidate is worth showing. The
+        // runner owns Docker, so the stack is raised through its queue rather than
+        // from here. BUILD is queued first because PREVIEW_UP starts with
+        // --no-build and the runner claims one PENDING row at a time in order.
+        String workspaceId = aggregate.workspaceId() == null
+                ? null : aggregate.workspaceId().toString();
+        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", "backend");
+        if (workspaceId != null) {
+            runnerPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("BUILD", runnerPayload);
+        ObjectNode previewPayload = objectMapper.createObjectNode();
+        if (workspaceId != null) {
+            previewPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("PREVIEW_UP", previewPayload);
+
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "READY");
         payload.set("changedPaths", diff.path("changedPaths").deepCopy());
@@ -273,7 +360,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             int turn,
             List<JsonNode> schemas,
-            List<JsonNode> messages) {
+            List<JsonNode> messages,
+            java.util.concurrent.atomic.AtomicReference<JsonNode> envelopeDiagnostic) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
@@ -302,13 +390,15 @@ public final class CodingHandlerStageService {
             return permit.cachedResponse();
         }
         try {
-            CodingModelTurnContract.Response response = models.execute(request);
+            CodingModelTurnContract.Response response =
+                    models.execute(request, envelopeDiagnostic::set);
             modelGuard.complete(permit, response);
             return response;
         }
         catch (ProviderGatewayException failure) {
             try {
-                modelGuard.fail(permit, failure.code().name(), retryable(failure.code()));
+                modelGuard.fail(permit, failure.code().name(), retryable(failure.code()),
+                        envelopeDiagnostic.get());
             }
             catch (RuntimeException ignored) {
                 // Preserve the provider failure; the guard lease bounds recovery.
@@ -466,7 +556,11 @@ public final class CodingHandlerStageService {
                 + "and payload. port must be " + ports + " and payload must be an object. "
                 + ("coding.code".equals(handlerKey)
                     ? "Use read_diff before any diff-bound tool and again after the final change. "
-                    : "Do not request apply_patch in this stage. ");
+                    // Without the second sentence the model reads "no apply_patch here"
+                    // as "the request cannot be done" and answers infeasible.
+                    : "Do not request apply_patch in this stage. A later stage performs "
+                        + "the file changes, so judge only whether the request itself "
+                        + "can be carried out. ");
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", system),
                 objectMapper.createObjectNode().put("role", "user")
@@ -482,7 +576,7 @@ public final class CodingHandlerStageService {
             }
             ObjectNode schema = objectMapper.createObjectNode();
             schema.put("name", name);
-            schema.put("description", "Approved AX Module Studio Coding tool " + name + ".");
+            schema.put("description", toolDescription(name));
             schema.put("schemaDigest", CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name));
             schema.set("inputSchema", inputSchema(name));
             schemas.add(schema);
@@ -494,6 +588,35 @@ public final class CodingHandlerStageService {
         Set<String> allowed = new java.util.HashSet<>(stageTools);
         allowed.retainAll(profileTools);
         return Set.copyOf(allowed);
+    }
+
+    /** Every diff-bound tool is refused until read_diff has established the current diff. */
+    private static final String AFTER_READ_DIFF =
+            "Call read_diff first in this stage; this tool is refused until the current diff "
+                    + "has been read.";
+
+    /**
+     * The model only ever sees these words, so a rule it cannot guess belongs here. The
+     * patch format is the one the MCP workspace enforces; a diff that misses it is refused
+     * as PATCH_POLICY_DENIED after the turn is already spent.
+     */
+    private static String toolDescription(String name) {
+        return switch (name) {
+            case "read_file" -> "Read one repository-relative text file.";
+            case "search_code" -> "Search the repository for a literal string.";
+            case "read_diff" -> "Read the workspace diff as it stands now.";
+            case "apply_patch" -> "Apply one unified diff to the workspace. " + AFTER_READ_DIFF
+                    + " Every file in the patch starts with a line 'diff --git a/PATH b/PATH' "
+                    + "carrying the same repository-relative path twice, then '--- a/PATH', "
+                    + "then '+++ b/PATH', then its @@ hunks. Rename, copy, mode and binary "
+                    + "diffs are refused.";
+            case "run_check" -> "Run one approved build or test profile. " + AFTER_READ_DIFF;
+            case "check_package_allowlist" -> "Check the changed files against the package "
+                    + "allowlist. " + AFTER_READ_DIFF;
+            case "scan_changed_files" -> "Scan the changed files for forbidden content. "
+                    + AFTER_READ_DIFF;
+            default -> throw contract("The Coding tool schema is not registered.");
+        };
     }
 
     private ObjectNode inputSchema(String name) {
@@ -508,7 +631,9 @@ public final class CodingHandlerStageService {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");
             }
-            case "apply_patch" -> stringProperty(properties, required, "patch");
+            case "apply_patch" -> stringProperty(properties, required, "patch",
+                    "The whole unified diff as one JSON string. Line breaks are \\n escapes, "
+                            + "not real newlines, and the diff carries no Markdown fence.");
             case "run_check" -> stringProperty(properties, required, "profile");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");
@@ -520,6 +645,28 @@ public final class CodingHandlerStageService {
             ObjectNode properties, ArrayNode required, String name) {
         properties.putObject(name).put("type", "string");
         required.add(name);
+    }
+
+    private static void stringProperty(
+            ObjectNode properties, ArrayNode required, String name, String description) {
+        properties.putObject(name).put("type", "string").put("description", description);
+        required.add(name);
+    }
+
+    private ObjectNode userMessage(String content) {
+        return objectMapper.createObjectNode().put("role", "user").put("content", content);
+    }
+
+    /**
+     * Replays a refused call's sentence without the call itself. The refused call never
+     * ran, so pairing it with a tool result would describe an exchange that did not
+     * happen, and an assistant message may not carry an unanswered tool call.
+     */
+    private ObjectNode plainAssistantMessage(CodingModelTurnContract.Response response) {
+        String content = response.assistant().content();
+        return objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
     }
 
     private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
@@ -570,11 +717,55 @@ public final class CodingHandlerStageService {
     /**
      * The stage prompt asks for one JSON object, but the model turn contract only
      * carries TEXT, so nothing can force that shape. Models routinely wrap a
-     * correct answer in a Markdown fence or a sentence, which is a formatting
-     * miss rather than a wrong answer, so one repair pass is allowed before the
-     * stage is failed. A second miss is a contract violation and is not retried.
+     * correct answer in a Markdown fence or a sentence, which is a formatting miss
+     * rather than a wrong answer.
+     *
+     * <p>The local repair pass only recovers shapes we can predict, so when it
+     * cannot, the model is asked once more for the same answer in the required
+     * shape. That re-ask is deliberately outside the three-cycle rework bound the
+     * graph counts from review ports, because nothing about the answer changed.
+     * Tool schemas are withheld so the re-ask can only restate the result, and a
+     * second miss ends the stage.
      */
-    private ModelOutcome parseOutcome(String handlerKey, String raw, Set<String> ports) {
+    private ModelOutcome parseOutcomeOrReask(
+            String authorization,
+            UUID jobId,
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest stage,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            List<JsonNode> messages,
+            CodingModelTurnContract.Response response,
+            Set<String> ports) {
+        ModelOutcome outcome = repairOutcome(response.assistant().content(), ports);
+        if (outcome != null) {
+            return outcome;
+        }
+        List<JsonNode> reask = new ArrayList<>(messages);
+        // The rejected reply carries no tool call, and the turn contract only accepts
+        // an assistant toolCalls field when it is non-empty, so replay it as plain text.
+        reask.add(objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", response.assistant().content()));
+        reask.add(objectMapper.createObjectNode()
+                .put("role", "user")
+                .put("content", FORMAT_REASK_INSTRUCTION));
+        CodingModelTurnContract.Response second = modelTurn(
+                authorization, jobId, resultId, stage, authority, aggregate,
+                FORMAT_REASK_TURN, List.of(), reask,
+                new java.util.concurrent.atomic.AtomicReference<>());
+        if (!second.toolCalls().isEmpty()) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        ModelOutcome repaired = repairOutcome(second.assistant().content(), ports);
+        if (repaired == null) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        return repaired;
+    }
+
+    /** Returns null when the local repair pass cannot recover the stage result. */
+    private ModelOutcome repairOutcome(String raw, Set<String> ports) {
         StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
             validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
@@ -583,13 +774,9 @@ public final class CodingHandlerStageService {
                     StructuredOutputGuard::extractOutermostJsonObject);
         }
         catch (ProviderGatewayException failure) {
-            throw contract("The Coding Model stage result is invalid.");
+            return null;
         }
-        ModelOutcome outcome = readOutcome(validated.value(), ports);
-        if (outcome == null) {
-            throw contract("The Coding Model stage result is invalid.");
-        }
-        return outcome;
+        return readOutcome(validated.value(), ports);
     }
 
     /** Returns null when the text is not the declared stage result object. */

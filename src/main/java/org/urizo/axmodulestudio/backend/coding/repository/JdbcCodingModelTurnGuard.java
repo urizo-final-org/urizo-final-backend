@@ -20,13 +20,21 @@ import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
 
 public final class JdbcCodingModelTurnGuard implements CodingModelTurnGuard {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JdbcCodingModelTurnGuard.class);
+
+    /** Bounds the structural diagnostic reported for a rejected reply. */
+    private static final int MAX_DIAGNOSTIC_CHARACTERS = 4_000;
 
     private static final String FIND_CREDENTIAL = """
             SELECT credential_id
@@ -152,10 +160,25 @@ public final class JdbcCodingModelTurnGuard implements CodingModelTurnGuard {
     }
 
     @Override
-    public void fail(CodingModelTurnPermit permit, String failureCode, boolean retryable) {
+    public void fail(
+            CodingModelTurnPermit permit,
+            String failureCode,
+            boolean retryable,
+            JsonNode diagnostic) {
         requireActivePermit(permit);
         if (failureCode == null || failureCode.isBlank() || failureCode.length() > 120) {
             throw new IllegalArgumentException("failureCode is invalid");
+        }
+        // A failed turn stores no reply: ck_coding_model_turn_completion ties a non-null
+        // response_json to COMPLETED, so writing the diagnostic into that column rejects
+        // the whole update and strands the turn IN_PROGRESS. The structural diagnostic is
+        // reported instead. It carries shape only, never model content.
+        if (diagnostic != null && diagnostic.isObject()) {
+            String candidate = diagnostic.toString();
+            if (candidate.length() <= MAX_DIAGNOSTIC_CHARACTERS) {
+                LOG.warn("Coding Model Turn {}/{} failed as {}. Reply shape: {}",
+                        permit.jobId(), permit.idempotencyKey(), failureCode, candidate);
+            }
         }
         try {
             OffsetDateTime updatedAt = databaseTime(clock.instant());

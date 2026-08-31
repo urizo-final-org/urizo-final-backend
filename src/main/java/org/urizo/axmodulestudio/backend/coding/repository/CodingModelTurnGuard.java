@@ -19,6 +19,19 @@ public interface CodingModelTurnGuard {
     }
 
     default void fail(CodingModelTurnPermit permit, String failureCode, boolean retryable) {
+        fail(permit, failureCode, retryable, null);
+    }
+
+    /**
+     * @param diagnostic structural facts about a rejected reply, or null. A failed turn
+     *     keeps no reply, so this is the only record of why a contract miss happened.
+     *     It must never carry prompt text, tool output or generated code.
+     */
+    default void fail(
+            CodingModelTurnPermit permit,
+            String failureCode,
+            boolean retryable,
+            com.fasterxml.jackson.databind.JsonNode diagnostic) {
         throw new UnsupportedOperationException("Model Turn failure persistence is not implemented.");
     }
 }

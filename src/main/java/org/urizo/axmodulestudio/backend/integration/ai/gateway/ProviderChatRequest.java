@@ -4,11 +4,18 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * @param jsonObjectResponse asks the provider for a bare JSON object through its
+ *     own response-format setting. Only a CHAT request may set it: a tool-calling
+ *     request carries its own reply shape, and this lane keeps structured output
+ *     and tool calling in separate request modes.
+ */
 public record ProviderChatRequest(
         ModelProvider provider,
         String modelId,
         List<ProviderChatMessage> messages,
-        Instant deadline) {
+        Instant deadline,
+        boolean jsonObjectResponse) {
 
     private static final int MAX_MESSAGES = 200;
     private static final int MAX_REQUEST_CHARACTERS = 65_536;
@@ -31,6 +38,15 @@ public record ProviderChatRequest(
                 || characters > MAX_REQUEST_CHARACTERS) {
             throw new IllegalArgumentException("messages exceed the bounded chat request");
         }
+    }
+
+    /** Plain text remains the default reply shape for every existing caller. */
+    public ProviderChatRequest(
+            ModelProvider provider,
+            String modelId,
+            List<ProviderChatMessage> messages,
+            Instant deadline) {
+        this(provider, modelId, messages, deadline, false);
     }
 
     public ProviderChatRequest(
@@ -61,6 +77,7 @@ public record ProviderChatRequest(
     public String toString() {
         return "ProviderChatRequest[provider=" + provider
                 + ", modelId=" + modelId
-                + ", messages=REDACTED, deadline=" + deadline + "]";
+                + ", messages=REDACTED, deadline=" + deadline
+                + ", jsonObjectResponse=" + jsonObjectResponse + "]";
     }
 }

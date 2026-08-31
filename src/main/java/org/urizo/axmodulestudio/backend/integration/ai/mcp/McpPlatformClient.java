@@ -75,8 +75,12 @@ public final class McpPlatformClient {
             throw new McpPlatformException("MCP tool call contract was rejected.");
         }
         JsonNode result = invoke("tools/call", toolName, arguments);
+        // An error result carries its reason in content, not structuredContent, so only
+        // a successful result owes the structured payload. Treating the refusal itself
+        // as a contract breach hid every tool refusal behind TOOL_EXECUTOR_UNAVAILABLE.
         if (!result.path("isError").isBoolean()
-                || !result.path("structuredContent").isObject()) {
+                || (!result.path("isError").asBoolean()
+                        && !result.path("structuredContent").isObject())) {
             throw new McpPlatformException("MCP coding tool result contract was rejected.");
         }
         return result;

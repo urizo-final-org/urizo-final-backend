@@ -18,17 +18,23 @@ final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactor
 
     @Override
     public ProductChatModelSession open(
-            String credential, String modelId, int maxOutputTokens) {
+            String credential, String modelId, int maxOutputTokens,
+            boolean jsonObjectResponse) {
         Client client = Client.builder()
                 .apiKey(credential)
                 .vertexAI(false)
                 .build();
         try {
-            GoogleGenAiChatOptions options = GoogleGenAiChatOptions.builder()
+            GoogleGenAiChatOptions.Builder builder = GoogleGenAiChatOptions.builder()
                     .model(modelId)
                     .maxOutputTokens(maxOutputTokens)
-                    .internalToolExecutionEnabled(false)
-                    .build();
+                    .internalToolExecutionEnabled(false);
+            if (jsonObjectResponse) {
+                // No response schema: the stage contracts differ per handler, and the
+                // caller still validates the object it gets back.
+                builder.responseMimeType("application/json");
+            }
+            GoogleGenAiChatOptions options = builder.build();
             GoogleGenAiChatModel model = GoogleGenAiChatModel.builder()
                     .genAiClient(client)
                     .defaultOptions(options)

@@ -16,7 +16,9 @@ import java.util.UUID;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
@@ -36,17 +38,30 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputG
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public class CodingModelTurnService {
 
+    /** A reply's own key is recorded only when it is a plain identifier. */
+    private static final java.util.regex.Pattern SAFE_DIAGNOSTIC_KEY =
+            java.util.regex.Pattern.compile("^[A-Za-z_][A-Za-z0-9_]{0,39}$");
     private static final Set<String> CHAT_ONLY = Set.of("CHAT");
     private static final Set<String> CHAT_WITH_TOOLS = Set.of("CHAT", "TOOL_CALLING");
     private static final String LOCAL_TOOL_NAME = "read_file";
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+    /** Mirrors the ProviderChatRequest budget so an oversized context fails as a gateway error. */
+    private static final int MAX_REQUEST_CHARACTERS = 65_536;
+    private static final String ELIDED_TOOL_CONTENT =
+            "[elided for the request budget. Re-read the file when its body is required.]";
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
     private final ObjectMapper objectMapper;
+    /**
+     * Reads the model's tool envelope only. A patch body carries real line breaks and
+     * models regularly emit them unescaped inside the JSON string, which strict JSON
+     * rejects wholesale. Everything else about the envelope stays strictly validated.
+     */
+    private final ObjectMapper toolEnvelopeReader;
     private final Clock clock;
     private final boolean localMockToolCandidateEnabled;
 
@@ -60,21 +75,39 @@ public class CodingModelTurnService {
         this.capabilityRegistry = Objects.requireNonNull(capabilityRegistry, "capabilityRegistry is required");
         this.chatGateway = Objects.requireNonNull(chatGateway, "chatGateway is required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
+        this.toolEnvelopeReader = objectMapper.copy().enable(
+                com.fasterxml.jackson.core.json.JsonReadFeature
+                        .ALLOW_UNESCAPED_CONTROL_CHARS.mappedFeature());
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.localMockToolCandidateEnabled = localMockToolCandidateEnabled;
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
-        return execute(request, false);
+        return execute(request, false, node -> { });
+    }
+
+    /**
+     * @param envelopeDiagnostic receives structural facts when a reply fails the tool
+     *     envelope contract, just before the usual gateway failure is thrown. A failed
+     *     turn stores no reply, so this is the only record of why a contract miss
+     *     happened. The thrown type is unchanged, so callers that do not want the
+     *     diagnostic keep their existing behaviour.
+     */
+    public CodingModelTurnContract.Response execute(
+            CodingModelTurnContract.Request request,
+            java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
+        return execute(request, false, envelopeDiagnostic);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request) {
-        return execute(request, true);
+        return execute(request, true, node -> { });
     }
 
     private CodingModelTurnContract.Response execute(
-            CodingModelTurnContract.Request request, boolean naturalCms) {
+            CodingModelTurnContract.Request request,
+            boolean naturalCms,
+            java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
         Objects.requireNonNull(request, "request is required");
         ToolMode toolMode = requireSupportedSubset(request, naturalCms);
         ModelUseCase useCase = toolMode == ToolMode.PROVIDER
@@ -84,11 +117,16 @@ public class CodingModelTurnService {
                 .orElseThrow(() -> new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
                         "No configured model can satisfy the requested capability."));
+        // First layer of the JSON defence. Every CHAT caller here parses the reply as
+        // one JSON object, so ask the provider for that shape directly instead of only
+        // requesting it in the prompt. A TOOL_CALL request keeps its own reply shape,
+        // which is why the two never share a request mode.
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),
                 normalizedMessages(request, toolMode),
-                request.deadlineAt()));
+                request.deadlineAt(),
+                useCase == ModelUseCase.CHAT));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
                 || providerResponse.content().length() > 200_000
@@ -99,7 +137,7 @@ public class CodingModelTurnService {
         }
         int totalTokens = providerResponse.inputTokens() + providerResponse.outputTokens();
         ParsedAssistant parsed = toolMode == ToolMode.PROVIDER
-                ? parseProviderToolEnvelope(request, providerResponse.content())
+                ? parseProviderToolEnvelope(request, providerResponse.content(), envelopeDiagnostic)
                 : new ParsedAssistant(providerResponse.content(), List.of());
         List<CodingModelTurnContract.ToolCall> toolCalls = toolMode == ToolMode.LOCAL_FIXTURE
                 ? List.of(new CodingModelTurnContract.ToolCall(
@@ -205,8 +243,15 @@ public class CodingModelTurnService {
                 messages.add(ProviderChatMessage.plain(
                         ProviderChatMessage.Role.SYSTEM,
                         "Return exactly one JSON object with fields assistant and toolCalls. "
-                                + "assistant must be a string and toolCalls must contain zero or one "
-                                + "declared tool call with name and arguments. Do not add markdown.\n"
+                                + "assistant must be a string. toolCalls must be a JSON array "
+                                + "holding zero or one declared tool call. A call is an object "
+                                + "with exactly the two fields name and arguments, and every value "
+                                + "the tool needs goes inside arguments, never beside it. "
+                                + "Use exactly this "
+                                + "shape, closing every brace exactly once and ending the "
+                                + "reply at the final brace: "
+                                + "{\"assistant\":\"one sentence\",\"toolCalls\":[{\"name\":\"a declared tool\",\"arguments\":{\"field\":\"value\"}}]}. "
+                                + "Do not add markdown.\n"
                                 + "Declared tools: "
                                 + objectMapper.writeValueAsString(request.toolSchemas())));
             }
@@ -260,30 +305,286 @@ public class CodingModelTurnService {
         if (!pendingToolNames.isEmpty()) {
             throw invalidContract();
         }
-        return List.copyOf(messages);
+        // Every mode flattens: the format re-ask replays a tool conversation in CHAT
+        // mode, and an undeclared native tool exchange makes Gemini return no candidate
+        // at all. A conversation without tool messages passes through unchanged.
+        // The budget has to see the tool bodies it is allowed to drop, so it runs before
+        // the flattening. Flattening adds a fixed wrapper per message that does not depend
+        // on body length, so that exact cost is measured once and reserved up front.
+        long flatteningCost = characters(flattenToolProtocol(messages)) - characters(messages);
+        return foldSystemMessages(
+                flattenToolProtocol(withinRequestBudget(messages, flatteningCost)));
+    }
+
+    /**
+     * The tool protocol on this path is written into the prompt, so no tool is ever
+     * declared to the provider. A later turn that replays the exchange as a native
+     * assistant tool call and tool response therefore describes tools the request does
+     * not have, and Gemini answers with no candidate at all. The exchange is replayed
+     * as plain text instead, in the same envelope shape the model was asked to produce.
+     */
+    private List<ProviderChatMessage> flattenToolProtocol(List<ProviderChatMessage> messages) {
+        List<ProviderChatMessage> flattened = new ArrayList<>();
+        for (ProviderChatMessage message : messages) {
+            switch (message.role()) {
+                case ASSISTANT -> flattened.add(message.toolCalls().isEmpty()
+                        ? message
+                        : ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.ASSISTANT,
+                                assistantEnvelopeText(message)));
+                case TOOL -> flattened.add(ProviderChatMessage.plain(
+                        ProviderChatMessage.Role.USER,
+                        "Result of " + message.toolName() + ": " + message.content()));
+                default -> flattened.add(message);
+            }
+        }
+        return flattened;
+    }
+
+    private String assistantEnvelopeText(ProviderChatMessage message) {
+        ObjectNode envelope = objectMapper.createObjectNode();
+        envelope.put("assistant", message.content());
+        ArrayNode calls = envelope.putArray("toolCalls");
+        for (ProviderChatMessage.ToolCall call : message.toolCalls()) {
+            ObjectNode entry = calls.addObject();
+            entry.put("name", call.name());
+            try {
+                entry.set("arguments", objectMapper.readTree(call.arguments()));
+            }
+            catch (JsonProcessingException failure) {
+                throw invalidContract();
+            }
+        }
+        return envelope.toString();
+    }
+
+    /**
+     * Gemini carries a single system instruction and Spring AI rejects a prompt that holds
+     * more than one system message, so the tool envelope instruction and the stage system
+     * prompt are folded into one. Every system message on this path is built before the
+     * first user turn, so folding keeps the order the model sees.
+     */
+    private static List<ProviderChatMessage> foldSystemMessages(List<ProviderChatMessage> messages) {
+        long systemMessages = messages.stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.SYSTEM)
+                .count();
+        if (systemMessages <= 1) {
+            return messages;
+        }
+        StringBuilder merged = new StringBuilder();
+        List<ProviderChatMessage> remainder = new ArrayList<>();
+        for (ProviderChatMessage message : messages) {
+            if (message.role() == ProviderChatMessage.Role.SYSTEM) {
+                if (!merged.isEmpty()) {
+                    merged.append("\n\n");
+                }
+                merged.append(message.content());
+            }
+            else {
+                remainder.add(message);
+            }
+        }
+        List<ProviderChatMessage> folded = new ArrayList<>();
+        folded.add(ProviderChatMessage.plain(
+                ProviderChatMessage.Role.SYSTEM, merged.toString()));
+        folded.addAll(remainder);
+        return folded;
+    }
+
+    /**
+     * A tool message carries the whole tool body, so a handful of file reads alone
+     * exceeds the ProviderChatRequest budget and the request would be rejected as a
+     * raw argument failure. The oldest tool bodies are dropped first, and only once
+     * the request would not fit, so a request that already fits is unchanged.
+     */
+    private List<ProviderChatMessage> withinRequestBudget(
+            List<ProviderChatMessage> messages, long reserved) {
+        long budget = MAX_REQUEST_CHARACTERS - reserved;
+        List<ProviderChatMessage> bounded = new ArrayList<>(messages);
+        long characters = characters(bounded);
+        for (int index = 0; index < bounded.size() && characters > budget; index++) {
+            ProviderChatMessage message = bounded.get(index);
+            if (message.role() != ProviderChatMessage.Role.TOOL
+                    || ELIDED_TOOL_CONTENT.equals(message.content())) {
+                continue;
+            }
+            characters -= message.content().length() - ELIDED_TOOL_CONTENT.length();
+            bounded.set(index, ProviderChatMessage.tool(
+                    message.toolCallId(), message.toolName(), ELIDED_TOOL_CONTENT));
+        }
+        if (characters > budget) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
+                    "The Coding stage context exceeds the model request budget.");
+        }
+        return List.copyOf(bounded);
+    }
+
+    /** Counts exactly what ProviderChatRequest bounds. */
+    private static long characters(List<ProviderChatMessage> messages) {
+        return messages.stream()
+                .mapToLong(message -> message.content().length()
+                        + message.toolCalls().stream()
+                                .mapToLong(call -> call.arguments().length())
+                                .sum())
+                .sum();
+    }
+
+    /**
+     * A reply that is one whole object followed by a stray brace or a trailing sentence is
+     * still recoverable, because the first balanced object is the answer. Cutting to the
+     * last brace instead keeps the stray one inside the span and the repair changes nothing.
+     * A reply carrying a second object is left alone, because which one was meant is a guess.
+     */
+    static String firstBalancedJsonObject(String raw) {
+        if (raw == null) {
+            return null;
+        }
+        int start = raw.indexOf('{');
+        if (start < 0) {
+            return raw;
+        }
+        int depth = 0;
+        boolean inString = false;
+        boolean escaped = false;
+        for (int index = start; index < raw.length(); index++) {
+            char current = raw.charAt(index);
+            if (inString) {
+                if (escaped) {
+                    escaped = false;
+                }
+                else if (current == '\\') {
+                    escaped = true;
+                }
+                else if (current == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (current == '"') {
+                inString = true;
+            }
+            else if (current == '{') {
+                depth++;
+            }
+            else if (current == '}' && --depth == 0) {
+                // Two whole envelopes stay ambiguous and must still be refused, so the
+                // first one is only taken when nothing after it starts another object.
+                return raw.indexOf('{', index + 1) < 0
+                        ? raw.substring(start, index + 1)
+                        : raw;
+            }
+        }
+        return StructuredOutputGuard.extractOutermostJsonObject(raw);
     }
 
     private ParsedAssistant parseProviderToolEnvelope(
-            CodingModelTurnContract.Request request, String content) {
+            CodingModelTurnContract.Request request,
+            String content,
+            java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
         StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
             validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
                     content,
                     candidate -> readProviderToolEnvelope(request, candidate) != null,
-                    StructuredOutputGuard::extractOutermostJsonObject);
+                    CodingModelTurnService::firstBalancedJsonObject);
         }
         catch (ProviderGatewayException failure) {
-            throw new ProviderGatewayException(
-                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid Coding tool envelope.");
+            throw envelopeRejected(request, content, envelopeDiagnostic);
         }
         ParsedAssistant parsed = readProviderToolEnvelope(request, validated.value());
         if (parsed == null) {
-            throw new ProviderGatewayException(
-                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid Coding tool envelope.");
+            throw envelopeRejected(request, validated.value(), envelopeDiagnostic);
         }
         return parsed;
+    }
+
+    /** Reports the structural reason, then fails exactly as this path always has. */
+    private ProviderGatewayException envelopeRejected(
+            CodingModelTurnContract.Request request,
+            String content,
+            java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
+        try {
+            envelopeDiagnostic.accept(diagnosticFor(request, content));
+        }
+        catch (RuntimeException ignored) {
+            // A diagnostic sink must never change how the turn fails.
+        }
+        return new ProviderGatewayException(
+                ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                "Model provider returned an invalid Coding tool envelope.");
+    }
+
+    /**
+     * Describes the shape of a rejected reply so the mismatch is recoverable after the
+     * fact. Only structure is recorded. Field names are echoed because the usual miss
+     * is an extra or renamed key, and only when they look like plain identifiers, so a
+     * model cannot smuggle content through a key.
+     */
+    private ObjectNode diagnosticFor(
+            CodingModelTurnContract.Request request, String content) {
+        ObjectNode diagnostic = objectMapper.createObjectNode();
+        diagnostic.put("contentLength", content == null ? 0 : content.length());
+        JsonNode envelope = StructuredOutputGuard.readSingleJsonObject(
+                toolEnvelopeReader, content);
+        if (envelope == null) {
+            diagnostic.put("reason", "NOT_ONE_JSON_OBJECT");
+            return diagnostic;
+        }
+        ArrayNode fields = diagnostic.putArray("topLevelFields");
+        envelope.fieldNames().forEachRemaining(name -> fields.add(safeKey(name)));
+        diagnostic.put("topLevelFieldCount", envelope.size());
+        if (envelope.size() != 2
+                || !envelope.path("assistant").isTextual()
+                || !envelope.path("toolCalls").isArray()) {
+            diagnostic.put("reason", "TOP_LEVEL_SHAPE");
+            return diagnostic;
+        }
+        JsonNode toolCalls = envelope.path("toolCalls");
+        diagnostic.put("toolCallCount", toolCalls.size());
+        if (toolCalls.size() > 1) {
+            diagnostic.put("reason", "TOO_MANY_TOOL_CALLS");
+            return diagnostic;
+        }
+        for (JsonNode call : toolCalls) {
+            ArrayNode callFields = diagnostic.putArray("toolCallFields");
+            if (call.isObject()) {
+                call.fieldNames().forEachRemaining(name -> callFields.add(safeKey(name)));
+            }
+            if (!call.isObject() || call.size() != 2
+                    || !call.path("name").isTextual()
+                    || !call.path("arguments").isObject()) {
+                diagnostic.put("reason", "TOOL_CALL_SHAPE");
+                return diagnostic;
+            }
+            String name = call.path("name").asText();
+            diagnostic.put("toolName", safeKey(name));
+            JsonNode schema = null;
+            for (JsonNode declared : request.toolSchemas()) {
+                if (name.equals(declared.path("name").asText())) {
+                    schema = declared.path("inputSchema");
+                }
+            }
+            if (schema == null) {
+                diagnostic.put("reason", "TOOL_NOT_DECLARED");
+                return diagnostic;
+            }
+            ArrayNode argumentFields = diagnostic.putArray("argumentFields");
+            call.path("arguments").fieldNames()
+                    .forEachRemaining(field -> argumentFields.add(safeKey(field)));
+            if (!matchesInputSchema(call.path("arguments"), schema)) {
+                diagnostic.put("reason", "TOOL_ARGUMENTS_OFF_SCHEMA");
+                return diagnostic;
+            }
+        }
+        diagnostic.put("reason", envelope.path("assistant").asText().isBlank()
+                ? "EMPTY_ASSISTANT_WITHOUT_TOOL_CALL" : "UNKNOWN");
+        return diagnostic;
+    }
+
+    /** Keeps a reply's own key out of the record unless it is a plain identifier. */
+    private static String safeKey(String name) {
+        return name != null && SAFE_DIAGNOSTIC_KEY.matcher(name).matches() ? name : "<other>";
     }
 
     private ParsedAssistant readProviderToolEnvelope(
@@ -293,7 +594,16 @@ public class CodingModelTurnService {
         }
         try {
             JsonNode envelope = StructuredOutputGuard.readSingleJsonObject(
-                    objectMapper, content);
+                    toolEnvelopeReader, content);
+            // A finished stage answer usually arrives as the result object itself rather
+            // than wrapped inside the assistant string. Both spell the same terminal
+            // reply, so the direct shape is accepted instead of re-asked.
+            if (envelope != null
+                    && envelope.size() == 2
+                    && envelope.path("port").isTextual()
+                    && envelope.path("payload").isObject()) {
+                return new ParsedAssistant(envelope.toString(), List.of());
+            }
             if (envelope == null
                     || envelope.size() != 2
                     || !envelope.path("assistant").isTextual()

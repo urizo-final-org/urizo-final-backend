@@ -309,9 +309,11 @@ public final class CodingToolService {
         }
         JsonNode structured = result.path("structuredContent");
         if (result.path("isError").asBoolean() || !structured.isObject()) {
+            // The refusal reason is a correction instruction - the stage replays it to
+            // the model - so it survives here instead of being flattened to one phrase.
             throw new CodingToolException(
                     "TOOL_EXECUTION_FAILED",
-                    "The MCP coding tool returned an unsuccessful result.",
+                    "The MCP coding tool refused the call. " + mcpRefusalReason(result),
                     HttpStatus.BAD_GATEWAY);
         }
         validateMcpResult(request, structured);
@@ -633,8 +635,12 @@ public final class CodingToolService {
             case "apply_patch" -> {
                 requireObjectFields(arguments, Set.of("patch"), "tool arguments");
                 String patch = text(arguments, "patch");
-                if (patch.length() > 50_000 || !patch.startsWith("--- ")) {
-                    throw validation("apply_patch patch is invalid.");
+                // The MCP workspace only applies a patch whose first line is a canonical
+                // 'diff --git a/PATH b/PATH' header, so the precheck demands the same
+                // start. The old '--- ' start could never pass the MCP policy.
+                if (patch.length() > 50_000 || !patch.startsWith("diff --git a/")) {
+                    throw validation("apply_patch patch is invalid: it must start with a "
+                            + "'diff --git a/PATH b/PATH' line.");
                 }
             }
             case "run_check" -> {
@@ -746,6 +752,16 @@ public final class CodingToolService {
                 "PATH_POLICY_DENIED",
                 "The Coding tool request exceeds the approved workspace path scope.",
                 HttpStatus.FORBIDDEN);
+    }
+
+    /** One bounded line of the MCP refusal, with control characters removed. */
+    private static String mcpRefusalReason(JsonNode result) {
+        String text = result.path("content").path(0).path("text").asText("");
+        String cleaned = text.replaceAll("\\p{Cntrl}+", " ").strip();
+        if (cleaned.isEmpty()) {
+            return "No reason was returned.";
+        }
+        return cleaned.length() > 300 ? cleaned.substring(0, 300) : cleaned;
     }
 
     private static CodingToolException failedResult() {

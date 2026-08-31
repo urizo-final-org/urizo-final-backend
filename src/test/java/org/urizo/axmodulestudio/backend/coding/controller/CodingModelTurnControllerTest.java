@@ -67,7 +67,7 @@ class CodingModelTurnControllerTest {
     @Test
     void returnsTheNormalizedSuccessEnvelope() throws Exception {
         CodingModelTurnContract.Request request = request();
-        when(service.execute(any())).thenReturn(response(request));
+        when(service.execute(any(), any())).thenReturn(response(request));
 
         mockMvc.perform(post("/internal/coding/model-turns")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer local-service-test-token")
@@ -132,7 +132,7 @@ class CodingModelTurnControllerTest {
 
     @Test
     void timeoutUsesAJobScopedRetryableEnvelope() throws Exception {
-        when(service.execute(any())).thenThrow(new ProviderGatewayException(
+        when(service.execute(any(), any())).thenThrow(new ProviderGatewayException(
                 ModelGatewayErrorCode.MODEL_TIMEOUT,
                 "Model provider deadline exceeded."));
         CodingModelTurnContract.Request request = request();
@@ -148,8 +148,10 @@ class CodingModelTurnControllerTest {
                 .andExpect(jsonPath("$.error.code").value("MODEL_TIMEOUT"))
                 .andExpect(jsonPath("$.error.retryable").value(true))
                 .andExpect(jsonPath("$.error.retryAfterMs").value(1000));
+        // A provider failure carries no envelope diagnostic, so the reply record stays empty.
         verify(guard).fail(any(), org.mockito.ArgumentMatchers.eq("MODEL_TIMEOUT"),
-                org.mockito.ArgumentMatchers.eq(true));
+                org.mockito.ArgumentMatchers.eq(true),
+                org.mockito.ArgumentMatchers.isNull());
     }
 
     @Test

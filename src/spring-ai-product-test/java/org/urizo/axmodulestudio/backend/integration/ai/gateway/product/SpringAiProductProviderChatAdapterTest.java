@@ -72,11 +72,11 @@ class SpringAiProductProviderChatAdapterTest {
     @Test
     void constructsConcreteProductLaneClientsWithoutMakingRemoteCalls() {
         try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory()
-                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT, OUTPUT_BUDGET);
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT, OUTPUT_BUDGET, false);
                 ProductChatModelSession google = new GoogleGenAiProductChatModelFactory()
-                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT, OUTPUT_BUDGET);
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT, OUTPUT_BUDGET, false);
                 ProductChatModelSession anthropic = new AnthropicProductChatModelFactory()
-                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.ANTHROPIC_CHAT, OUTPUT_BUDGET)) {
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.ANTHROPIC_CHAT, OUTPUT_BUDGET, false)) {
             assertThat(openAi.chatModel()).isInstanceOf(OpenAiChatModel.class);
             assertThat(google.chatModel()).isInstanceOf(GoogleGenAiChatModel.class);
             assertThat(anthropic.chatModel()).isInstanceOf(AnthropicChatModel.class);
@@ -93,6 +93,47 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     @Test
+    void carriesTheJsonObjectRequestIntoEachProviderNativeResponseSetting() {
+        try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory()
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT,
+                                OUTPUT_BUDGET, true);
+                ProductChatModelSession google = new GoogleGenAiProductChatModelFactory()
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                                OUTPUT_BUDGET, true);
+                ProductChatModelSession anthropic = new AnthropicProductChatModelFactory()
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.ANTHROPIC_CHAT,
+                                OUTPUT_BUDGET, true)) {
+            assertThat(((org.springframework.ai.openai.OpenAiChatOptions)
+                    openAi.chatModel().getDefaultOptions()).getResponseFormat().getType())
+                    .isEqualTo(org.springframework.ai.openai.api.ResponseFormat.Type.JSON_OBJECT);
+            assertThat(((org.springframework.ai.google.genai.GoogleGenAiChatOptions)
+                    google.chatModel().getDefaultOptions()).getResponseMimeType())
+                    .isEqualTo("application/json");
+            // Anthropic stays on text on purpose; see the factory for the reason.
+            assertThat(((AnthropicChatOptions)
+                    anthropic.chatModel().getDefaultOptions()).getOutputFormat())
+                    .isNull();
+        }
+    }
+
+    @Test
+    void leavesEveryProviderOnTextWhenTheRequestDoesNotAskForJson() {
+        try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory()
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT,
+                                OUTPUT_BUDGET, false);
+                ProductChatModelSession google = new GoogleGenAiProductChatModelFactory()
+                        .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                                OUTPUT_BUDGET, false)) {
+            assertThat(((org.springframework.ai.openai.OpenAiChatOptions)
+                    openAi.chatModel().getDefaultOptions()).getResponseFormat())
+                    .isNull();
+            assertThat(((org.springframework.ai.google.genai.GoogleGenAiChatOptions)
+                    google.chatModel().getDefaultOptions()).getResponseMimeType())
+                    .isNull();
+        }
+    }
+
+    @Test
     void normalizesSpringAiProviderFailuresWithoutLeakingRawMessages() {
         String rawValue = "raw-provider-or-secret-value-must-not-leak";
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
@@ -105,7 +146,8 @@ class SpringAiProductProviderChatAdapterTest {
         when(factory.open(
                 FIXTURE_CREDENTIAL,
                 Stage2ProviderModels.OPENAI_CHAT,
-                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                false))
                 .thenAnswer(ignored -> new ProductChatModelSession(chatModel, () -> { }));
         when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
                 .thenThrow(new TransientAiException(rawValue));
@@ -153,7 +195,8 @@ class SpringAiProductProviderChatAdapterTest {
         when(factory.open(
                 FIXTURE_CREDENTIAL,
                 modelId,
-                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                false))
                 .thenReturn(new ProductChatModelSession(chatModel, () -> { }));
         when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(response());
 
@@ -232,7 +275,8 @@ class SpringAiProductProviderChatAdapterTest {
         verify(factory).open(
                 FIXTURE_CREDENTIAL,
                 modelId,
-                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS);
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                false);
         assertThatThrownBy(lease::copySecret).isInstanceOf(IllegalStateException.class);
     }
 

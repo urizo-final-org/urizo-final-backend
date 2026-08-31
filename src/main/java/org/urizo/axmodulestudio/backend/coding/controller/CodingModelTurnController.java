@@ -39,12 +39,16 @@ public class CodingModelTurnController {
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization,
             @RequestBody CodingModelTurnContract.Request request) {
         CodingModelTurnPermit permit = null;
+        // Structural reason for an envelope miss, captured before the failure is thrown.
+        java.util.concurrent.atomic.AtomicReference<com.fasterxml.jackson.databind.JsonNode>
+                envelopeDiagnostic = new java.util.concurrent.atomic.AtomicReference<>();
         try {
             permit = guard.reserve(authorization, request);
             if (permit.replay()) {
                 return ResponseEntity.ok(permit.cachedResponse());
             }
-            CodingModelTurnContract.Response response = service.execute(request);
+            CodingModelTurnContract.Response response =
+                    service.execute(request, envelopeDiagnostic::set);
             guard.complete(permit, response);
             return ResponseEntity.ok(response);
         }
@@ -52,7 +56,8 @@ public class CodingModelTurnController {
             return accessFailure(request, failure);
         }
         catch (ProviderGatewayException failure) {
-            persistFailure(permit, failure.code().name(), retryable(failure.code()));
+            persistFailure(permit, failure.code().name(), retryable(failure.code()),
+                    envelopeDiagnostic.get());
             return gatewayFailure(request, failure);
         }
         catch (RuntimeException failure) {
@@ -99,11 +104,19 @@ public class CodingModelTurnController {
     }
 
     private void persistFailure(CodingModelTurnPermit permit, String code, boolean retryable) {
+        persistFailure(permit, code, retryable, null);
+    }
+
+    private void persistFailure(
+            CodingModelTurnPermit permit,
+            String code,
+            boolean retryable,
+            com.fasterxml.jackson.databind.JsonNode diagnostic) {
         if (permit == null || permit.replay()) {
             return;
         }
         try {
-            guard.fail(permit, code, retryable);
+            guard.fail(permit, code, retryable, diagnostic);
         }
         catch (RuntimeException ignored) {
             // Preserve the original safe failure. The lease expires and permits a bounded retry.

@@ -35,7 +35,7 @@ public class ProfileVersionController {
     JsonNode get(
             @PathVariable UUID profileVersionId,
             @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false) String authorization) {
-        return service.getActive(authorization, profileVersionId);
+        return service.getBound(authorization, profileVersionId);
     }
 
     @ExceptionHandler(ProfileVersionException.class)

@@ -79,12 +79,14 @@ public final class NaturalCmsStageService {
             }
             return response(replay);
         }
+        Set<String> allowedTools = store.runtimePolicy(
+                authorization, job.profileVersionId()).allowedTools();
 
         NaturalCmsContract.StageExecutionResponse executed = switch (request.handlerKey()) {
             case "cms.analyze" -> analyze(job, request, resultId);
-            case "cms.preview" -> preview(job, request, resultId);
-            case "cms.discard" -> discard(job, request, resultId);
-            case "cms.apply" -> apply(job, request, resultId);
+            case "cms.preview" -> preview(job, request, resultId, allowedTools);
+            case "cms.discard" -> discard(job, request, resultId, allowedTools);
+            case "cms.apply" -> apply(job, request, resultId, allowedTools);
             default -> throw contract("Natural CMS stage handler is not registered.");
         };
         NaturalCmsContract.HandlerResult stored = store.record(
@@ -117,10 +119,13 @@ public final class NaturalCmsStageService {
     private NaturalCmsContract.StageExecutionResponse preview(
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
-            UUID resultId) {
+            UUID resultId,
+            Set<String> allowedTools) {
         requireStatus(job, "ACTIVE");
         ObjectNode currentState = resources.snapshot(job.resource());
-        List<JsonNode> schemas = toolSchemas(NaturalCmsToolContract.PREVIEW_TOOLS);
+        Set<String> modelTools = allowedTools(
+                allowedTools, NaturalCmsToolContract.PREVIEW_TOOLS);
+        List<JsonNode> schemas = toolSchemas(modelTools);
         List<JsonNode> messages = new ArrayList<>(initialMessages(job, currentState, true));
         CodingModelTurnContract.Response terminal = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
@@ -129,10 +134,11 @@ public final class NaturalCmsStageService {
                 break;
             }
             CodingModelTurnContract.ToolCall call = terminal.toolCalls().get(0);
-            if (!NaturalCmsToolContract.PREVIEW_TOOLS.contains(call.name())) {
+            if (!modelTools.contains(call.name())) {
                 throw contract("Model selected a Tool outside the Natural CMS allowlist.");
             }
-            JsonNode result = callPreviewTool(job.resource(), currentState, call);
+            JsonNode result = callPreviewTool(
+                    job.resource(), currentState, call, allowedTools);
             messages.add(assistantToolMessage(terminal));
             messages.add(toolMessage(resultId, turn, call, result));
             if (turn == MAX_MODEL_TURNS) {
@@ -146,14 +152,15 @@ public final class NaturalCmsStageService {
         resources.validateCommand(job.resource(), command);
 
         ObjectNode targetArguments = baseArguments(job.resource(), currentState);
-        callTool("resolve_cms_target", targetArguments);
+        callTool("resolve_cms_target", targetArguments, allowedTools);
         ObjectNode commandArguments = baseArguments(job.resource(), currentState);
         commandArguments.set("command", command.deepCopy());
-        JsonNode validation = callTool("validate_cms_command", commandArguments);
+        JsonNode validation = callTool(
+                "validate_cms_command", commandArguments, allowedTools);
         if (!validation.path("valid").asBoolean()) {
             throw contract("Natural CMS command validation did not pass.");
         }
-        JsonNode preview = callTool("create_cms_preview", commandArguments);
+        JsonNode preview = callTool("create_cms_preview", commandArguments, allowedTools);
         UUID previewId = uuid(preview, "previewId");
         String previewHash = digest(preview, "previewHash");
         return new NaturalCmsContract.StageExecutionResponse(
@@ -171,12 +178,13 @@ public final class NaturalCmsStageService {
     private NaturalCmsContract.StageExecutionResponse discard(
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
-            UUID resultId) {
+            UUID resultId,
+            Set<String> allowedTools) {
         requireDecision(job, "REJECTED");
         ObjectNode arguments = objectMapper.createObjectNode();
         arguments.put("previewId", job.previewId().toString());
         arguments.put("previewHash", job.previewHash());
-        JsonNode discarded = callTool("discard_cms_preview", arguments);
+        JsonNode discarded = callTool("discard_cms_preview", arguments, allowedTools);
         if (!discarded.path("discarded").asBoolean()) {
             throw contract("Natural CMS preview discard did not complete.");
         }
@@ -198,7 +206,8 @@ public final class NaturalCmsStageService {
     private NaturalCmsContract.StageExecutionResponse apply(
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
-            UUID resultId) {
+            UUID resultId,
+            Set<String> allowedTools) {
         requireDecision(job, "APPROVED");
         JsonNode command = resources.validateCommand(job.resource(), job.structuredCommand());
         ObjectNode currentState = resources.snapshot(job.resource());
@@ -206,14 +215,15 @@ public final class NaturalCmsStageService {
         arguments.set("command", command.deepCopy());
         arguments.put("previewId", job.previewId().toString());
         arguments.put("previewHash", job.previewHash());
-        JsonNode revalidated = callTool("revalidate_cms_preview", arguments);
+        JsonNode revalidated = callTool(
+                "revalidate_cms_preview", arguments, allowedTools);
         if (!revalidated.path("valid").asBoolean()) {
             throw new NaturalCmsException(
                     "CMS_PREVIEW_STALE",
                     "Natural CMS preview changed before approval apply.",
                     HttpStatus.CONFLICT);
         }
-        JsonNode ready = callTool("apply_cms_preview", arguments);
+        JsonNode ready = callTool("apply_cms_preview", arguments, allowedTools);
         if (!ready.path("applyReady").asBoolean()
                 || !ready.path("command").equals(command)) {
             throw contract("Natural CMS apply Tool changed the approved command.");
@@ -287,17 +297,25 @@ public final class NaturalCmsStageService {
     private JsonNode callPreviewTool(
             NaturalCmsContract.ResourceRef resource,
             JsonNode currentState,
-            CodingModelTurnContract.ToolCall call) {
+            CodingModelTurnContract.ToolCall call,
+            Set<String> allowedTools) {
         ObjectNode arguments = baseArguments(resource, currentState);
         if (!"resolve_cms_target".equals(call.name())) {
             JsonNode command = call.arguments().path("command");
             resources.validateCommand(resource, command);
             arguments.set("command", command.deepCopy());
         }
-        return callTool(call.name(), arguments);
+        return callTool(call.name(), arguments, allowedTools);
     }
 
-    private JsonNode callTool(String name, JsonNode arguments) {
+    private JsonNode callTool(
+            String name, JsonNode arguments, Set<String> allowedTools) {
+        if (!allowedTools.contains(name)) {
+            throw new NaturalCmsException(
+                    "TOOL_NOT_ALLOWED",
+                    "Natural CMS runtime policy rejected the Tool.",
+                    HttpStatus.FORBIDDEN);
+        }
         McpPlatformClient client = mcpClients.getIfAvailable();
         if (client == null) {
             throw new NaturalCmsException(
@@ -351,6 +369,12 @@ public final class NaturalCmsStageService {
             schemas.add(schema);
         }
         return List.copyOf(schemas);
+    }
+
+    static Set<String> allowedTools(Set<String> profileTools, Set<String> stageTools) {
+        Set<String> allowed = new java.util.HashSet<>(stageTools);
+        allowed.retainAll(profileTools);
+        return Set.copyOf(allowed);
     }
 
     private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {

@@ -198,7 +198,8 @@ public final class CodingToolService {
                         || job.leaseId() == null
                         || job.leaseExpiresAt() == null
                         || !job.leaseExpiresAt().isAfter(now)
-                        || !job.expiresAt().isAfter(now)) {
+                        || !job.expiresAt().isAfter(now)
+                        || !"central.default".equals(job.guardrailProfileKey())) {
                     throw new CodingToolException(
                             "JOB_STATE_CONFLICT",
                             "The Coding Job is not authorized for stage execution.",
@@ -208,7 +209,8 @@ public final class CodingToolService {
                         job.traceId(), job.stateVersion(), job.leaseId(), job.actorId(),
                         job.projectId(), job.repositoryId(), job.graphStep(), job.baseSha(),
                         job.contextDigest(), job.policyHash(), job.promptVersion(),
-                        job.allowedCapabilities(), job.allowedNodes(), job.expiresAt());
+                        job.allowedCapabilities(), job.allowedNodes(), job.profileAllowedTools(),
+                        job.expiresAt());
             });
             if (authority == null) {
                 throw unavailable();
@@ -391,27 +393,64 @@ public final class CodingToolService {
 
     private JobAuthority requireAuthority(UUID jobId) {
         List<JobAuthority> rows = jdbc.query(
-                "SELECT trace_id, status, state_version, worker_lease_id, worker_lease_expires_at, "
-                        + "actor_id, project_id, repository_id, graph_step, base_sha, context_digest, "
-                        + "policy_hash, prompt_version, allowed_capabilities, allowed_nodes, expires_at "
-                        + "FROM app.coding_job WHERE job_id = ? "
-                        + "AND authority_source = 'SPRING_CONTROL_PLANE' FOR SHARE",
-                (rs, row) -> new JobAuthority(
-                        rs.getObject(1, UUID.class), rs.getString(2), rs.getInt(3),
-                        rs.getObject(4, UUID.class),
-                        rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toInstant(),
-                        rs.getObject(6, UUID.class), rs.getObject(7, UUID.class),
-                        rs.getObject(8, UUID.class), rs.getString(9), rs.getString(10),
-                        rs.getString(11), rs.getString(12), rs.getString(13),
-                        Set.of((String[]) rs.getArray(14).getArray()),
-                        Set.of((String[]) rs.getArray(15).getArray()),
-                        rs.getTimestamp(16).toInstant()), jobId);
+                "SELECT job.trace_id, job.status, job.state_version, job.worker_lease_id, "
+                        + "job.worker_lease_expires_at, job.actor_id, job.project_id, "
+                        + "job.repository_id, job.graph_step, job.base_sha, job.context_digest, "
+                        + "job.policy_hash, job.prompt_version, job.allowed_capabilities, "
+                        + "job.allowed_nodes, job.expires_at, "
+                        + "profile.snapshot_json::text AS profile_snapshot "
+                        + "FROM app.coding_job job "
+                        + "JOIN app.ai_profile_version profile "
+                        + "ON profile.profile_version_id = job.profile_version_id "
+                        + "WHERE job.job_id = ? AND job.authority_source = 'SPRING_CONTROL_PLANE' "
+                        + "AND profile.profile_key = 'LLM_OPS' "
+                        + "AND profile.status IN ('ACTIVE', 'INACTIVE') FOR SHARE",
+                (rs, row) -> {
+                    RuntimePolicy policy = decodeRuntimePolicy(
+                            objectMapper, rs.getString(17));
+                    return new JobAuthority(
+                            rs.getObject(1, UUID.class), rs.getString(2), rs.getInt(3),
+                            rs.getObject(4, UUID.class),
+                            rs.getTimestamp(5) == null ? null : rs.getTimestamp(5).toInstant(),
+                            rs.getObject(6, UUID.class), rs.getObject(7, UUID.class),
+                            rs.getObject(8, UUID.class), rs.getString(9), rs.getString(10),
+                            rs.getString(11), rs.getString(12), rs.getString(13),
+                            Set.of((String[]) rs.getArray(14).getArray()),
+                            Set.of((String[]) rs.getArray(15).getArray()),
+                            policy.allowedTools(), policy.guardrailProfileKey(),
+                            rs.getTimestamp(16).toInstant());
+                }, jobId);
         if (rows.isEmpty()) {
             throw new CodingToolException(
                     "JOB_NOT_FOUND", "Authoritative coding job not found.",
                     HttpStatus.NOT_FOUND);
         }
         return rows.get(0);
+    }
+
+    static RuntimePolicy decodeRuntimePolicy(ObjectMapper objectMapper, String encoded) {
+        try {
+            JsonNode snapshot = objectMapper.readTree(encoded);
+            JsonNode allowed = snapshot.path("toolPolicy").path("allowedTools");
+            JsonNode guardrail = snapshot.path("guardrailProfileKey");
+            if (!snapshot.isObject() || !allowed.isArray()
+                    || !guardrail.isTextual()
+                    || !"central.default".equals(guardrail.textValue())) {
+                throw invalidRuntimePolicy();
+            }
+            Set<String> tools = new HashSet<>();
+            for (JsonNode tool : allowed) {
+                if (!tool.isTextual()
+                        || !CODING_TOOL_SCHEMA_DIGESTS.containsKey(tool.textValue())
+                        || !tools.add(tool.textValue())) {
+                    throw invalidRuntimePolicy();
+                }
+            }
+            return new RuntimePolicy(tools, guardrail.textValue());
+        }
+        catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw invalidRuntimePolicy();
+        }
     }
 
     private void validateAuthority(
@@ -431,6 +470,8 @@ public final class CodingToolService {
                 && job.graphStep().equals(request.graphStep())
                 && job.allowedNodes().contains(request.graphStep())
                 && job.allowedCapabilities().contains("TOOL_CALLING")
+                && job.profileAllowedTools().contains(request.toolName())
+                && "central.default".equals(job.guardrailProfileKey())
                 && job.baseSha().equals(request.baseSha())
                 && toolBinding.expectedHead().equals(request.candidateSha())
                 && job.contextDigest().equals(request.contextDigest())
@@ -732,6 +773,13 @@ public final class CodingToolService {
                 HttpStatus.SERVICE_UNAVAILABLE, true, 1_000L);
     }
 
+    private static CodingToolException invalidRuntimePolicy() {
+        return new CodingToolException(
+                "TOOL_NOT_ALLOWED",
+                "The bound Coding Profile runtime policy is invalid.",
+                HttpStatus.FORBIDDEN);
+    }
+
     private record ExistingExecution(
             UUID executionId, UUID requestId, UUID toolCallId, UUID traceId,
             byte[] requestDigest, Instant createdAt) { }
@@ -748,15 +796,22 @@ public final class CodingToolService {
             UUID actorId, UUID projectId, UUID repositoryId, String graphStep, String baseSha,
             String contextDigest, String policyHash, String promptVersion,
             Set<String> allowedCapabilities,
-            Set<String> allowedNodes, Instant expiresAt) { }
+            Set<String> allowedNodes, Set<String> profileAllowedTools,
+            String guardrailProfileKey, Instant expiresAt) { }
+    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+        RuntimePolicy {
+            allowedTools = Set.copyOf(allowedTools);
+        }
+    }
     record StageAuthority(
             UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
             UUID repositoryId, String graphStep, String baseSha, String contextDigest,
             String policyHash, String promptVersion, Set<String> allowedCapabilities,
-            Set<String> allowedNodes, Instant expiresAt) {
+            Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt) {
         StageAuthority {
             allowedCapabilities = Set.copyOf(allowedCapabilities);
             allowedNodes = Set.copyOf(allowedNodes);
+            profileAllowedTools = Set.copyOf(profileAllowedTools);
         }
     }
     private record ToolBinding(UUID workspaceId, String expectedHead, String expectedDiffDigest) { }

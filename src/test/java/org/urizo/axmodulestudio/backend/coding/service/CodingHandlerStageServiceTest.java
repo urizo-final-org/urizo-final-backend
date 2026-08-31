@@ -50,6 +50,31 @@ class CodingHandlerStageServiceTest {
             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
 
     @Test
+    void anEmptySnapshotAndStageToolIntersectionExposesNoTools() {
+        assertThat(CodingHandlerStageService.allowedTools(
+                Set.of("apply_patch"), Set.of("read_diff"))).isEmpty();
+    }
+
+    @Test
+    void boundCodingPolicyDecodeFailsClosedForMissingOrUnknownTools() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingToolService.RuntimePolicy valid = CodingToolService.decodeRuntimePolicy(
+                mapper,
+                "{\"toolPolicy\":{\"allowedTools\":[\"read_diff\"]},"
+                        + "\"guardrailProfileKey\":\"central.default\"}");
+        assertThat(valid.allowedTools()).containsExactly("read_diff");
+
+        for (String invalid : List.of(
+                "{\"toolPolicy\":{},\"guardrailProfileKey\":\"central.default\"}",
+                "{\"toolPolicy\":{\"allowedTools\":[\"shell_anything\"]},"
+                        + "\"guardrailProfileKey\":\"central.default\"}")) {
+            assertThatThrownBy(() -> CodingToolService.decodeRuntimePolicy(mapper, invalid))
+                    .isInstanceOfSatisfying(CodingToolException.class,
+                            failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+        }
+    }
+
+    @Test
     void acceptsAFencedStageResultAndRejectsAnUnrepairableOne() {
         ObjectMapper mapper = new ObjectMapper();
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
@@ -88,6 +113,7 @@ class CodingHandlerStageServiceTest {
                 "coding-v1",
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
                 NOW.plusSeconds(60));
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(
@@ -175,6 +201,7 @@ class CodingHandlerStageServiceTest {
                 "coding-v1",
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
                 NOW.plusSeconds(60));
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(

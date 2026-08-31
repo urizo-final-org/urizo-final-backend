@@ -4,7 +4,7 @@
   "traceId": "66666666-6666-4666-8666-666666666666",
   "error": {
     "code": "PROFILE_VERSION_NOT_ACTIVE",
-    "message": "The requested Profile Version is not active.",
+    "message": "The requested Profile Version is not executable.",
     "retryable": false,
     "executionState": "NOT_STARTED"
   }

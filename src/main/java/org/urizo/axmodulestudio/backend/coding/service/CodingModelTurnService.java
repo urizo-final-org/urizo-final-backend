@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
+import org.urizo.axmodulestudio.backend.cms.assistant.NaturalCmsToolContract;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.util.ArrayList;
@@ -39,10 +40,6 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
-    private static final Set<String> CODING_TOOL_NAMES = Set.of(
-            "read_file", "search_code", "read_diff", "apply_patch", "run_check",
-            "check_package_allowlist", "scan_changed_files");
-
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
     private final ObjectMapper objectMapper;
@@ -64,8 +61,18 @@ public class CodingModelTurnService {
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
+        return execute(request, false);
+    }
+
+    public CodingModelTurnContract.Response executeNaturalCms(
+            CodingModelTurnContract.Request request) {
+        return execute(request, true);
+    }
+
+    private CodingModelTurnContract.Response execute(
+            CodingModelTurnContract.Request request, boolean naturalCms) {
         Objects.requireNonNull(request, "request is required");
-        ToolMode toolMode = requireSupportedSubset(request);
+        ToolMode toolMode = requireSupportedSubset(request, naturalCms);
         ModelUseCase useCase = toolMode == ToolMode.PROVIDER
                 ? ModelUseCase.TOOL_CALL : ModelUseCase.CHAT;
         ProviderModelRegistration selected = capabilityRegistry.candidates(useCase).stream()
@@ -118,7 +125,8 @@ public class CodingModelTurnService {
                 clock.instant());
     }
 
-    private ToolMode requireSupportedSubset(CodingModelTurnContract.Request request) {
+    private ToolMode requireSupportedSubset(
+            CodingModelTurnContract.Request request, boolean naturalCms) {
         JsonNode responseFormat = request.responseFormat();
         boolean textFormat = responseFormat.isObject()
                 && responseFormat.size() == 1
@@ -130,7 +138,7 @@ public class CodingModelTurnService {
                 && capabilities.equals(CHAT_WITH_TOOLS)
                 && validLocalToolSchema(request.toolSchemas());
         boolean providerToolCandidate = capabilities.equals(CHAT_WITH_TOOLS)
-                && validCodingToolSchemas(request.toolSchemas());
+                && validApprovedToolSchemas(request.toolSchemas(), naturalCms);
         if ((!chatOnly && !localToolCandidate && !providerToolCandidate) || !textFormat) {
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
@@ -164,16 +172,18 @@ public class CodingModelTurnService {
                 && "string".equals(path.path("type").textValue());
     }
 
-    private static boolean validCodingToolSchemas(List<JsonNode> toolSchemas) {
+    private static boolean validApprovedToolSchemas(
+            List<JsonNode> toolSchemas, boolean naturalCms) {
         if (toolSchemas.isEmpty()) {
             return false;
         }
         Set<String> names = new HashSet<>();
         for (JsonNode toolSchema : toolSchemas) {
             String name = toolSchema.path("name").asText();
-            String expectedDigest = CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name);
-            if (!CODING_TOOL_NAMES.contains(name)
-                    || expectedDigest == null
+            String expectedDigest = naturalCms
+                    ? NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS.get(name)
+                    : CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name);
+            if (expectedDigest == null
                     || !expectedDigest.equals(toolSchema.path("schemaDigest").asText())
                     || !names.add(name)) {
                 return false;

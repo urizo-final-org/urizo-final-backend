@@ -33,6 +33,14 @@ public final class McpPlatformContract {
             "check_package_allowlist",
             "scan_changed_files");
 
+    private static final Set<String> CMS_TOOL_NAMES = Set.of(
+            "resolve_cms_target",
+            "validate_cms_command",
+            "create_cms_preview",
+            "discard_cms_preview",
+            "revalidate_cms_preview",
+            "apply_cms_preview");
+
     private McpPlatformContract() {
     }
 
@@ -46,6 +54,10 @@ public final class McpPlatformContract {
 
     public static Set<String> codingToolNames() {
         return CODING_TOOL_NAMES;
+    }
+
+    public static Set<String> cmsToolNames() {
+        return CMS_TOOL_NAMES;
     }
 
     public record Snapshot(String protocolVersion, String serverName, Set<String> exposedTools) {

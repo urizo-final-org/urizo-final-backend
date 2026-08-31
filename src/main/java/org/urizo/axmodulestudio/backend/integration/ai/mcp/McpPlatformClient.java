@@ -7,6 +7,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
@@ -60,18 +61,73 @@ public final class McpPlatformClient {
     }
 
     public JsonNode callTool(String toolName, JsonNode arguments) {
-        if (!McpPlatformContract.codingToolNames().contains(toolName)
-                || arguments == null
+        if (arguments == null
                 || !arguments.isObject()) {
-            throw new McpPlatformException("MCP coding tool call contract was rejected.");
+            throw new McpPlatformException("MCP tool call contract was rejected.");
         }
-        validateCodingArguments(toolName, arguments);
+        if (McpPlatformContract.codingToolNames().contains(toolName)) {
+            validateCodingArguments(toolName, arguments);
+        }
+        else if (McpPlatformContract.cmsToolNames().contains(toolName)) {
+            validateCmsArguments(toolName, arguments);
+        }
+        else {
+            throw new McpPlatformException("MCP tool call contract was rejected.");
+        }
         JsonNode result = invoke("tools/call", toolName, arguments);
         if (!result.path("isError").isBoolean()
                 || !result.path("structuredContent").isObject()) {
             throw new McpPlatformException("MCP coding tool result contract was rejected.");
         }
         return result;
+    }
+
+    private static void validateCmsArguments(String toolName, JsonNode arguments) {
+        Set<String> expected = switch (toolName) {
+            case "resolve_cms_target" -> Set.of("resource", "currentState");
+            case "validate_cms_command", "create_cms_preview" ->
+                    Set.of("resource", "command", "currentState");
+            case "discard_cms_preview" -> Set.of("previewId", "previewHash");
+            case "revalidate_cms_preview", "apply_cms_preview" -> Set.of(
+                    "previewId", "previewHash", "resource", "command", "currentState");
+            default -> throw new McpPlatformException(
+                    "MCP Natural CMS tool call contract was rejected.");
+        };
+        Set<String> actual = new HashSet<>();
+        arguments.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw new McpPlatformException("MCP Natural CMS tool call contract was rejected.");
+        }
+        if (expected.contains("resource")) {
+            JsonNode resource = arguments.path("resource");
+            Set<String> resourceFields = new HashSet<>();
+            resource.fieldNames().forEachRemaining(resourceFields::add);
+            if (!resource.isObject()
+                    || !resourceFields.equals(Set.of("type", "id"))
+                    || !resource.path("type").isTextual()
+                    || !resource.path("id").isTextual()
+                    || !arguments.path("currentState").isObject()
+                    || arguments.path("currentState").isEmpty()) {
+                throw new McpPlatformException(
+                        "MCP Natural CMS tool call contract was rejected.");
+            }
+        }
+        if (expected.contains("command") && !arguments.path("command").isObject()) {
+            throw new McpPlatformException("MCP Natural CMS tool call contract was rejected.");
+        }
+        if (expected.contains("previewId")) {
+            try {
+                UUID.fromString(arguments.path("previewId").asText());
+            }
+            catch (IllegalArgumentException failure) {
+                throw new McpPlatformException(
+                        "MCP Natural CMS tool call contract was rejected.");
+            }
+            if (!matches(arguments, "previewHash", DIFF_DIGEST)) {
+                throw new McpPlatformException(
+                        "MCP Natural CMS tool call contract was rejected.");
+            }
+        }
     }
 
     private static void validateCodingArguments(String toolName, JsonNode arguments) {

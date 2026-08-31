@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -39,7 +40,6 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegi
 
 class CodingModelTurnServiceTest {
 
-    private static final String TOOL_RESULT_PREFIX = "Result of read_file: ";
 
     private static final Instant NOW = Instant.parse("2026-08-11T08:00:00Z");
     private static final String MODEL = "local-google-chat-model";
@@ -203,20 +203,23 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER);
-        assertThat(routed.getValue().messages().get(0).content())
-                .startsWith("Return exactly one JSON object")
-                .contains("Declared tools:");
+        // The first message is the native conversion trigger, so the request declares
+        // the tools natively instead of asking the model to hand-write the envelope.
+        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
+        assertThat(routed.getValue().tools()).singleElement()
+                .satisfies(tool -> assertThat(tool.name()).isEqualTo("read_file"));
         // A tool-calling turn carries its own reply shape, so the provider-native
         // JSON setting stays off and the two never share a request mode.
         assertThat(routed.getValue().jsonObjectResponse()).isFalse();
     }
 
     @Test
-    void replaysAnEmulatedToolExchangeAsPlainTextForTheProvider() {
-        // No tool is declared to the provider on this path, so replaying the exchange as a
-        // native tool call and tool response describes tools the request does not carry.
-        // Gemini answers such a request with no candidate at all.
+    void preservesTheNativeToolExchangeForTheProvider() {
+        // The provider path declares its tools natively through the conversion trigger,
+        // so the recorded exchange replays as native assistant tool calls and tool
+        // results instead of being collapsed to text.
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -268,25 +271,22 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER,
                         ProviderChatMessage.Role.ASSISTANT,
-                        ProviderChatMessage.Role.USER);
-        assertThat(routed.getValue().messages().get(0).content())
-                .contains("Declared tools:")
-                .contains("Stay in scope.");
-        assertThat(routed.getValue().messages().get(2).content())
-                .contains("\"name\":\"read_file\"")
-                .contains("\"path\":\"README.md\"");
-        assertThat(routed.getValue().messages().get(2).toolCalls()).isEmpty();
-        assertThat(routed.getValue().messages().get(3).content())
-                .startsWith("Result of read_file: ");
+                        ProviderChatMessage.Role.TOOL);
+        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
+        assertThat(routed.getValue().messages().get(3).toolCalls())
+                .singleElement()
+                .satisfies(call -> assertThat(call.name()).isEqualTo("read_file"));
+        assertThat(routed.getValue().messages().get(4).toolName()).isEqualTo("read_file");
     }
 
     @Test
-    void foldsTheToolEnvelopeAndStageSystemPromptsIntoOneSystemMessage() {
-        // Gemini carries one system instruction, and Spring AI rejects a prompt holding two.
-        // The tool path adds its own system message on top of the stage one, so without the
-        // fold every provider tool turn fails before the provider is ever called.
+    void declaresToolsNativelyThroughTheConversionTriggerMessage() {
+        // The provider path leads with the byte-exact conversion trigger: the request
+        // recognizes it, declares the tools natively and strips the message, so the
+        // provider sees one system instruction and never two.
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -319,10 +319,15 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER);
-        assertThat(routed.getValue().messages().get(0).content())
-                .contains("Return exactly one JSON object")
-                .contains("Declared tools:")
+        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
+        assertThat(routed.getValue().providerMessages())
+                .extracting(ProviderChatMessage::role)
+                .containsExactly(
+                        ProviderChatMessage.Role.SYSTEM,
+                        ProviderChatMessage.Role.USER);
+        assertThat(routed.getValue().providerMessages().get(0).content())
                 .contains("Stay in scope.");
     }
 
@@ -431,6 +436,52 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
+    void usesTheBoundProviderOrderAndFallsBackOnlyAfterATransientFailure() {
+        ProviderModelRegistration primary = new ProviderModelRegistration(
+                ModelProvider.OPENAI,
+                "openai-bound-model",
+                Set.of(ModelCapability.CHAT),
+                Duration.ofSeconds(30),
+                2);
+        ProviderModelRegistration fallback = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "gemini-bound-model",
+                Set.of(ModelCapability.CHAT),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService bound = new CodingModelTurnService(
+                registry(List.of(primary, fallback)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+        when(gateway.chat(any()))
+                .thenThrow(new ProviderGatewayException(
+                        ModelGatewayErrorCode.MODEL_TIMEOUT,
+                        "The primary provider timed out."))
+                .thenReturn(new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "gemini-bound-model",
+                        "fallback response",
+                        2,
+                        1,
+                        Duration.ofMillis(10)));
+
+        CodingModelTurnContract.Response response = bound.execute(
+                chatRequest(), List.of(primary, fallback));
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway, times(2)).chat(routed.capture());
+        assertThat(routed.getAllValues())
+                .extracting(ProviderChatRequest::provider, ProviderChatRequest::modelId)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.OPENAI, "openai-bound-model"),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI, "gemini-bound-model"));
+        assertThat(response.selectedModel().provider()).isEqualTo("GOOGLE");
+        assertThat(response.selectedModel().modelId()).isEqualTo("gemini-bound-model");
+    }
+
+    @Test
     void requestDiagnosticsRedactMessagesAndToolSchemas() {
         CodingModelTurnContract.Request request = chatRequest();
 
@@ -467,9 +518,8 @@ class CodingModelTurnServiceTest {
                 .sum();
         assertThat(characters).isLessThanOrEqualTo(65_536);
         List<String> contents = routed.getValue().messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
                 .map(ProviderChatMessage::content)
-                .filter(content -> content.startsWith(TOOL_RESULT_PREFIX))
-                .map(content -> content.substring(TOOL_RESULT_PREFIX.length()))
                 .toList();
         assertThat(contents).hasSize(3);
         assertThat(contents.get(0)).doesNotContain("AAAA").contains("elided");
@@ -519,11 +569,9 @@ class CodingModelTurnServiceTest {
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(gateway).chat(routed.capture());
-        // A tool result reaches the provider as plain user text on this path.
         return routed.getValue().messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
                 .map(ProviderChatMessage::content)
-                .filter(content -> content.startsWith(TOOL_RESULT_PREFIX))
-                .map(content -> content.substring(TOOL_RESULT_PREFIX.length()))
                 .toList();
     }
 

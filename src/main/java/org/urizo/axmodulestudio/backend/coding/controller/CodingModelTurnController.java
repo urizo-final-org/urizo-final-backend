@@ -48,7 +48,7 @@ public class CodingModelTurnController {
                 return ResponseEntity.ok(permit.cachedResponse());
             }
             CodingModelTurnContract.Response response =
-                    service.execute(request, envelopeDiagnostic::set);
+                    service.execute(request, null, envelopeDiagnostic::set);
             guard.complete(permit, response);
             return ResponseEntity.ok(response);
         }

@@ -30,6 +30,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatGatewayPort;
@@ -38,6 +39,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatReque
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 class CodingHandlerStageServiceTest {
 
@@ -45,6 +47,7 @@ class CodingHandlerStageServiceTest {
     private static final UUID JOB = UUID.fromString("55555555-5555-4555-8555-555555555555");
     private static final UUID TRACE = UUID.fromString("66666666-6666-4666-8666-666666666666");
     private static final UUID RESULT = UUID.fromString("77777777-7777-4777-8777-777777777777");
+    private static final UUID PROFILE = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     private static final UUID WORKSPACE = UUID.fromString("88888888-8888-4888-8888-888888888888");
     private static final UUID EXECUTION = UUID.fromString("99999999-9999-4999-8999-999999999999");
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -76,9 +79,12 @@ class CodingHandlerStageServiceTest {
                                 Duration.ofSeconds(30),
                                 2))),
                 gateway, mapper, clock, false);
+        ProfileModelBindingService anyBindings = mock(ProfileModelBindingService.class);
+        // null = no profile binding, so the turn service falls back to the registry.
+        when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(null);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), mapper, clock);
+                mock(CodingRunnerService.class), anyBindings, mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -92,7 +98,8 @@ class CodingHandlerStageServiceTest {
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
                 Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(60),
+                PROFILE);
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(
                         "1.0", JOB, TRACE, 1, WORKSPACE,
@@ -267,9 +274,14 @@ class CodingHandlerStageServiceTest {
                 mapper,
                 clock,
                 false);
+        ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(
+                PROFILE, "analyze", "coding.analyze", ModelUseCase.CHAT))
+                .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -285,7 +297,8 @@ class CodingHandlerStageServiceTest {
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
                 Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(60),
+                PROFILE);
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(
                         "1.0", JOB, TRACE, 1, WORKSPACE,
@@ -347,9 +360,12 @@ class CodingHandlerStageServiceTest {
                 mapper,
                 clock,
                 false);
+        ProfileModelBindingService anyBindings = mock(ProfileModelBindingService.class);
+        // null = no profile binding, so the turn service falls back to the registry.
+        when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(null);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), mapper, clock);
+                mock(CodingRunnerService.class), anyBindings, mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -365,7 +381,8 @@ class CodingHandlerStageServiceTest {
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
                 Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(60),
+                PROFILE);
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(
                         "1.0", JOB, TRACE, 1, WORKSPACE,
@@ -441,9 +458,14 @@ class CodingHandlerStageServiceTest {
                 mapper,
                 clock,
                 false);
+        ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(
+                PROFILE, "code", "coding.code", ModelUseCase.TOOL_CALL))
+                .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -459,7 +481,8 @@ class CodingHandlerStageServiceTest {
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
                 Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(60),
+                PROFILE);
         CodingHandlerContract.AttemptAggregateResponse aggregate =
                 new CodingHandlerContract.AttemptAggregateResponse(
                         "1.0", JOB, TRACE, 1, WORKSPACE,
@@ -555,10 +578,12 @@ class CodingHandlerStageServiceTest {
         ArgumentCaptor<ProviderChatRequest> modelRequests =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(gateway, times(2)).chat(modelRequests.capture());
-        // The tool result is replayed to the provider as plain user text, because no tool
-        // is ever declared to it on this path.
-        assertThat(modelRequests.getAllValues().get(1).prompt())
-                .contains("Result of ")
+        // The tool exchange replays natively on the provider path, so the result body
+        // arrives in a TOOL-role message rather than as flattened user text.
+        assertThat(modelRequests.getAllValues().get(1).messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList().toString())
                 .contains(DIFF_DIGEST);
         verify(guard, times(2)).complete(any(), any());
     }

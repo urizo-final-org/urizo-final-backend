@@ -22,10 +22,13 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
 @Profile("dev & local-full")
@@ -40,6 +43,7 @@ public final class NaturalCmsStageService {
     private final NaturalCmsStore store;
     private final NaturalCmsResourceService resources;
     private final CodingModelTurnService models;
+    private final ProfileModelBindingService profileModelBindings;
     private final ObjectProvider<McpPlatformClient> mcpClients;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -48,12 +52,15 @@ public final class NaturalCmsStageService {
             NaturalCmsStore store,
             NaturalCmsResourceService resources,
             CodingModelTurnService models,
+            ProfileModelBindingService profileModelBindings,
             ObjectProvider<McpPlatformClient> mcpClients,
             ObjectMapper objectMapper,
             Clock clock) {
         this.store = Objects.requireNonNull(store, "store is required");
         this.resources = Objects.requireNonNull(resources, "resources are required");
         this.models = Objects.requireNonNull(models, "models are required");
+        this.profileModelBindings = Objects.requireNonNull(
+                profileModelBindings, "profileModelBindings are required");
         this.mcpClients = Objects.requireNonNull(mcpClients, "mcpClients are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
@@ -104,9 +111,11 @@ public final class NaturalCmsStageService {
             UUID resultId) {
         requireStatus(job, "ACTIVE");
         ObjectNode currentState = resources.snapshot(job.resource());
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(job, stage, ModelUseCase.CHAT);
         CodingModelTurnContract.Response turn = modelTurn(
                 job, stage, resultId, 1, List.of(),
-                initialMessages(job, currentState, false));
+                initialMessages(job, currentState, false), modelBindings);
         ModelOutcome outcome = parseAnalyze(turn.assistant().content());
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
@@ -131,9 +140,13 @@ public final class NaturalCmsStageService {
                 allowedTools, NaturalCmsToolContract.PREVIEW_TOOLS);
         List<JsonNode> schemas = toolSchemas(modelTools);
         List<JsonNode> messages = new ArrayList<>(initialMessages(job, currentState, true));
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(job, stage, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         CodingModelTurnContract.Response terminal = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            terminal = modelTurn(job, stage, resultId, turn, schemas, messages);
+            terminal = modelTurn(
+                    job, stage, resultId, turn, schemas, messages, modelBindings);
             if (terminal.toolCalls().isEmpty()) {
                 break;
             }
@@ -254,7 +267,8 @@ public final class NaturalCmsStageService {
             UUID resultId,
             int turn,
             List<JsonNode> schemas,
-            List<JsonNode> messages) {
+            List<JsonNode> messages,
+            List<ProviderModelRegistration> modelBindings) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
@@ -273,7 +287,15 @@ public final class NaturalCmsStageService {
                 messages,
                 schemas,
                 objectMapper.createObjectNode().put("type", "TEXT"),
-                clock.instant().plusSeconds(60)));
+                clock.instant().plusSeconds(60)), modelBindings);
+    }
+
+    private List<ProviderModelRegistration> modelBindings(
+            NaturalCmsContract.JobResponse job,
+            NaturalCmsContract.StageExecutionRequest stage,
+            ModelUseCase useCase) {
+        return profileModelBindings.resolve(
+                job.profileVersionId(), stage.nodeId(), stage.handlerKey(), useCase);
     }
 
     private List<JsonNode> initialMessages(

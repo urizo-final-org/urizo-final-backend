@@ -22,6 +22,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.CapabilityRegistrationException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
@@ -83,7 +84,13 @@ public class CodingModelTurnService {
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
-        return execute(request, false, node -> { });
+        return execute(request, false, null, node -> { });
+    }
+
+    public CodingModelTurnContract.Response execute(
+            CodingModelTurnContract.Request request,
+            List<ProviderModelRegistration> boundModels) {
+        return execute(request, false, List.copyOf(boundModels), node -> { });
     }
 
     /**
@@ -95,28 +102,97 @@ public class CodingModelTurnService {
      */
     public CodingModelTurnContract.Response execute(
             CodingModelTurnContract.Request request,
+            List<ProviderModelRegistration> boundModels,
             java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
-        return execute(request, false, envelopeDiagnostic);
+        return execute(request, false,
+                boundModels == null ? null : List.copyOf(boundModels), envelopeDiagnostic);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request) {
-        return execute(request, true, node -> { });
+        return execute(request, true, null, node -> { });
+    }
+
+    public CodingModelTurnContract.Response executeNaturalCms(
+            CodingModelTurnContract.Request request,
+            List<ProviderModelRegistration> boundModels) {
+        return execute(request, true, List.copyOf(boundModels), node -> { });
     }
 
     private CodingModelTurnContract.Response execute(
             CodingModelTurnContract.Request request,
             boolean naturalCms,
+            List<ProviderModelRegistration> boundModels,
             java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
         Objects.requireNonNull(request, "request is required");
         ToolMode toolMode = requireSupportedSubset(request, naturalCms);
         ModelUseCase useCase = toolMode == ToolMode.PROVIDER
                 ? ModelUseCase.TOOL_CALL : ModelUseCase.CHAT;
-        ProviderModelRegistration selected = capabilityRegistry.candidates(useCase).stream()
-                .findFirst()
-                .orElseThrow(() -> new ProviderGatewayException(
+        List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
+        ProviderGatewayException lastFailure = null;
+        for (ProviderModelRegistration selected : candidates) {
+            try {
+                return executeSelected(request, toolMode, selected, envelopeDiagnostic);
+            }
+            catch (ProviderGatewayException failure) {
+                lastFailure = failure;
+                if (!fallbackEligible(failure.code())) {
+                    throw failure;
+                }
+            }
+        }
+        if (lastFailure != null) {
+            throw lastFailure;
+        }
+        throw new ProviderGatewayException(
+                ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                "No configured model can satisfy the requested capability.");
+    }
+
+    private List<ProviderModelRegistration> modelCandidates(
+            List<ProviderModelRegistration> boundModels,
+            ModelUseCase useCase) {
+        if (boundModels == null) {
+            return capabilityRegistry.candidates(useCase).stream().limit(1).toList();
+        }
+        if (boundModels.isEmpty()) {
+            return List.of();
+        }
+        List<ProviderModelRegistration> validated = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (ProviderModelRegistration candidate : boundModels) {
+            if (candidate == null
+                    || !seen.add(candidate.provider().name() + ":" + candidate.modelId())) {
+                throw new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
-                        "No configured model can satisfy the requested capability."));
+                        "The bound model selection is invalid.");
+            }
+            try {
+                validated.add(capabilityRegistry.require(
+                        candidate.provider(), candidate.modelId(), useCase));
+            }
+            catch (CapabilityRegistrationException failure) {
+                throw new ProviderGatewayException(failure.code(),
+                        "The bound model cannot satisfy the requested capability.");
+            }
+        }
+        return List.copyOf(validated);
+    }
+
+    private static boolean fallbackEligible(ModelGatewayErrorCode code) {
+        return Set.of(
+                ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                ModelGatewayErrorCode.MODEL_RATE_LIMITED,
+                ModelGatewayErrorCode.MODEL_TIMEOUT,
+                ModelGatewayErrorCode.MODEL_PROVIDER_UNAVAILABLE,
+                ModelGatewayErrorCode.INTERNAL_TRANSIENT_ERROR).contains(code);
+    }
+
+    private CodingModelTurnContract.Response executeSelected(
+            CodingModelTurnContract.Request request,
+            ToolMode toolMode,
+            ProviderModelRegistration selected,
+            java.util.function.Consumer<JsonNode> envelopeDiagnostic) {
         // First layer of the JSON defence. Every CHAT caller here parses the reply as
         // one JSON object, so ask the provider for that shape directly instead of only
         // requesting it in the prompt. A TOOL_CALL request keeps its own reply shape,
@@ -126,7 +202,7 @@ public class CodingModelTurnService {
                 selected.modelId(),
                 normalizedMessages(request, toolMode),
                 request.deadlineAt(),
-                useCase == ModelUseCase.CHAT));
+                toolMode != ToolMode.PROVIDER));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
                 || providerResponse.content().length() > 200_000
@@ -240,19 +316,14 @@ public class CodingModelTurnService {
         Map<String, String> pendingToolNames = new HashMap<>();
         if (toolMode == ToolMode.PROVIDER) {
             try {
+                // Byte-identical to the native conversion trigger: ProviderChatRequest
+                // recognizes this prefix, declares the tools natively to the provider,
+                // and strips this message. The model no longer hand-writes the envelope
+                // for tool calls, and the reply is converted back into this envelope.
                 messages.add(ProviderChatMessage.plain(
                         ProviderChatMessage.Role.SYSTEM,
-                        "Return exactly one JSON object with fields assistant and toolCalls. "
-                                + "assistant must be a string. toolCalls must be a JSON array "
-                                + "holding zero or one declared tool call. A call is an object "
-                                + "with exactly the two fields name and arguments, and every value "
-                                + "the tool needs goes inside arguments, never beside it. "
-                                + "Use exactly this "
-                                + "shape, closing every brace exactly once and ending the "
-                                + "reply at the final brace: "
-                                + "{\"assistant\":\"one sentence\",\"toolCalls\":[{\"name\":\"a declared tool\",\"arguments\":{\"field\":\"value\"}}]}. "
-                                + "Do not add markdown.\n"
-                                + "Declared tools: "
+                        org.urizo.axmodulestudio.backend.integration.ai.gateway
+                                .ProviderToolDefinition.LEGACY_TOOL_PROMPT_PREFIX
                                 + objectMapper.writeValueAsString(request.toolSchemas())));
             }
             catch (JsonProcessingException failure) {
@@ -305,12 +376,18 @@ public class CodingModelTurnService {
         if (!pendingToolNames.isEmpty()) {
             throw invalidContract();
         }
-        // Every mode flattens: the format re-ask replays a tool conversation in CHAT
-        // mode, and an undeclared native tool exchange makes Gemini return no candidate
-        // at all. A conversation without tool messages passes through unchanged.
-        // The budget has to see the tool bodies it is allowed to drop, so it runs before
-        // the flattening. Flattening adds a fixed wrapper per message that does not depend
-        // on body length, so that exact cost is measured once and reserved up front.
+        if (toolMode == ToolMode.PROVIDER) {
+            // The native tool path owns this list as-is: the trigger message must stay
+            // first and alone (it is stripped after conversion), and the tool history
+            // replays natively through the adapter. Folding or flattening here would
+            // break that contract; after the strip exactly one system message remains.
+            return withinRequestBudget(messages, 0);
+        }
+        // A re-asked or plain CHAT turn replays any tool exchange as text, because no
+        // tool is declared on that request and an undeclared native exchange makes
+        // Gemini return no candidate at all. The budget runs first so it can still see
+        // the tool bodies it is allowed to drop; flattening adds a fixed wrapper per
+        // message, so that exact cost is measured once and reserved up front.
         long flatteningCost = characters(flattenToolProtocol(messages)) - characters(messages);
         return foldSystemMessages(
                 flattenToolProtocol(withinRequestBudget(messages, flatteningCost)));

@@ -44,7 +44,7 @@ public class LocalProviderSecretService {
 
     public ProviderCredentialStatus store(ModelProvider provider, String credential) {
         requireSupported(provider);
-        validateCredential(credential);
+        validateCredential(provider, credential);
 
         byte[] plaintext = credential.getBytes(StandardCharsets.US_ASCII);
         try {
@@ -69,6 +69,12 @@ public class LocalProviderSecretService {
         repository.updateState(provider, state);
     }
 
+    public ProviderCredentialStatus delete(ModelProvider provider) {
+        requireSupported(provider);
+        repository.delete(provider);
+        return ProviderCredentialStatus.notConfigured(provider);
+    }
+
     private static ProviderCredentialStatus status(ModelProvider provider, StoredProviderSecret stored) {
         if (stored == null) {
             return ProviderCredentialStatus.notConfigured(provider);
@@ -84,7 +90,7 @@ public class LocalProviderSecretService {
                 stored.lastTestedAt());
     }
 
-    private static void validateCredential(String credential) {
+    static void validateCredential(ModelProvider provider, String credential) {
         if (credential == null || credential.length() < 8 || credential.length() > 4096) {
             throw new IllegalArgumentException("Credential length must be between 8 and 4096 characters.");
         }
@@ -94,6 +100,10 @@ public class LocalProviderSecretService {
         boolean printableAscii = credential.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
         if (!printableAscii) {
             throw new IllegalArgumentException("Credential must contain printable ASCII characters only.");
+        }
+        if (provider == ModelProvider.ANTHROPIC
+                && (credential.length() < 40 || !credential.startsWith("sk-ant-") || credential.contains("..."))) {
+            throw new IllegalArgumentException("Anthropic API key format is invalid or masked.");
         }
     }
 

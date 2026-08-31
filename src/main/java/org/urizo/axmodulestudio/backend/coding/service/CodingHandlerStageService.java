@@ -24,8 +24,11 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -71,6 +74,7 @@ public final class CodingHandlerStageService {
     private final CodingToolService tools;
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
+    private final ProfileModelBindingService profileModelBindings;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
@@ -84,6 +88,7 @@ public final class CodingHandlerStageService {
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
             CodingRunnerService runner,
+            ProfileModelBindingService profileModelBindings,
             ObjectMapper objectMapper,
             Clock clock) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
@@ -91,6 +96,8 @@ public final class CodingHandlerStageService {
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
         this.models = Objects.requireNonNull(models, "models are required");
+        this.profileModelBindings = Objects.requireNonNull(
+                profileModelBindings, "profileModelBindings are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -153,6 +160,7 @@ public final class CodingHandlerStageService {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(), messages,
+                modelBindings(authority, request, ModelUseCase.CHAT),
                 new java.util.concurrent.atomic.AtomicReference<>());
         ModelOutcome outcome = parseOutcomeOrReask(
                 authorization, jobId, resultId, request, authority, aggregate,
@@ -178,13 +186,16 @@ public final class CodingHandlerStageService {
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
         CodingModelTurnContract.Response modelResponse = null;
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(authority, request, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             java.util.concurrent.atomic.AtomicReference<JsonNode> envelopeDiagnostic =
                     new java.util.concurrent.atomic.AtomicReference<>();
             try {
                 modelResponse = modelTurn(
                         authorization, jobId, resultId, request, authority, aggregate,
-                        turn, schemas, messages, envelopeDiagnostic);
+                        turn, schemas, messages, modelBindings, envelopeDiagnostic);
             }
             catch (ProviderGatewayException failure) {
                 // Third layer of the JSON defence, tool edition. A structural diagnostic
@@ -361,6 +372,7 @@ public final class CodingHandlerStageService {
             int turn,
             List<JsonNode> schemas,
             List<JsonNode> messages,
+            List<ProviderModelRegistration> modelBindings,
             java.util.concurrent.atomic.AtomicReference<JsonNode> envelopeDiagnostic) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
@@ -391,7 +403,7 @@ public final class CodingHandlerStageService {
         }
         try {
             CodingModelTurnContract.Response response =
-                    models.execute(request, envelopeDiagnostic::set);
+                    models.execute(request, modelBindings, envelopeDiagnostic::set);
             modelGuard.complete(permit, response);
             return response;
         }
@@ -405,6 +417,14 @@ public final class CodingHandlerStageService {
             }
             throw failure;
         }
+    }
+
+    private List<ProviderModelRegistration> modelBindings(
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.StageExecutionRequest request,
+            ModelUseCase useCase) {
+        return profileModelBindings.resolve(
+                authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
     }
 
     private CodingToolContract.ResultContent executeTool(
@@ -631,9 +651,7 @@ public final class CodingHandlerStageService {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");
             }
-            case "apply_patch" -> stringProperty(properties, required, "patch",
-                    "The whole unified diff as one JSON string. Line breaks are \\n escapes, "
-                            + "not real newlines, and the diff carries no Markdown fence.");
+            case "apply_patch" -> stringProperty(properties, required, "patch");
             case "run_check" -> stringProperty(properties, required, "profile");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");
@@ -647,11 +665,6 @@ public final class CodingHandlerStageService {
         required.add(name);
     }
 
-    private static void stringProperty(
-            ObjectNode properties, ArrayNode required, String name, String description) {
-        properties.putObject(name).put("type", "string").put("description", description);
-        required.add(name);
-    }
 
     private ObjectNode userMessage(String content) {
         return objectMapper.createObjectNode().put("role", "user").put("content", content);
@@ -753,6 +766,7 @@ public final class CodingHandlerStageService {
         CodingModelTurnContract.Response second = modelTurn(
                 authorization, jobId, resultId, stage, authority, aggregate,
                 FORMAT_REASK_TURN, List.of(), reask,
+                modelBindings(authority, stage, ModelUseCase.CHAT),
                 new java.util.concurrent.atomic.AtomicReference<>());
         if (!second.toolCalls().isEmpty()) {
             throw contract("The Coding Model stage result is invalid.");

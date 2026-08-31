@@ -67,7 +67,7 @@ class CodingModelTurnControllerTest {
     @Test
     void returnsTheNormalizedSuccessEnvelope() throws Exception {
         CodingModelTurnContract.Request request = request();
-        when(service.execute(any(), any())).thenReturn(response(request));
+        when(service.execute(any(), any(), any())).thenReturn(response(request));
 
         mockMvc.perform(post("/internal/coding/model-turns")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer local-service-test-token")
@@ -132,7 +132,7 @@ class CodingModelTurnControllerTest {
 
     @Test
     void timeoutUsesAJobScopedRetryableEnvelope() throws Exception {
-        when(service.execute(any(), any())).thenThrow(new ProviderGatewayException(
+        when(service.execute(any(), any(), any())).thenThrow(new ProviderGatewayException(
                 ModelGatewayErrorCode.MODEL_TIMEOUT,
                 "Model provider deadline exceeded."));
         CodingModelTurnContract.Request request = request();

@@ -383,12 +383,12 @@ SELECT EXISTS (
 
     $profileVersionPrivilege = Get-AdminScalar $databaseName @'
 SELECT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'SELECT')
-       AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'INSERT')
-       AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'UPDATE')
+       AND has_table_privilege('ai_workspace', 'app.ai_profile_version', 'INSERT')
+       AND has_table_privilege('ai_workspace', 'app.ai_profile_version', 'UPDATE')
        AND NOT has_table_privilege('ai_workspace', 'app.ai_profile_version', 'DELETE')
 '@
     if ($profileVersionPrivilege -ne 't') {
-        throw "AI Profile Version access is not read-only for ai_workspace in $databaseName."
+        throw "AI Profile Version admin write access is incomplete for ai_workspace in $databaseName."
     }
 
     $jobProfileBindingContract = Get-AdminScalar $databaseName @'

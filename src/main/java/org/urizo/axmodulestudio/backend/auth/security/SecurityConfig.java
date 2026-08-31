@@ -113,6 +113,10 @@ public class SecurityConfig {
                         .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()
                         .requestMatchers("/api/cms/**")
                                 .hasAnyRole("SUPER_ADMIN", "GENERAL_ADMIN")
+                        .requestMatchers(
+                                "/api/admin/ai/profile-versions",
+                                "/api/admin/ai/profile-versions/**")
+                                .hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/projects").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST,
                                 "/api/projects/*/connectors",

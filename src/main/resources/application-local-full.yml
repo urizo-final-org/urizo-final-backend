@@ -59,6 +59,16 @@ ax:
     outbox-poll: ${AXMS_OUTBOX_POLL:250ms}
     worker-poll: ${AXMS_WORKER_POLL:300ms}
     worker-id: ${AXMS_PRODUCT_WORKER_ID:axms-spring-app-local-1}
+  knowledge:
+    embedding:
+      # 임베딩 서비스는 컨테이너 밖 호스트에서 동작한다. Compose를 바꾸지 않고
+      # 컨테이너가 호스트에 닿도록 host.docker.internal을 기본값으로 둔다.
+      base-url: ${AXMS_EMBEDDING_BASE_URL:http://host.docker.internal:8900}
+      # 전량을 한 요청에 넣으면 read timeout에 걸린다. 건당 수백 ms 기준으로 끊는다.
+      batch-size: ${AXMS_EMBEDDING_BATCH_SIZE:48}
+      dimension: ${AXMS_EMBEDDING_DIMENSION:1024}
+      connect-timeout: ${AXMS_EMBEDDING_CONNECT_TIMEOUT:5s}
+      request-timeout: ${AXMS_EMBEDDING_REQUEST_TIMEOUT:180s}
 
 logging:
   level:

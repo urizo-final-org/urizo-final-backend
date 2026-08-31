@@ -6,9 +6,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 
 public final class DeterministicConnectorFixture {
+
+    private static final Logger LOG = LoggerFactory.getLogger(DeterministicConnectorFixture.class);
 
     private static final List<ProductApiContract.PreviewDocument> DOCUMENTS = List.of(
             new ProductApiContract.PreviewDocument(
@@ -87,11 +91,44 @@ public final class DeterministicConnectorFixture {
         return "[" + String.join(",", encoded) + "]";
     }
 
+    /**
+     * 질의 토큰 하나라도 본문에 부분문자열로 포함되면 통과.
+     *
+     * <p>원형이 매칭되지 않으면 끝에서 한 글자씩 떼며 최소 2글자까지 재시도한다(접미절단).
+     * 한국어 조사·어미가 붙은 토큰("반도식당의")이 본문 어간("반도식당")과 매칭되도록 하는
+     * 완화이며, 토큰화 규칙(분리 정규식·소문자화·2자 이상)과 필터 위치(topK 뒤, 백필 없음,
+     * 전원 탈락 시 REFUSED)는 바꾸지 않는다. 파이썬 참조 구현:
+     * api-test rag/grounding_filter.py has_grounding_overlap_truncated().
+     *
+     * <p>절단 매칭은 어간이 일반명사로 붕괴할 수 있는 알려진 비용이 있어(예: "스시거제는"→"스시"),
+     * 몇 글자를 깎아 매칭됐는지 INFO 로그로 남겨 추적 가능하게 한다.
+     */
+    /** 필터·문장 추출이 공유하는 질의 토큰화 — 분리 정규식·소문자화·2자 이상 규칙의 단일 출처. */
+    public static List<String> groundingTokens(String query) {
+        List<String> tokens = new ArrayList<>();
+        for (String token : query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1)) {
+            if (token.length() >= 2) {
+                tokens.add(token);
+            }
+        }
+        return tokens;
+    }
+
     public static boolean hasGroundingOverlap(String query, String content) {
         String normalizedContent = content.toLowerCase(Locale.ROOT);
         for (String token : query.toLowerCase(Locale.ROOT).split("[^\\p{L}\\p{N}]+", -1)) {
-            if (token.length() >= 2 && normalizedContent.contains(token)) {
-                return true;
+            if (token.length() < 2) {
+                continue;
+            }
+            for (int end = token.length(); end >= 2; end--) {
+                String stem = token.substring(0, end);
+                if (normalizedContent.contains(stem)) {
+                    if (end < token.length()) {
+                        LOG.info("grounding suffix-truncation matched: token='{}' stem='{}' trimmed={}",
+                                token, stem, token.length() - end);
+                    }
+                    return true;
+                }
             }
         }
         return false;

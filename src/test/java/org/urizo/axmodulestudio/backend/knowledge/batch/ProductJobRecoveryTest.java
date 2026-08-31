@@ -26,6 +26,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.config.ProductRuntimeProperties;
+import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
 
 class ProductJobRecoveryTest {
 
@@ -55,7 +56,9 @@ class ProductJobRecoveryTest {
         ProductBatchService service = new ProductBatchService(
                 jdbc,
                 new TransactionTemplate(manager),
-                Clock.fixed(Instant.parse("2026-08-11T12:00:00Z"), ZoneOffset.UTC));
+                Clock.fixed(Instant.parse("2026-08-11T12:00:00Z"), ZoneOffset.UTC),
+                // 이 테스트는 Job 복구만 확인한다. 임베딩 경로는 호출되지 않는다.
+                mock(EmbeddingClient.class));
 
         int recovered = service.recoverInterruptedJobs("spring-worker-1");
 

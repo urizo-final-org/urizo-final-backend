@@ -51,4 +51,17 @@ class DeterministicConnectorFixtureCharacterizationTest {
         assertThat(DeterministicConnectorFixture.hasGroundingOverlap(
                 "창업 정책", "공공시설 안전 수칙입니다.")).isFalse();
     }
+
+    @Test
+    void truncatesSuffixesDownToTwoCharactersWhenTheFullTokenDoesNotMatch() {
+        // 조사가 붙은 토큰은 어간까지 깎아 매칭한다 ("반도식당의" -> "반도식당").
+        assertThat(DeterministicConnectorFixture.hasGroundingOverlap(
+                "반도식당의 대표메뉴는", "반도식당 정식이 인기입니다.")).isTrue();
+        // 하한은 2글자다. 1글자까지 내려가 매칭하지 않는다.
+        assertThat(DeterministicConnectorFixture.hasGroundingOverlap(
+                "치킨집은", "치과 안내입니다.")).isFalse();
+        // 원형이 이미 매칭되면 절단 없이 통과한다.
+        assertThat(DeterministicConnectorFixture.hasGroundingOverlap(
+                "전주 한옥", "전주 한옥마을 근처입니다.")).isTrue();
+    }
 }

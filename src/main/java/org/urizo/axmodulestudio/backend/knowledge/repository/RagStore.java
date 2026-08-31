@@ -6,6 +6,9 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
 
@@ -16,25 +19,40 @@ import org.springframework.stereotype.Repository;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.exception.ProductApiException;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
+import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
 
 @Repository
 @Profile("local-full")
 public class RagStore {
 
+    /** citations 노출 수. retrieval K(기본 10)와는 별개의 표시 결정이다. */
+    private static final int CITATION_LIMIT = 3;
+
+    /**
+     * citations 표시용 score 하한 — 꼬리 절단 전용. 정답/오답 판별 장치가 아니다
+     * (D3 실측 역전: 비정답 0.6143 > 정답 0.5943 — 값을 올려 정밀도를 노리지 말 것).
+     * 하한 자체는 거절 기준이 아니지만, 적용 결과 citations가 0건이 되면 "인용 없는
+     * 답변"이 성립하지 않으므로 REFUSED로 처리한다(query() 참조).
+     */
+    private static final double CITATION_SCORE_FLOOR = 0.52;
+
     private final JdbcTemplate jdbc;
     private final Clock clock;
     private final ProjectStore projects;
     private final KnowledgeStore knowledge;
+    private final EmbeddingClient embeddings;
 
     RagStore(
             JdbcTemplate productJdbcTemplate,
             Clock clock,
             ProjectStore projects,
-            KnowledgeStore knowledge) {
+            KnowledgeStore knowledge,
+            EmbeddingClient embeddings) {
         this.jdbc = productJdbcTemplate;
         this.clock = clock;
         this.projects = projects;
         this.knowledge = knowledge;
+        this.embeddings = embeddings;
     }
 
     public ProductApiContract.ChatbotResponse createChatbot(
@@ -89,7 +107,11 @@ public class RagStore {
             throw conflict(
                     "ACTIVE_KNOWLEDGE_REQUIRED", "The chatbot has no active knowledge version.");
         }
-        int topK = request.topK() == null ? 3 : request.topK();
+        // 기본 10: C유형 정답 수가 3을 넘는 문항이 있어 3은 구조적 상한이었다(X2, R@10 0.973).
+        // 접미절단 필터(W3) 전제. 요청이 topK를 명시하면 그 값을 그대로 쓴다(@Max 20).
+        int topK = request.topK() == null ? 10 : request.topK();
+        // 질의 임베딩은 HTTP 호출이므로 한 번만 계산해 정렬과 점수 계산에 함께 쓴다.
+        String queryVector = embeddings.queryVector(request.query());
         List<GroundingRow> rows = jdbc.query(
                 "SELECT sd.external_document_id, sd.title, sd.source_url, dc.content, "
                         + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score "
@@ -100,8 +122,7 @@ public class RagStore {
                 (rs, row) -> new GroundingRow(
                         rs.getString(1), rs.getString(2), URI.create(rs.getString(3)),
                         rs.getString(4), rs.getDouble(5)),
-                DeterministicConnectorFixture.vector(request.query()), active.versionId(),
-                DeterministicConnectorFixture.vector(request.query()), topK);
+                queryVector, active.versionId(), queryVector, topK);
         List<GroundingRow> grounded = rows.stream()
                 .filter(row -> DeterministicConnectorFixture.hasGroundingOverlap(
                         request.query(), row.content()))
@@ -110,21 +131,100 @@ public class RagStore {
                 ? UUID.randomUUID() : request.conversationId();
         Instant now = Instant.now(clock);
         if (grounded.isEmpty()) {
-            return new ProductApiContract.RagQueryResponse(
-                    version(), traceId, UUID.randomUUID(), conversationId,
-                    "REFUSED", "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.",
-                    List.of(), active.versionId(), now);
+            return refused(traceId, conversationId, active.versionId(), now);
         }
-        GroundingRow first = grounded.get(0);
-        List<ProductApiContract.Citation> citations = grounded.stream()
+        // 노출 3건 + score 하한 0.52. 이 하한은 정답/오답 판별 장치가 아니라 꼬리 노이즈
+        // 절단 전용이다 — 실측에서 비정답(0.6143)이 정답(0.5943)보다 높은 역전이 확인돼
+        // 전역 하한으로는 정밀도를 얻을 수 없다. 이 값을 올려 정밀도를 노리지 말 것.
+        List<GroundingRow> displayed = grounded.stream()
+                .limit(CITATION_LIMIT)
+                .filter(row -> row.score() >= CITATION_SCORE_FLOOR)
+                .toList();
+        // 인용 0건 ANSWERED는 성립하지 않는 상태다 — 근거 기반 답변인데 근거가 없다.
+        // 하한 자체는 거절 기준이 아니지만, 그 결과 citations가 비면 REFUSED가 된다
+        // (V1 실측: 코퍼스 밖 질의가 '반도체'→'반도' 절단 매칭으로 필터를 통과했으나
+        // 전 행 score < 하한이었던 케이스). 필터 전원 탈락 조건의 대체가 아니라 추가다.
+        if (displayed.isEmpty()) {
+            return refused(traceId, conversationId, active.versionId(), now);
+        }
+        List<ProductApiContract.Citation> citations = displayed.stream()
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
                         excerpt(row.content()), row.score()))
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
-                "ANSWERED", "활성 지식의 근거에 따르면 " + first.content(),
+                "ANSWERED", composeAnswer(request.query(), displayed),
                 citations, active.versionId(), now);
+    }
+
+    private static ProductApiContract.RagQueryResponse refused(
+            UUID traceId, UUID conversationId, UUID versionId, Instant now) {
+        return new ProductApiContract.RagQueryResponse(
+                version(), traceId, UUID.randomUUID(), conversationId,
+                "REFUSED", "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.",
+                List.of(), versionId, now);
+    }
+
+    /**
+     * 강등형 답변(D5 확정): LLM 없이, 근거 문서에서 질의 토큰이 포함된 문장을 그대로 뽑아
+     * 구성한다. 문장 매칭은 W3 접미절단 로직(hasGroundingOverlap)을 토큰 단위로 재사용한다.
+     *
+     * <p>1위 문서에서 매칭 문장 최대 2개를 뽑고, 하나뿐이면 2위 문서의 최고 매칭 문장을
+     * 보탠다. 매칭 문장이 없으면 1위 문서의 첫 문장으로 폴백한다. 답변의 각 줄은 근거
+     * 문서 본문에 실제로 존재하는 문자열이다(생성·요약 없음).
+     */
+    private static String composeAnswer(String query, List<GroundingRow> rows) {
+        List<String> tokens = DeterministicConnectorFixture.groundingTokens(query);
+        List<String> sentences = new ArrayList<>();
+        List<String> primary = matchingSegments(tokens, rows.get(0).content());
+        if (primary.isEmpty()) {
+            List<String> all = segments(rows.get(0).content());
+            if (!all.isEmpty()) {
+                sentences.add(all.get(0));
+            }
+        }
+        else {
+            sentences.addAll(primary.subList(0, Math.min(2, primary.size())));
+        }
+        if (sentences.size() < 2 && rows.size() > 1) {
+            List<String> secondary = matchingSegments(tokens, rows.get(1).content());
+            if (!secondary.isEmpty()) {
+                sentences.add(secondary.get(0));
+            }
+        }
+        return String.join("\n", sentences);
+    }
+
+    /** 매칭 토큰 수 내림차순, 동률이면 본문 등장 순. 매칭된 문장만 반환한다. */
+    private static List<String> matchingSegments(List<String> tokens, String content) {
+        record Scored(int count, int position, String text) {
+        }
+        List<String> all = segments(content);
+        List<Scored> scored = new ArrayList<>();
+        for (int i = 0; i < all.size(); i++) {
+            String segment = all.get(i);
+            int count = 0;
+            for (String token : tokens) {
+                if (DeterministicConnectorFixture.hasGroundingOverlap(token, segment)) {
+                    count++;
+                }
+            }
+            if (count > 0) {
+                scored.add(new Scored(count, i, segment));
+            }
+        }
+        scored.sort(Comparator.comparingInt(Scored::count).reversed()
+                .thenComparingInt(Scored::position));
+        return scored.stream().map(Scored::text).toList();
+    }
+
+    /** 줄바꿈·문장부호 경계로 나누고, "[분류]" 같은 필드 라벨 줄은 제외한다. */
+    private static List<String> segments(String content) {
+        return Arrays.stream(content.split("(?<=[.!?])\\s+|\\R+"))
+                .map(String::trim)
+                .filter(segment -> !segment.isEmpty() && !segment.startsWith("["))
+                .toList();
     }
 
     private ProductApiContract.ChatbotResponse chatbot(ResultSet rs, UUID traceId)

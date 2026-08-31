@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 import org.springframework.context.annotation.Profile;
@@ -16,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
+import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
+import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocumentLoader;
 
 @Service
 @Profile("local-full")
@@ -24,14 +27,17 @@ final class ProductBatchService {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final EmbeddingClient embeddings;
 
     ProductBatchService(
             JdbcTemplate productJdbcTemplate,
             TransactionTemplate productTransactionTemplate,
-            Clock clock) {
+            Clock clock,
+            EmbeddingClient embeddings) {
         this.jdbc = productJdbcTemplate;
         this.transactions = productTransactionTemplate;
         this.clock = clock;
+        this.embeddings = embeddings;
     }
 
     boolean claim(UUID jobId, String workerId) {
@@ -153,7 +159,7 @@ final class ProductBatchService {
                     + "WHERE knowledge_version_id = ? AND status IN ('BUILD_REQUESTED', 'FAILED', 'BUILDING')",
                     versionId);
             for (ProductApiContract.PreviewDocument document
-                    : DeterministicConnectorFixture.documents(20)) {
+                    : TourismSampleDocumentLoader.documents()) {
                 UUID documentId = stableId(versionId + ":document:" + document.documentId());
                 jdbc.update("INSERT INTO app.source_document "
                                 + "(source_document_id, knowledge_version_id, external_document_id, title, "
@@ -167,8 +173,8 @@ final class ProductBatchService {
                         String.join(",", document.category()), document.sourceUrl().toString(),
                         Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now));
             }
-            updateProgress(jobId, "COLLECT", 15, DeterministicConnectorFixture.totalCount(),
-                    DeterministicConnectorFixture.totalCount());
+            updateProgress(jobId, "COLLECT", 15, TourismSampleDocumentLoader.totalCount(),
+                    TourismSampleDocumentLoader.totalCount());
         });
     }
 
@@ -195,20 +201,37 @@ final class ProductBatchService {
     }
 
     private void embed(UUID jobId) {
-        transactions.executeWithoutResult(status -> {
-            UUID versionId = knowledgeVersion(jobId);
-            List<ChunkRow> chunks = jdbc.query(
-                    "SELECT document_chunk_id, content FROM app.document_chunk "
-                            + "WHERE knowledge_version_id = ? ORDER BY document_chunk_id",
-                    (rs, row) -> new ChunkRow(
-                            rs.getObject(1, UUID.class), rs.getString(2)), versionId);
-            for (ChunkRow chunk : chunks) {
-                jdbc.update("UPDATE app.document_chunk SET embedding = ?::vector "
-                                + "WHERE document_chunk_id = ?",
-                        DeterministicConnectorFixture.vector(chunk.content()), chunk.chunkId());
-            }
-            updateProgress(jobId, "EMBED", 65, chunks.size(), chunks.size());
-        });
+        UUID versionId = transactions.execute(status -> knowledgeVersion(jobId));
+        List<ChunkRow> chunks = jdbc.query(
+                "SELECT document_chunk_id, content FROM app.document_chunk "
+                        + "WHERE knowledge_version_id = ? ORDER BY document_chunk_id",
+                (rs, row) -> new ChunkRow(
+                        rs.getObject(1, UUID.class), rs.getString(2)), versionId);
+
+        // 임베딩 호출은 건당 수백 ms라 전량을 한 트랜잭션에 묶으면 수 분간 열려 있게 된다.
+        // 배치 단위로 호출한 뒤 그 묶음만 짧게 커밋한다.
+        int batchSize = embeddings.batchSize();
+        for (int start = 0; start < chunks.size(); start += batchSize) {
+            List<ChunkRow> slice = chunks.subList(start, Math.min(start + batchSize, chunks.size()));
+            List<EmbeddingClient.Item> items = slice.stream()
+                    .map(chunk -> new EmbeddingClient.Item(chunk.chunkId().toString(), chunk.content()))
+                    .toList();
+
+            // 차원·건수 검증은 클라이언트가 수행한다. 어긋나면 여기에 도달하지 않는다.
+            Map<String, String> vectors = embeddings.batchVectors(items);
+
+            transactions.executeWithoutResult(status -> {
+                for (ChunkRow chunk : slice) {
+                    // 순서가 아니라 id로 찾는다.
+                    jdbc.update("UPDATE app.document_chunk SET embedding = ?::vector "
+                                    + "WHERE document_chunk_id = ?",
+                            vectors.get(chunk.chunkId().toString()), chunk.chunkId());
+                }
+            });
+        }
+
+        transactions.executeWithoutResult(status ->
+                updateProgress(jobId, "EMBED", 65, chunks.size(), chunks.size()));
     }
 
     private void index(UUID jobId) {

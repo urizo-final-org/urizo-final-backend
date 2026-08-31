@@ -103,8 +103,16 @@ if ($LASTEXITCODE -ne 0 -or $requiredImages.Count -eq 0) {
 
 $missingImages = [System.Collections.Generic.List[string]]::new()
 foreach ($image in $requiredImages) {
-    & $docker image inspect $image *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        & $docker image inspect $image *> $null
+        $imageInspectExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($imageInspectExitCode -ne 0) {
         $missingImages.Add($image)
     }
 }

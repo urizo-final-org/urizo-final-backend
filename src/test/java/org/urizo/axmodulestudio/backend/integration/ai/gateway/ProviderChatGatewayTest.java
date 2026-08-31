@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -84,6 +86,30 @@ class ProviderChatGatewayTest {
                     assertThat(failure.toString()).doesNotContain(rawValue);
                 });
         assertThat(retryDelays).isEmpty();
+    }
+
+    @Test
+    void requiresTheExistingToolCallingCapabilityBeforeInvokingAnAdapter() {
+        ObjectNode schema = JsonNodeFactory.instance.objectNode();
+        schema.put("type", "object").put("additionalProperties", false);
+        schema.putArray("required");
+        schema.putObject("properties");
+        ProviderChatRequest request = new ProviderChatRequest(
+                ModelProvider.OPENAI,
+                Stage2ProviderModels.OPENAI_CHAT,
+                List.of(ProviderChatMessage.plain(
+                        ProviderChatMessage.Role.USER, "Read the approved diff.")),
+                List.of(new ProviderToolDefinition(
+                        "read_diff", "Read the approved diff.", schema)),
+                NOW.plusSeconds(60));
+
+        assertThatThrownBy(() -> gateway.chat(request))
+                .isInstanceOfSatisfying(CapabilityRegistrationException.class, failure ->
+                        assertThat(failure.code()).isEqualTo(
+                                ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED));
+        verify(adapter, times(0)).chat(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
     }
 
     private static ProviderChatRequest request(String prompt) {

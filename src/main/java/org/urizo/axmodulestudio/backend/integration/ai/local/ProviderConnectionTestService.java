@@ -63,6 +63,13 @@ public class ProviderConnectionTestService {
             byte[] credentialBytes = credential.copySecret();
             try {
                 String credentialHeader = new String(credentialBytes, StandardCharsets.US_ASCII);
+                try {
+                    LocalProviderSecretService.validateCredential(provider, credentialHeader);
+                }
+                catch (IllegalArgumentException failure) {
+                    return recordFailure(provider, modelId, ProviderCredentialState.INVALID_CREDENTIAL,
+                            "CREDENTIAL_FORMAT_INVALID", startedAt);
+                }
                 ProviderHttpResponse response = switch (provider) {
                     case OPENAI -> callOpenAi(credentialHeader);
                     case GOOGLE_GENAI -> callGoogle(credentialHeader);
@@ -140,7 +147,7 @@ public class ProviderConnectionTestService {
             ProviderHttpResponse response,
             Instant startedAt) {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
-            FailureClassification classification = classifyFailure(response);
+            FailureClassification classification = classifyFailure(provider, response);
             return recordFailure(provider, modelId, classification.state(), classification.safeCode(), startedAt);
         }
         try {
@@ -189,11 +196,16 @@ public class ProviderConnectionTestService {
         }
     }
 
-    private FailureClassification classifyFailure(ProviderHttpResponse response) {
+    private FailureClassification classifyFailure(ModelProvider provider, ProviderHttpResponse response) {
         String providerCode = safeProviderCode(response.body());
         if (response.statusCode() == 401 || "API_KEY_INVALID".equals(providerCode)
                 || "UNAUTHENTICATED".equals(providerCode)) {
             return new FailureClassification(ProviderCredentialState.INVALID_CREDENTIAL, "AUTHENTICATION_FAILED");
+        }
+        if (provider == ModelProvider.ANTHROPIC
+                && response.statusCode() == 400
+                && isAnthropicBillingFailure(response.body())) {
+            return new FailureClassification(ProviderCredentialState.BILLING_BLOCKED, "BILLING_BLOCKED");
         }
         if (response.statusCode() == 402 || "BILLING_ERROR".equals(providerCode)
                 || "INSUFFICIENT_QUOTA".equals(providerCode)) {
@@ -231,6 +243,22 @@ public class ProviderConnectionTestService {
             // Raw provider bodies are intentionally neither logged nor persisted.
         }
         return null;
+    }
+
+    private boolean isAnthropicBillingFailure(String responseBody) {
+        try {
+            String message = objectMapper.readTree(responseBody)
+                    .path("error")
+                    .path("message")
+                    .asText("")
+                    .toLowerCase(Locale.ROOT);
+            return message.contains("credit balance")
+                    || message.contains("spend limit")
+                    || message.contains("billing");
+        }
+        catch (JsonProcessingException ignored) {
+            return false;
+        }
     }
 
     private ProviderConnectionTestResult recordFailure(

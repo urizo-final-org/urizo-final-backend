@@ -131,6 +131,8 @@ public class SecurityConfig {
                                 "/internal/dev/provider-credentials").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.PUT,
                                 "/internal/dev/provider-credentials/*").hasRole("SUPER_ADMIN")
+                        .requestMatchers(HttpMethod.DELETE,
+                                "/internal/dev/provider-credentials/*").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST,
                                 "/internal/dev/provider-credentials/*/test").hasRole("SUPER_ADMIN")
                         .anyRequest().hasAnyRole("SUPER_ADMIN", "GENERAL_ADMIN"))

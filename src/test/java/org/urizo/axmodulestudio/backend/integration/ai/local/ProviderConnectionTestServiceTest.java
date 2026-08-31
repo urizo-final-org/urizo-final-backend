@@ -2,14 +2,18 @@ package org.urizo.axmodulestudio.backend.integration.ai.local;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -82,11 +86,38 @@ class ProviderConnectionTestServiceTest {
         assertThat(result.state()).isEqualTo(ProviderCredentialState.BILLING_BLOCKED);
         assertThat(result.inferenceExecuted()).isFalse();
         assertThat(result.safeCode()).isEqualTo("BILLING_BLOCKED");
+        verify(transport).exchange(
+                eq("GET"),
+                eq(URI.create("https://api.anthropic.com/v1/models?limit=1")),
+                eq(Map.of(
+                        "x-api-key", "sk-ant-fixture-only-not-a-real-key-1234567890",
+                        "anthropic-version", "2023-06-01")),
+                eq(""),
+                eq(Duration.ofSeconds(30)));
+    }
+
+    @Test
+    void classifiesAnthropicLowCreditResponseAsBillingBlocked() throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                400,
+                "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                        + "\"message\":\"Your credit balance is too low to access the Anthropic API.\"}}"));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.BILLING_BLOCKED);
+        assertThat(result.inferenceExecuted()).isFalse();
+        assertThat(result.safeCode()).isEqualTo("BILLING_BLOCKED");
     }
 
     private static ProviderCredentialLease fixtureCredential(ModelProvider provider) {
+        String credential = provider == ModelProvider.ANTHROPIC
+                ? "sk-ant-fixture-only-not-a-real-key-1234567890"
+                : "fixture-only-not-a-real-key";
         return ProviderCredentialLease.fromBytes(
                 provider,
-                "fixture-only-not-a-real-key".getBytes(StandardCharsets.US_ASCII));
+                credential.getBytes(StandardCharsets.US_ASCII));
     }
 }

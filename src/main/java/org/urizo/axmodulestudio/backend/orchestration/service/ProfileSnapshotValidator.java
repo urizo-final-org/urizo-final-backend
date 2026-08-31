@@ -38,6 +38,8 @@ final class ProfileSnapshotValidator {
     private static final Pattern MODEL_KEY = Pattern.compile("^[a-z][a-z0-9_-]{0,127}$");
     private static final Pattern TOOL_KEY = Pattern.compile("^[a-z][a-z0-9_]{0,127}$");
     private static final Pattern GUARDRAIL_KEY = Pattern.compile("^[a-z][a-z0-9_.:-]{0,127}$");
+    private static final int SUPPORTED_MAX_ATTEMPTS = 3;
+    private static final String SUPPORTED_GUARDRAIL_PROFILE = "central.default";
 
     private static final Map<String, Set<String>> TOOLS = Map.of(
             "LLM_OPS", Set.of(
@@ -123,8 +125,11 @@ final class ProfileSnapshotValidator {
         ObjectNode toolPolicy = object(snapshot.get("toolPolicy"), "snapshot.toolPolicy");
         rejectExecutionFields(toolPolicy);
         validateToolPolicy(toolPolicy, expectedProfileKey);
-        textMatching(snapshot.get("guardrailProfileKey"), GUARDRAIL_KEY,
-                "snapshot.guardrailProfileKey");
+        if (!SUPPORTED_GUARDRAIL_PROFILE.equals(textMatching(
+                snapshot.get("guardrailProfileKey"), GUARDRAIL_KEY,
+                "snapshot.guardrailProfileKey"))) {
+            invalid("snapshot.guardrailProfileKey is not supported by this runtime");
+        }
         validateGraph(nodes, edges, config, modelBindings);
     }
 
@@ -210,7 +215,10 @@ final class ProfileSnapshotValidator {
         ObjectNode config = object(raw, "config");
         exactFields(config, Set.of("maxNodes", "maxAttempts", "loopLimits"), "config");
         int maxNodes = positiveInt(config.get("maxNodes"), "config.maxNodes");
-        positiveInt(config.get("maxAttempts"), "config.maxAttempts");
+        int maxAttempts = positiveInt(config.get("maxAttempts"), "config.maxAttempts");
+        if (maxAttempts != SUPPORTED_MAX_ATTEMPTS) {
+            invalid("config.maxAttempts must be 3 for this runtime");
+        }
         JsonNode rawLimits = config.get("loopLimits");
         if (rawLimits == null || !rawLimits.isArray()) {
             invalid("config.loopLimits must be an array");
@@ -230,7 +238,7 @@ final class ProfileSnapshotValidator {
                 invalid("config.loopLimits contains duplicate routes");
             }
         }
-        return new SnapshotConfig(maxNodes, limits);
+        return new SnapshotConfig(maxNodes, maxAttempts, limits);
     }
 
     private static void validateGraph(
@@ -462,5 +470,5 @@ final class ProfileSnapshotValidator {
     }
     private record PortRoute(String from, String resultPort) { }
     private record Route(String from, String resultPort, String to) { }
-    private record SnapshotConfig(int maxNodes, Set<Route> loopLimits) { }
+    private record SnapshotConfig(int maxNodes, int maxAttempts, Set<Route> loopLimits) { }
 }

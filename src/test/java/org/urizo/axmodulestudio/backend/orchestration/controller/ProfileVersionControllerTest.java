@@ -53,10 +53,10 @@ class ProfileVersionControllerTest {
     private ProfileVersionService service;
 
     @Test
-    void returnsTheActiveSnapshotWithoutAnEnvelope() throws Exception {
+    void returnsTheExecutableSnapshotWithoutAnEnvelope() throws Exception {
         JsonNode snapshot = objectMapper.readTree(Files.readString(Path.of(
                 "contracts/fixtures/orchestration/profile-version.snapshot.valid.json")));
-        when(service.getActive(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(snapshot);
+        when(service.getBound(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(snapshot);
 
         mockMvc.perform(get("/internal/ai/profile-versions/{profileVersionId}", PROFILE_VERSION_ID)
                         .header(HttpHeaders.AUTHORIZATION, AUTHORIZATION)
@@ -73,7 +73,7 @@ class ProfileVersionControllerTest {
 
     @Test
     void missingVersionUsesThePreContextNotFoundEnvelope() throws Exception {
-        when(service.getActive(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
+        when(service.getBound(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
                 failure("PROFILE_VERSION_NOT_FOUND", HttpStatus.NOT_FOUND));
 
         mockMvc.perform(get("/internal/ai/profile-versions/{profileVersionId}", PROFILE_VERSION_ID)
@@ -90,8 +90,8 @@ class ProfileVersionControllerTest {
     }
 
     @Test
-    void inactiveVersionUsesConflict() throws Exception {
-        when(service.getActive(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
+    void nonExecutableVersionUsesConflict() throws Exception {
+        when(service.getBound(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
                 failure("PROFILE_VERSION_NOT_ACTIVE", HttpStatus.CONFLICT));
 
         mockMvc.perform(get("/internal/ai/profile-versions/{profileVersionId}", PROFILE_VERSION_ID)
@@ -103,7 +103,7 @@ class ProfileVersionControllerTest {
 
     @Test
     void missingCredentialUsesBearerChallengeWithoutEchoingSecrets() throws Exception {
-        when(service.getActive(isNull(), eq(PROFILE_VERSION_ID))).thenThrow(
+        when(service.getBound(isNull(), eq(PROFILE_VERSION_ID))).thenThrow(
                 failure("SERVICE_AUTHENTICATION_FAILED", HttpStatus.UNAUTHORIZED));
 
         mockMvc.perform(get("/internal/ai/profile-versions/{profileVersionId}", PROFILE_VERSION_ID))
@@ -115,7 +115,7 @@ class ProfileVersionControllerTest {
 
     @Test
     void transientStoreFailureUsesRetryMetadata() throws Exception {
-        when(service.getActive(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
+        when(service.getBound(AUTHORIZATION, PROFILE_VERSION_ID)).thenThrow(
                 new ProfileVersionException(
                         "INTERNAL_TRANSIENT_ERROR",
                         "The AI Profile Version store is temporarily unavailable.",

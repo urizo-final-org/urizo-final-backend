@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -14,6 +15,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -37,6 +39,51 @@ class NaturalCmsStageServiceTest {
     private static final String PREVIEW_HASH = "sha256:" + "a".repeat(64);
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
+    private static final Set<String> ALL_TOOLS = Set.of(
+            "resolve_cms_target", "validate_cms_command", "create_cms_preview",
+            "discard_cms_preview", "revalidate_cms_preview", "apply_cms_preview");
+
+    @Test
+    void emptyPolicyIntersectionUsesChatOnlyAndRejectsTheFirstToolExecution() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
+                new NaturalCmsStore.RuntimePolicy(Set.of(), "central.default"));
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.models.executeNaturalCms(any())).thenReturn(modelResponse(
+                "{\"operation\":\"UPDATE\",\"fields\":{"
+                        + "\"title\":\"New\",\"body\":\"Body\"}}",
+                List.of()));
+
+        assertThatThrownBy(() -> harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.preview", RESULT)))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> request =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(request.capture());
+        assertThat(request.getValue().requiredCapabilities()).containsExactly("CHAT");
+        assertThat(request.getValue().toolSchemas()).isEmpty();
+        verify(harness.mcp, never()).callTool(any(), any());
+    }
+
+    @Test
+    void boundNaturalCmsPolicyDecodeFailsClosedForMissingTools() {
+        NaturalCmsStore.RuntimePolicy valid = NaturalCmsStore.decodeRuntimePolicy(
+                new ObjectMapper(),
+                "{\"toolPolicy\":{\"allowedTools\":[\"resolve_cms_target\"]},"
+                        + "\"guardrailProfileKey\":\"central.default\"}");
+        assertThat(valid.allowedTools()).containsExactly("resolve_cms_target");
+
+        assertThatThrownBy(() -> NaturalCmsStore.decodeRuntimePolicy(
+                new ObjectMapper(),
+                "{\"toolPolicy\":{},\"guardrailProfileKey\":\"central.default\"}"))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("NATURAL_CMS_STATE_CONFLICT"));
+    }
 
     @Test
     void feedsToolOutputBackToTheModelAndStoresOnlyThePreviewBoundary() throws Exception {
@@ -194,6 +241,8 @@ class NaturalCmsStageServiceTest {
             when(store.get("Bearer worker", JOB, 1)).thenReturn(job);
             when(store.findResult("Bearer worker", JOB, 1, RESULT))
                     .thenReturn(Optional.empty());
+            when(store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
+                    new NaturalCmsStore.RuntimePolicy(ALL_TOOLS, "central.default"));
             when(store.record(eq("Bearer worker"), eq(JOB), eq(1), any()))
                     .thenAnswer(call -> {
                         NaturalCmsContract.StageExecutionResponse value = call.getArgument(3);

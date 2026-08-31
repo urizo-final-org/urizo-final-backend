@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.orchestration.service;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -90,6 +91,38 @@ class ProfileSnapshotValidatorTest {
 
         assertValidationFailure(() ->
                 ProfileSnapshotValidator.validateAuthoring("LLM_OPS", unknownTool));
+
+        ObjectNode missingAllowedTools = (ObjectNode) authoringSnapshot();
+        missingAllowedTools.withObject("toolPolicy").remove("allowedTools");
+
+        assertValidationFailure(() ->
+                ProfileSnapshotValidator.validateAuthoring("LLM_OPS", missingAllowedTools));
+    }
+
+    @Test
+    void rejectsAttemptCountsTheCurrentDatabaseContractCannotPersist() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        authoring.withObject("config").put("maxAttempts", 2);
+
+        assertThatThrownBy(() -> ProfileSnapshotValidator.validateAuthoring(
+                "LLM_OPS", authoring))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
+                    assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED");
+                    assertThat(failure.getMessage()).contains("maxAttempts must be 3");
+                });
+    }
+
+    @Test
+    void rejectsGuardrailProfilesTheBackendCannotEnforce() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        authoring.put("guardrailProfileKey", "central.unregistered");
+
+        assertThatThrownBy(() -> ProfileSnapshotValidator.validateAuthoring(
+                "LLM_OPS", authoring))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
+                    assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED");
+                    assertThat(failure.getMessage()).contains("guardrailProfileKey");
+                });
     }
 
     private static JsonNode authoringSnapshot() throws Exception {

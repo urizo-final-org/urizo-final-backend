@@ -10,6 +10,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -29,6 +30,10 @@ import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 @ConditionalOnProperty(
         prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class NaturalCmsStore {
+
+    private static final Set<String> RUNTIME_TOOLS = Set.of(
+            "resolve_cms_target", "validate_cms_command", "create_cms_preview",
+            "discard_cms_preview", "revalidate_cms_preview", "apply_cms_preview");
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -89,6 +94,46 @@ public final class NaturalCmsStore {
             }
             return job;
         });
+    }
+
+    RuntimePolicy runtimePolicy(String authorization, UUID profileVersionId) {
+        return authenticated(authorization, () -> {
+            List<String> policies = jdbc.query("""
+                    SELECT snapshot_json::text
+                    FROM app.ai_profile_version
+                    WHERE profile_version_id = ? AND profile_key = 'NATURAL_CMS'
+                      AND status IN ('ACTIVE', 'INACTIVE')
+                    """, (rs, row) -> rs.getString(1), profileVersionId);
+            if (policies.size() != 1) {
+                throw conflict("Natural CMS runtime policy is not executable.");
+            }
+            return decodeRuntimePolicy(objectMapper, policies.get(0));
+        });
+    }
+
+    static RuntimePolicy decodeRuntimePolicy(ObjectMapper objectMapper, String encoded) {
+        try {
+            JsonNode snapshot = objectMapper.readTree(encoded);
+            JsonNode allowed = snapshot.path("toolPolicy").path("allowedTools");
+            JsonNode guardrail = snapshot.path("guardrailProfileKey");
+            if (!snapshot.isObject() || !allowed.isArray()
+                    || !guardrail.isTextual()
+                    || !"central.default".equals(guardrail.textValue())) {
+                throw conflict("Natural CMS runtime policy is not executable.");
+            }
+            java.util.HashSet<String> tools = new java.util.HashSet<>();
+            for (JsonNode tool : allowed) {
+                if (!tool.isTextual()
+                        || !RUNTIME_TOOLS.contains(tool.textValue())
+                        || !tools.add(tool.textValue())) {
+                    throw conflict("Natural CMS runtime policy is not executable.");
+                }
+            }
+            return new RuntimePolicy(tools, guardrail.textValue());
+        }
+        catch (JsonProcessingException | IllegalArgumentException failure) {
+            throw conflict("Natural CMS runtime policy is not executable.");
+        }
     }
 
     public Optional<NaturalCmsContract.HandlerResult> findResult(
@@ -391,5 +436,11 @@ public final class NaturalCmsStore {
                 "Natural CMS result store is unavailable.",
                 HttpStatus.SERVICE_UNAVAILABLE,
                 true);
+    }
+
+    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+        RuntimePolicy {
+            allowedTools = Set.copyOf(allowedTools);
+        }
     }
 }

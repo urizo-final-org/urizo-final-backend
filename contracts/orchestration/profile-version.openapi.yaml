@@ -15,8 +15,8 @@
   "paths": {
     "/internal/ai/profile-versions/{profileVersionId}": {
       "get": {
-        "operationId": "getActiveProfileVersionSnapshot",
-        "summary": "Read one immutable active Versioned Snapshot",
+        "operationId": "getBoundProfileVersionSnapshot",
+        "summary": "Read one immutable executable Versioned Snapshot",
         "security": [{ "serviceCredential": [] }],
         "parameters": [{ "$ref": "#/components/parameters/ProfileVersionIdPath" }],
         "responses": {
@@ -92,7 +92,7 @@
         }
       },
       "ProfileVersionNotActive": {
-        "description": "The Profile Version exists but is not ACTIVE",
+        "description": "The Profile Version exists but was never executable",
         "x-error-codes": ["PROFILE_VERSION_NOT_ACTIVE"],
         "content": {
           "application/json": {
@@ -207,7 +207,7 @@
         "required": ["maxNodes", "maxAttempts", "loopLimits"],
         "properties": {
           "maxNodes": { "type": "integer", "minimum": 1 },
-          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "maxAttempts": { "type": "integer", "minimum": 3, "maximum": 3 },
           "loopLimits": {
             "type": "array",
             "uniqueItems": true,

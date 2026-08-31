@@ -34,22 +34,31 @@ class ProfileVersionServiceTest {
     private final ProfileVersionService service = new ProfileVersionService(repository);
 
     @Test
-    void returnsOnlyActiveSnapshots() {
+    void returnsActiveSnapshotsForBoundJobs() {
         JsonNode snapshot = JsonNodeFactory.instance.objectNode().put("contractVersion", "1.0");
         when(repository.findById(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(Optional.of(
                 new ProfileVersionRepository.StoredProfileVersion("ACTIVE", snapshot)));
 
-        JsonNode returned = service.getActive(AUTHORIZATION, PROFILE_VERSION_ID);
+        JsonNode returned = service.getBound(AUTHORIZATION, PROFILE_VERSION_ID);
 
         assertThat(returned).isEqualTo(snapshot);
         assertThat(returned).isNotSameAs(snapshot);
     }
 
     @Test
+    void returnsInactiveSnapshotsAlreadyBoundToRunningJobs() {
+        JsonNode snapshot = JsonNodeFactory.instance.objectNode().put("contractVersion", "1.0");
+        when(repository.findById(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(Optional.of(
+                new ProfileVersionRepository.StoredProfileVersion("INACTIVE", snapshot)));
+
+        assertThat(service.getBound(AUTHORIZATION, PROFILE_VERSION_ID)).isEqualTo(snapshot);
+    }
+
+    @Test
     void reportsMissingVersionsWithoutConflatingThemWithInactiveVersions() {
         when(repository.findById(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.getActive(AUTHORIZATION, PROFILE_VERSION_ID))
+        assertThatThrownBy(() -> service.getBound(AUTHORIZATION, PROFILE_VERSION_ID))
                 .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
                     assertThat(failure.code()).isEqualTo("PROFILE_VERSION_NOT_FOUND");
                     assertThat(failure.status().value()).isEqualTo(404);
@@ -58,13 +67,13 @@ class ProfileVersionServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"DRAFT", "INACTIVE"})
-    void rejectsDraftAndInactiveVersions(String status) {
+    @ValueSource(strings = {"DRAFT", "UNKNOWN"})
+    void rejectsVersionsThatWereNeverExecutable(String status) {
         JsonNode snapshot = JsonNodeFactory.instance.objectNode().put("contractVersion", "1.0");
         when(repository.findById(AUTHORIZATION, PROFILE_VERSION_ID)).thenReturn(Optional.of(
                 new ProfileVersionRepository.StoredProfileVersion(status, snapshot)));
 
-        assertThatThrownBy(() -> service.getActive(AUTHORIZATION, PROFILE_VERSION_ID))
+        assertThatThrownBy(() -> service.getBound(AUTHORIZATION, PROFILE_VERSION_ID))
                 .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
                     assertThat(failure.code()).isEqualTo("PROFILE_VERSION_NOT_ACTIVE");
                     assertThat(failure.status().value()).isEqualTo(409);

@@ -20,17 +20,17 @@ public final class ProfileVersionService {
         this.repository = repository;
     }
 
-    public JsonNode getActive(String authorization, UUID profileVersionId) {
+    public JsonNode getBound(String authorization, UUID profileVersionId) {
         ProfileVersionRepository.StoredProfileVersion stored = repository
                 .findById(authorization, profileVersionId)
                 .orElseThrow(() -> new ProfileVersionException(
                         "PROFILE_VERSION_NOT_FOUND",
                         "AI Profile Version was not found.",
                         HttpStatus.NOT_FOUND));
-        if (!"ACTIVE".equals(stored.status())) {
+        if (!"ACTIVE".equals(stored.status()) && !"INACTIVE".equals(stored.status())) {
             throw new ProfileVersionException(
                     "PROFILE_VERSION_NOT_ACTIVE",
-                    "AI Profile Version is not active.",
+                    "AI Profile Version is not executable.",
                     HttpStatus.CONFLICT);
         }
         return stored.snapshot();

@@ -94,10 +94,12 @@ public final class CodingHandlerStageService {
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.code" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    CODE_TOOLS, Set.of("completed"));
+                    allowedTools(authority.profileAllowedTools(), CODE_TOOLS),
+                    Set.of("completed"));
             case "coding.review" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    REVIEW_TOOLS, Set.of("passed", "changes_requested"));
+                    allowedTools(authority.profileAllowedTools(), REVIEW_TOOLS),
+                    Set.of("passed", "changes_requested"));
             case "coding.preview" -> preview(
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.pr_request" -> sideEffect(
@@ -486,6 +488,12 @@ public final class CodingHandlerStageService {
             schemas.add(schema);
         }
         return List.copyOf(schemas);
+    }
+
+    static Set<String> allowedTools(Set<String> profileTools, Set<String> stageTools) {
+        Set<String> allowed = new java.util.HashSet<>(stageTools);
+        allowed.retainAll(profileTools);
+        return Set.copyOf(allowed);
     }
 
     private ObjectNode inputSchema(String name) {

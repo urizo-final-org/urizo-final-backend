@@ -630,7 +630,10 @@ public final class CodingHandlerStageService {
                     + "carrying the same repository-relative path twice, then '--- a/PATH', "
                     + "then '+++ b/PATH', then its @@ hunks. Rename, copy, mode and binary "
                     + "diffs are refused.";
-            case "run_check" -> "Run one approved build or test profile. " + AFTER_READ_DIFF;
+            case "run_check" -> "Run one approved check over the changed files. Call it "
+                    + "with exactly {\"checkId\":\"git-diff-check\"} or "
+                    + "{\"checkId\":\"python-syntax\"}; an empty argument object is "
+                    + "refused. " + AFTER_READ_DIFF;
             case "check_package_allowlist" -> "Check the changed files against the package "
                     + "allowlist. " + AFTER_READ_DIFF;
             case "scan_changed_files" -> "Scan the changed files for forbidden content. "
@@ -652,7 +655,7 @@ public final class CodingHandlerStageService {
                 properties.putObject("scope").put("type", "string");
             }
             case "apply_patch" -> stringProperty(properties, required, "patch");
-            case "run_check" -> stringProperty(properties, required, "profile");
+            case "run_check" -> stringProperty(properties, required, "checkId");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");
         }
@@ -762,7 +765,11 @@ public final class CodingHandlerStageService {
                 .put("content", response.assistant().content()));
         reask.add(objectMapper.createObjectNode()
                 .put("role", "user")
-                .put("content", FORMAT_REASK_INSTRUCTION));
+                // The miss is as often the port word as the shape, so the allowed ports
+                // ride along instead of asking the model to guess them again.
+                .put("content", FORMAT_REASK_INSTRUCTION
+                        + " port must be one of: "
+                        + String.join(", ", ports.stream().sorted().toList()) + "."));
         CodingModelTurnContract.Response second = modelTurn(
                 authorization, jobId, resultId, stage, authority, aggregate,
                 FORMAT_REASK_TURN, List.of(), reask,

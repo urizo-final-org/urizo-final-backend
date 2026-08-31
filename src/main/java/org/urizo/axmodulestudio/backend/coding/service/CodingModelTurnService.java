@@ -50,8 +50,10 @@ public class CodingModelTurnService {
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
     /** Mirrors the ProviderChatRequest budget so an oversized context fails as a gateway error. */
     private static final int MAX_REQUEST_CHARACTERS = 65_536;
+    // A JSON object because a native tool response body must parse as JSON.
     private static final String ELIDED_TOOL_CONTENT =
-            "[elided for the request budget. Re-read the file when its body is required.]";
+            "{\"content\":\"[elided for the request budget. "
+                    + "Re-read the file when its body is required.]\"}";
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
     private final ProviderCapabilityRegistry capabilityRegistry;
@@ -310,6 +312,25 @@ public class CodingModelTurnService {
         return true;
     }
 
+    /**
+     * A native tool response must be JSON: Gemini parses the function response body and
+     * rejects the whole request when a text tool result - a read file, for example -
+     * does not parse. A result that is already a JSON object or array passes through
+     * unchanged; anything else is wrapped as one field.
+     */
+    private String jsonToolResult(String content) {
+        try {
+            JsonNode parsed = objectMapper.readTree(content);
+            if (parsed != null && (parsed.isObject() || parsed.isArray())) {
+                return content;
+            }
+        }
+        catch (JsonProcessingException ignored) {
+            // Not JSON - wrapped below.
+        }
+        return objectMapper.createObjectNode().put("content", content).toString();
+    }
+
     private List<ProviderChatMessage> normalizedMessages(
             CodingModelTurnContract.Request request, ToolMode toolMode) {
         List<ProviderChatMessage> messages = new ArrayList<>();
@@ -364,7 +385,9 @@ public class CodingModelTurnService {
                             throw invalidContract();
                         }
                         messages.add(ProviderChatMessage.tool(
-                                toolCallId, name, content));
+                                toolCallId, name,
+                                toolMode == ToolMode.PROVIDER
+                                        ? jsonToolResult(content) : content));
                     }
                     default -> throw invalidContract();
                 }

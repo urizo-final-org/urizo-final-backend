@@ -499,7 +499,8 @@ class CodingModelTurnServiceTest {
 
         providerToolService().execute(request);
 
-        assertThat(toolContents()).containsExactly("AAAA");
+        // Text results ride in a one-field JSON object on the native path.
+        assertThat(toolContents()).containsExactly("{\"content\":\"AAAA\"}");
     }
 
     @Test
@@ -523,8 +524,8 @@ class CodingModelTurnServiceTest {
                 .toList();
         assertThat(contents).hasSize(3);
         assertThat(contents.get(0)).doesNotContain("AAAA").contains("elided");
-        assertThat(contents.get(1)).isEqualTo("B".repeat(25_000));
-        assertThat(contents.get(2)).isEqualTo("C".repeat(25_000));
+        assertThat(contents.get(1)).contains("B".repeat(25_000));
+        assertThat(contents.get(2)).contains("C".repeat(25_000));
     }
 
     @Test

@@ -53,6 +53,10 @@ public class ProfileModelBindingService {
     private final ProviderCapabilityRegistry capabilityRegistry;
 
     public ProfileModelBindingService(
+            // The profile snapshot table is granted to ai_workspace, not to the primary
+            // cms_app datasource, so the unqualified template failed every local lookup
+            // with a permission error surfaced as INTERNAL_TRANSIENT_ERROR.
+            @org.springframework.beans.factory.annotation.Qualifier("codingModelTurnJdbcTemplate")
             JdbcTemplate jdbcTemplate,
             ObjectMapper objectMapper,
             ProviderCapabilityRegistry capabilityRegistry) {

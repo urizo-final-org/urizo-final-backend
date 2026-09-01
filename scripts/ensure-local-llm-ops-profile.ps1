@@ -39,6 +39,7 @@ if ($snapshot.contractVersion -ne '1.0' -or $snapshot.profileKey -ne 'LLM_OPS' -
 $snapshotLiteral = $snapshotJson.Replace("'", "''")
 $newProfileVersionId = [Guid]::NewGuid().ToString()
 $seedSql = @"
+SET client_encoding TO 'UTF8';
 BEGIN;
 LOCK TABLE app.ai_profile_version IN SHARE ROW EXCLUSIVE MODE;
 
@@ -132,12 +133,35 @@ WHERE stored.profile_key = 'LLM_OPS'
 
 COMMIT;
 "@
-$seedOutput = & $docker exec $DatabaseContainer psql `
-    -U bootstrap_admin `
-    -d $DatabaseName `
-    -v ON_ERROR_STOP=1 `
-    -qAtc $seedSql
-$seedExitCode = $LASTEXITCODE
+# This statement carries the fixture JSON verbatim, and Windows PowerShell 5.1
+# cannot hand a string holding double quotes to a native executable intact, so
+# `psql -c $seedSql` used to arrive with the quotes stripped and fail on the first
+# JSON key. Give psql a file instead. The fixture is not ASCII, so the file is
+# UTF-8 without a BOM, which psql would otherwise read as the first SQL token,
+# and the statement above sets the matching client encoding.
+$seedSqlPath = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'axms-llm-ops-profile-' + [Guid]::NewGuid().ToString('N') + '.sql')
+$containerSqlPath = '/tmp/' + [System.IO.Path]::GetFileName($seedSqlPath)
+$seedOutput = ''
+$seedExitCode = 1
+try {
+    [System.IO.File]::WriteAllText(
+        $seedSqlPath, $seedSql, [System.Text.UTF8Encoding]::new($false))
+    & $docker cp $seedSqlPath ($DatabaseContainer + ':' + $containerSqlPath) | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The local LLM_OPS Profile seed could not be copied into the database container.'
+    }
+    $seedOutput = & $docker exec $DatabaseContainer psql `
+        -U bootstrap_admin `
+        -d $DatabaseName `
+        -v ON_ERROR_STOP=1 `
+        -qAt -f $containerSqlPath
+    $seedExitCode = $LASTEXITCODE
+}
+finally {
+    & $docker exec $DatabaseContainer rm -f $containerSqlPath | Out-Null
+    Remove-Item -LiteralPath $seedSqlPath -Force -ErrorAction SilentlyContinue
+}
 $activeProfileVersionId = ([string]$seedOutput).Trim()
 $parsedProfileVersionId = [Guid]::Empty
 if ($seedExitCode -ne 0 -or

@@ -291,6 +291,102 @@ function Invoke-CreateWorktree {
     return @{ worktreePath = $target; reused = $false }
 }
 
+function Get-WorkspaceHostPath {
+    param([Parameter(Mandatory = $true)][string]$WorkspaceId)
+
+    if ($WorkspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw "RUNNER_PAYLOAD_INVALID|workspaceId 형식이 올바르지 않습니다: $WorkspaceId"
+    }
+    return Join-Path $WorkRoot "ws-$WorkspaceId"
+}
+
+function Export-McpWorkspaceToHost {
+    # The Coding tools write into a named volume because a Windows bind mount is
+    # always root-owned inside the container and Git then refuses the repository.
+    # Docker is therefore the only reader, and BUILD and PREVIEW_UP need the files
+    # on the host. This copies the volume clone out to a path of its own so the
+    # existing ai-<repo> worktrees the other commands use are never touched.
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId
+    )
+
+    $target = Get-WorkspaceHostPath -WorkspaceId $WorkspaceId
+
+    # The marker is read as the service user: the workspace belongs to 10001 and
+    # root cannot read the Git config of a directory it does not own.
+    $probe = "if [ -d /workspaces/$WorkspaceId ]; then " `
+        + "git -C /workspaces/$WorkspaceId config --local --get axms.repository || echo AXMS_NO_MARKER; " `
+        + 'else echo AXMS_MISSING; fi'
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $state = & docker run --rm `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            --entrypoint sh $McpWorkspaceImage -c $probe 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_FAILED|작업 폴더를 확인하지 못했습니다: $(($state | Select-Object -Last 3) -join ' ')"
+    }
+    $held = "$(@($state) | Select-Object -Last 1)".Trim()
+    if ($held -eq 'AXMS_MISSING') {
+        throw "RUNNER_WORKSPACE_MISSING|작업 폴더가 없습니다. CREATE_WORKTREE 를 먼저 실행하세요: $WorkspaceId"
+    }
+    if ($held -ne $Repository) {
+        throw "RUNNER_WORKSPACE_CONFLICT|이 workspaceId 는 다른 저장소에 묶여 있습니다: $WorkspaceId ($held)"
+    }
+
+    # A stale export would hand the build files the model already deleted, so the
+    # target is emptied first. Only this runner writes here and the path is
+    # derived from the validated workspaceId, never from the payload directly.
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    # --user 0:0 reads the 10001-owned workspace and writes the bind mount, which
+    # Docker Desktop maps back to the host user. The container is short-lived and
+    # has no network and no secrets.
+    $copy = "cp -a /workspaces/$WorkspaceId/. /out/"
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm --user 0:0 `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            -v "${target}:/out" `
+            --entrypoint sh $McpWorkspaceImage -c $copy 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|작업 폴더를 꺼내지 못했습니다: $(($output | Select-Object -Last 3) -join ' ')"
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $target 'compose.dev.yaml') -PathType Leaf)) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 compose.dev.yaml 이 없습니다: $target"
+    }
+
+    # The clone was made on Linux, so its config keeps core.filemode true. Windows
+    # cannot carry the executable bit, so every shell script would read as a mode
+    # change and a later commit from this directory would carry that noise.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $config = & git -C $target config --local core.filemode false 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더 설정에 실패했습니다: $(($config | Select-Object -Last 2) -join ' ')"
+    }
+    return $target
+}
+
 function Get-AiWorktreePath {
     param([Parameter(Mandatory = $true)][string]$Repository)
 
@@ -492,7 +588,20 @@ function Copy-SourceDatabase {
 }
 
 function Invoke-PreviewUp {
-    $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+    param($Payload)
+
+    # BUILD already exported this workspace and produced the images from it, so
+    # the same directory is used here for the Compose files.
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    if ($workspaceId) {
+        $backendWorktree = Get-WorkspaceHostPath -WorkspaceId $workspaceId
+        if (-not (Test-Path -LiteralPath $backendWorktree -PathType Container)) {
+            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $backendWorktree"
+        }
+    }
+    else {
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+    }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }
@@ -551,7 +660,16 @@ function Invoke-ComposeBuild {
     # Compose files live in the backend worktree, so it is always the project
     # directory. The frontend worktree is passed through the same variable the
     # preview overlay uses for both its build context and its source mount.
-    $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+    # A workspaceId means the model worked in the MCP volume, so its files are
+    # exported here first. Without one this stays the host worktree the command
+    # already used, so the existing path is untouched.
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    if ($workspaceId) {
+        $backendWorktree = Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    }
+    else {
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+    }
     $frontendWorktree = if ($repository -eq 'frontend') { Get-AiWorktreePath -Repository 'frontend' } else { '' }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
@@ -721,7 +839,7 @@ function Complete-RunnerTask {
                 $result = Invoke-PrepareScanWorktree -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
             'PREVIEW_UP' {
-                $result = Invoke-PreviewUp
+                $result = Invoke-PreviewUp -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
             'PREVIEW_DOWN' {
                 $result = Invoke-PreviewDown

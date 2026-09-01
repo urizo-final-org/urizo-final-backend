@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -19,7 +20,8 @@ public class EncryptedProviderSecretRepository {
 
     private final JdbcTemplate jdbcTemplate;
 
-    public EncryptedProviderSecretRepository(JdbcTemplate localProviderSecretJdbcTemplate) {
+    public EncryptedProviderSecretRepository(
+            @Qualifier("localProviderSecretJdbcTemplate") JdbcTemplate localProviderSecretJdbcTemplate) {
         this.jdbcTemplate = localProviderSecretJdbcTemplate;
     }
 

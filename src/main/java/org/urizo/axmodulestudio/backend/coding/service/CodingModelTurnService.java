@@ -44,6 +44,12 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+    /** Mirrors the ProviderChatRequest budget so an oversized context fails as a gateway error. */
+    private static final int MAX_REQUEST_CHARACTERS = 65_536;
+    // A JSON object because a native tool response body must parse as JSON.
+    private static final String ELIDED_TOOL_CONTENT =
+            "{\"content\":\"[elided for the request budget. "
+                    + "Re-read the file when its body is required.]\"}";
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
     private final ObjectMapper objectMapper;
@@ -330,7 +336,7 @@ public class CodingModelTurnService {
                             throw invalidContract();
                         }
                         messages.add(ProviderChatMessage.tool(
-                                toolCallId, name, content));
+                                toolCallId, name, jsonToolResult(content)));
                     }
                     default -> throw invalidContract();
                 }
@@ -342,7 +348,63 @@ public class CodingModelTurnService {
         if (!pendingToolNames.isEmpty()) {
             throw invalidContract();
         }
-        return List.copyOf(messages);
+        return withinRequestBudget(messages);
+    }
+
+    /**
+     * A native tool response must be JSON: Gemini parses the function response body and
+     * rejects the whole request when a text tool result - a read file, for example -
+     * does not parse. A result that is already a JSON object or array passes through
+     * unchanged; anything else is wrapped as one field.
+     */
+    private String jsonToolResult(String content) {
+        try {
+            JsonNode parsed = objectMapper.readTree(content);
+            if (parsed != null && (parsed.isObject() || parsed.isArray())) {
+                return content;
+            }
+        }
+        catch (JsonProcessingException ignored) {
+            // Not JSON - wrapped below.
+        }
+        return objectMapper.createObjectNode().put("content", content).toString();
+    }
+
+    /**
+     * A tool message carries the whole tool body, so a handful of file reads alone
+     * exceeds the ProviderChatRequest budget and the request would be rejected as a
+     * raw argument failure. The oldest tool bodies are dropped first, and only once
+     * the request would not fit, so a request that already fits is unchanged.
+     */
+    private List<ProviderChatMessage> withinRequestBudget(List<ProviderChatMessage> messages) {
+        List<ProviderChatMessage> bounded = new ArrayList<>(messages);
+        long characters = characters(bounded);
+        for (int index = 0; index < bounded.size() && characters > MAX_REQUEST_CHARACTERS; index++) {
+            ProviderChatMessage message = bounded.get(index);
+            if (message.role() != ProviderChatMessage.Role.TOOL
+                    || ELIDED_TOOL_CONTENT.equals(message.content())) {
+                continue;
+            }
+            characters -= message.content().length() - ELIDED_TOOL_CONTENT.length();
+            bounded.set(index, ProviderChatMessage.tool(
+                    message.toolCallId(), message.toolName(), ELIDED_TOOL_CONTENT));
+        }
+        if (characters > MAX_REQUEST_CHARACTERS) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
+                    "The Coding stage context exceeds the model request budget.");
+        }
+        return List.copyOf(bounded);
+    }
+
+    /** Counts exactly what ProviderChatRequest bounds. */
+    private static long characters(List<ProviderChatMessage> messages) {
+        return messages.stream()
+                .mapToLong(message -> message.content().length()
+                        + message.toolCalls().stream()
+                                .mapToLong(call -> call.arguments().length())
+                                .sum())
+                .sum();
     }
 
     private ProviderResponseFormat providerResponseFormat(

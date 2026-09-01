@@ -167,7 +167,13 @@ public final class CodingWorkerContract {
             UUID traceId,
             @Valid ErrorDetail error) { }
 
-    @JsonInclude(JsonInclude.Include.NON_NULL)
+    /**
+     * Every field stays on the wire, including a null retryAfterMs. The Orchestrator
+     * accepts this envelope only when the key is present, and requires it to be null
+     * for a non-retryable failure. Dropping the key made every such rejection decode
+     * as a malformed reply, so the worker reported WORKER_RESPONSE_INVALID and the
+     * real cause - an authorization denial, for example - never reached the Job.
+     */
     public record ErrorDetail(
             String code,
             String message,

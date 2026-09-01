@@ -151,6 +151,8 @@ class CodingHandlerCommandServiceTest {
                 .thenReturn(transitioned);
         CodingHandlerCommandService service = new CodingHandlerCommandService(
                 jdbc,
+                // The fixture stubs one template, so the approval projection reads it too.
+                jdbc,
                 transactions,
                 lifecycle,
                 lifecycleService,

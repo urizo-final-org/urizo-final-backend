@@ -1,6 +1,6 @@
 {
   "contractVersion": "1.0",
-  "profileVersionId": "11111111-1111-4111-8111-111111111111",
+  "profileVersionId": "f7b8ca22-d38c-4715-9aa2-3746f7322ca7",
   "profileKey": "LLM_OPS",
   "profileVersion": 1,
   "nodes": [
@@ -19,10 +19,10 @@
       "config": {"locked": true}
     },
     {
-      "id": "analyze",
-      "type": "agent",
-      "handlerKey": "coding.analyze",
-      "resultPorts": ["feasible", "infeasible"],
+      "id": "check",
+      "type": "check",
+      "handlerKey": "common.check",
+      "resultPorts": ["passed", "failed"],
       "config": {}
     },
     {
@@ -35,19 +35,17 @@
   ],
   "edges": [
     {"from": "start", "resultPort": "next", "to": "guardrail"},
-    {"from": "guardrail", "resultPort": "passed", "to": "analyze"},
+    {"from": "guardrail", "resultPort": "passed", "to": "check"},
     {"from": "guardrail", "resultPort": "failed", "to": "end"},
-    {"from": "analyze", "resultPort": "feasible", "to": "end"},
-    {"from": "analyze", "resultPort": "infeasible", "to": "end"}
+    {"from": "check", "resultPort": "passed", "to": "end"},
+    {"from": "check", "resultPort": "failed", "to": "end"}
   ],
   "config": {
     "maxNodes": 4,
     "maxAttempts": 3,
     "loopLimits": []
   },
-  "modelBindings": {
-    "analyze": {"primary": "llm-ops-analyze", "fallback": []}
-  },
+  "modelBindings": {},
   "toolPolicy": {"allowedTools": []},
   "guardrailProfileKey": "central.default"
 }

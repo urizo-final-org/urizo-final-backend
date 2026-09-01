@@ -103,6 +103,26 @@ class ProfileModelBindingServiceTest {
     }
 
     @Test
+    void resolvesClaudeAsAProfilePrimaryOrFallback() throws Exception {
+        ProfileModelBindingService service = service(registry(
+                registration(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
+                registration(ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT)));
+        JsonNode snapshot = snapshot("""
+                {
+                  "analyze":{"primary":"llm-ops-claude","fallback":["llm-ops-analyze"]},
+                  "review":{"primary":"llm-ops-analyze","fallback":[]}
+                }
+                """);
+
+        assertThat(service.resolve(
+                snapshot, PROFILE, "analyze", "coding.analyze", ModelUseCase.CHAT))
+                .extracting(ProviderModelRegistration::provider)
+                .containsExactly(ModelProvider.ANTHROPIC, ModelProvider.OPENAI);
+        assertThat(ProfileModelBindingService.isRegisteredBindingKey(
+                "NATURAL_CMS", "natural-cms-claude")).isTrue();
+    }
+
+    @Test
     void rejectsMissingWrongNodeAndUnsupportedBindingDeterministically() throws Exception {
         ProfileModelBindingService service = service(registry(
                 registration(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),

@@ -23,7 +23,6 @@ if ($LASTEXITCODE -ne 0) {
 
 $httpPort = if ($env:AXMS_HTTP_PORT) { [int]$env:AXMS_HTTP_PORT } else { 18080 }
 $baseUri = "http://127.0.0.1:$httpPort"
-$profileVersionId = (& (Join-Path $PSScriptRoot 'ensure-local-llm-ops-profile.ps1')).Trim()
 
 function Get-HttpStatus {
     param(
@@ -66,14 +65,15 @@ $providerOverview = $null
 
 # This acceptance path runs on the development session, which now lives behind the
 # 'dev-session' profile. Without it the stack requires a real administrator login and
-# this endpoint is absent, so add 'dev-session' to SPRING_PROFILES_ACTIVE before
-# running Stage 3-5 verification.
+# this endpoint is absent, so explicitly include 'dev-session' in the
+# AXMS_SPRING_PROFILES_ACTIVE Compose override before creating the verification stack.
 try {
     $session = Invoke-RestMethod -UseBasicParsing -Uri "$baseUri/internal/dev/product-session" -TimeoutSec 10
 }
 catch {
     throw ('The local product session endpoint is unavailable. Stage 3-5 verification ' +
-        "requires the 'dev-session' profile; production authentication is active without it.")
+        "requires 'dev-session' through AXMS_SPRING_PROFILES_ACTIVE; " +
+        'production authentication remains active by default.')
 }
 if (($session.schemaVersion -ne '1.0') -or
         ($session.tokenType -ne 'Bearer') -or
@@ -129,6 +129,156 @@ function Assert-ContractValue {
     if ([string]$Actual -ne [string]$Expected) {
         throw "Unexpected product contract value for $Name."
     }
+}
+
+function Get-AxmsHttpFailureBody {
+    param(
+        [Parameter(Mandatory = $true)][object]$Failure
+    )
+
+    if ($null -ne $Failure.ErrorDetails -and
+            -not [string]::IsNullOrWhiteSpace([string]$Failure.ErrorDetails.Message)) {
+        return [string]$Failure.ErrorDetails.Message
+    }
+
+    $response = $Failure.Exception.Response
+    if ($null -eq $response) {
+        return ''
+    }
+    $contentProperty = $response.PSObject.Properties['Content']
+    if ($null -ne $contentProperty -and $null -ne $contentProperty.Value) {
+        $readTask = $contentProperty.Value.ReadAsStringAsync()
+        return [string]$readTask.GetAwaiter().GetResult()
+    }
+    if ($null -ne $response.PSObject.Methods['GetResponseStream']) {
+        $stream = $response.GetResponseStream()
+        if ($null -ne $stream) {
+            $reader = [System.IO.StreamReader]::new($stream)
+            try {
+                return $reader.ReadToEnd()
+            }
+            finally {
+                $reader.Dispose()
+            }
+        }
+    }
+    return ''
+}
+
+function Invoke-AxmsExpectedError {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('POST')][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][object]$Body,
+        [Parameter(Mandatory = $true)][int]$ExpectedStatus
+    )
+
+    $parameters = @{
+        UseBasicParsing = $true
+        Uri             = "$baseUri$Path"
+        Method          = $Method
+        Headers         = @{ Authorization = $authorization }
+        ContentType     = 'application/json; charset=utf-8'
+        Body            = $Body | ConvertTo-Json -Compress -Depth 20
+        TimeoutSec      = 20
+    }
+    $requestFailure = $null
+    try {
+        [void](Invoke-WebRequest @parameters)
+    }
+    catch {
+        $requestFailure = $_
+    }
+    if ($null -eq $requestFailure) {
+        throw "Product request unexpectedly succeeded: $Method $Path"
+    }
+    if ($null -eq $requestFailure.Exception.Response) {
+        throw "Product request failed without an HTTP response: $Method $Path"
+    }
+    $statusCode = [int]$requestFailure.Exception.Response.StatusCode
+    if ($statusCode -ne $ExpectedStatus) {
+        throw "Product request failed with unexpected HTTP $statusCode`: $Method $Path"
+    }
+    $rawBody = Get-AxmsHttpFailureBody -Failure $requestFailure
+    if ([string]::IsNullOrWhiteSpace($rawBody)) {
+        throw "Product error response body was empty: $Method $Path"
+    }
+    try {
+        return $rawBody | ConvertFrom-Json
+    }
+    catch {
+        throw "Product error response body was not valid JSON: $Method $Path"
+    }
+}
+
+function ConvertTo-ProfileAuthoringSnapshot {
+    param(
+        [Parameter(Mandatory = $true)][object]$VersionedSnapshot
+    )
+
+    $authoring = [ordered]@{}
+    foreach ($field in @(
+            'nodes',
+            'edges',
+            'config',
+            'modelBindings',
+            'toolPolicy',
+            'guardrailProfileKey')) {
+        $property = $VersionedSnapshot.PSObject.Properties[$field]
+        if ($null -eq $property) {
+            throw "The Profile fixture is missing authoring field: $field"
+        }
+        $authoring[$field] = $property.Value
+    }
+    return $authoring
+}
+
+function Publish-AdminProfileFixture {
+    param(
+        [Parameter(Mandatory = $true)][string]$FixturePath
+    )
+
+    if (-not (Test-Path -LiteralPath $FixturePath -PathType Leaf)) {
+        throw 'The requested Profile fixture was not found.'
+    }
+    $fixture = [System.IO.File]::ReadAllText($FixturePath) | ConvertFrom-Json
+    if ($fixture.contractVersion -ne '1.0' -or $fixture.profileKey -ne 'LLM_OPS') {
+        throw 'The requested LLM_OPS Profile fixture identity is invalid.'
+    }
+    $createBody = [ordered]@{
+        profileKey = 'LLM_OPS'
+        snapshot   = ConvertTo-ProfileAuthoringSnapshot -VersionedSnapshot $fixture
+    }
+
+    # Profile draft creation intentionally has no idempotency contract. Do not retry this POST.
+    $created = Invoke-AxmsJson -Method POST -Path '/api/admin/ai/profile-versions' `
+        -Body $createBody
+    Assert-ContractValue -Actual $created.status -Expected 'DRAFT' `
+        -Name 'admin Profile draft status'
+    Assert-ContractValue -Actual $created.profileKey -Expected 'LLM_OPS' `
+        -Name 'admin Profile key'
+    if ([int]$created.profileVersion -lt 1 -or
+            [string]::IsNullOrWhiteSpace([string]$created.profileVersionId)) {
+        throw 'The admin Profile create response returned an invalid identity.'
+    }
+    Assert-ContractValue -Actual $created.snapshot.contractVersion -Expected '1.0' `
+        -Name 'admin Profile Snapshot contract version'
+    Assert-ContractValue -Actual $created.snapshot.profileVersionId `
+        -Expected $created.profileVersionId -Name 'admin Profile Snapshot id'
+    Assert-ContractValue -Actual $created.snapshot.profileKey -Expected $created.profileKey `
+        -Name 'admin Profile Snapshot key'
+    Assert-ContractValue -Actual $created.snapshot.profileVersion `
+        -Expected $created.profileVersion -Name 'admin Profile Snapshot version'
+
+    $active = Invoke-AxmsJson -Method POST `
+        -Path "/api/admin/ai/profile-versions/$($created.profileVersionId)/activate"
+    Assert-ContractValue -Actual $active.status -Expected 'ACTIVE' `
+        -Name 'admin Profile activation'
+    Assert-ContractValue -Actual $active.profileVersionId -Expected $created.profileVersionId `
+        -Name 'admin Profile activation identity'
+    Assert-ContractValue -Actual $active.profileVersion -Expected $created.profileVersion `
+        -Name 'admin Profile activation version'
+    return $active
 }
 
 function Invoke-CodingJson {
@@ -187,7 +337,7 @@ function Wait-CodingJob {
         if ($DesiredStatuses -contains [string]$job.status) {
             return $job
         }
-        if (@('FAILED', 'CANCELLED', 'EXPIRED') -contains [string]$job.status) {
+        if (@('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') -contains [string]$job.status) {
             throw "Coding job reached an unexpected terminal state: $($job.status)"
         }
         Start-Sleep -Milliseconds 300
@@ -402,6 +552,11 @@ try {
         throw 'The local coding job session endpoint returned an invalid contract.'
     }
 
+    $commonProfileFixturePath = Join-Path $repositoryRoot `
+        'contracts\fixtures\orchestration\llm-ops-common-runtime.snapshot.valid.json'
+    $commonProfile = Publish-AdminProfileFixture -FixturePath $commonProfileFixturePath
+    $profileVersionId = [string]$commonProfile.profileVersionId
+
     $codingRunId = [Guid]::NewGuid().ToString('N')
     $codingTraceId = [Guid]::NewGuid().ToString()
     $codingCreateBody = @{
@@ -414,7 +569,7 @@ try {
         baseSha            = 'sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         contextDigest      = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
         policyHash         = 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
-        promptVersion      = 'full-local-coding-v1'
+        promptVersion      = 'full-local-common-v1'
         allowedCapabilities = @('CHAT', 'TOOL_CALLING')
         allowedNodes       = @('plan')
         expiresAt          = [DateTimeOffset]::UtcNow.AddMinutes(30).ToString('o')
@@ -432,13 +587,54 @@ try {
         -Name 'coding immutable Profile Version binding'
 
     $codingState = Wait-CodingJob -JobId ([string]$codingJob.jobId) -TraceId $codingTraceId `
-        -DesiredStatuses @('FAILED')
-    Assert-ContractValue -Actual $codingState.failure.code -Expected 'CONTRACT_VALIDATION_FAILED' `
-        -Name 'coding empty production Node Registry fail-closed code'
-    Assert-ContractValue -Actual $codingState.failure.retryable -Expected $false `
-        -Name 'coding empty production Node Registry fail-closed retryability'
+        -DesiredStatuses @('COMPLETED')
+    $codingFailureProperty = $codingState.PSObject.Properties['failure']
+    if ($null -ne $codingFailureProperty -and $null -ne $codingFailureProperty.Value) {
+        throw 'The common Profile-bound Coding job completed with a failure payload.'
+    }
     if ([int]$codingState.stateVersion -lt 3) {
-        throw 'Coding job failed before the expected resolve/claim/outcome lifecycle.'
+        throw 'Coding job completed before the expected resolve/claim/outcome lifecycle.'
+    }
+
+    $invalidFixture = [System.IO.File]::ReadAllText($commonProfileFixturePath) | ConvertFrom-Json
+    $invalidAuthoring = ConvertTo-ProfileAuthoringSnapshot -VersionedSnapshot $invalidFixture
+    $invalidCheckNodes = @($invalidAuthoring['nodes'] | Where-Object { $_.id -eq 'check' })
+    if ($invalidCheckNodes.Count -ne 1) {
+        throw 'The common Profile fixture does not contain exactly one check node.'
+    }
+    $invalidCheckNodes[0].handlerKey = 'fixture.unregistered'
+    $invalidCreateBody = [ordered]@{
+        profileKey = 'LLM_OPS'
+        snapshot   = $invalidAuthoring
+    }
+    $invalidProfileError = Invoke-AxmsExpectedError -Method POST `
+        -Path '/api/admin/ai/profile-versions' -Body $invalidCreateBody -ExpectedStatus 400
+    Assert-ContractValue -Actual $invalidProfileError.schemaVersion -Expected '1.0' `
+        -Name 'admin Profile validation error contract version'
+    Assert-ContractValue -Actual $invalidProfileError.error.code `
+        -Expected 'CONTRACT_VALIDATION_FAILED' `
+        -Name 'admin Profile unregistered Handler fail-closed code'
+    Assert-ContractValue -Actual $invalidProfileError.error.retryable -Expected $false `
+        -Name 'admin Profile unregistered Handler fail-closed retryability'
+
+    $profileVersions = @(Invoke-AxmsJson -Method GET `
+            -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS')
+    $activeProfileVersions = @($profileVersions | Where-Object { $_.status -eq 'ACTIVE' })
+    if ($activeProfileVersions.Count -ne 1 -or
+            [string]$activeProfileVersions[0].profileVersionId -ne $profileVersionId) {
+        throw 'The rejected Profile authoring request changed the active LLM_OPS authority.'
+    }
+
+    $codingProfileFixturePath = Join-Path $repositoryRoot `
+        'contracts\fixtures\orchestration\llm-ops-coding-handler.snapshot.valid.json'
+    $codingProfile = Publish-AdminProfileFixture -FixturePath $codingProfileFixturePath
+    $codingProfileVersionId = [string]$codingProfile.profileVersionId
+    $profileVersions = @(Invoke-AxmsJson -Method GET `
+            -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS')
+    $activeProfileVersions = @($profileVersions | Where-Object { $_.status -eq 'ACTIVE' })
+    if ($activeProfileVersions.Count -ne 1 -or
+            [string]$activeProfileVersions[0].profileVersionId -ne $codingProfileVersionId) {
+        throw 'The valid Coding Handler Profile was not left as the active LLM_OPS authority.'
     }
 
     if ($ProductProbeScript) {
@@ -463,4 +659,4 @@ finally {
     $codingSession = $null
 }
 
-Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, and Profile-bound LangGraph fail-closed E2E passed.'
+Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, admin Profile publication, common Profile-bound LangGraph completion, authoring fail-closed, and active Coding Handler Profile E2E passed.'

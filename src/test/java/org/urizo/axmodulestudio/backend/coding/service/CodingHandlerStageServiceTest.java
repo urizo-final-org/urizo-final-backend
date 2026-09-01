@@ -29,13 +29,16 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatGatewayPort;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRequest;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
@@ -89,7 +92,10 @@ class CodingHandlerStageServiceTest {
         ProviderModelRegistration registration = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 "coding-test-model",
-                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Set.of(
+                        ModelCapability.CHAT,
+                        ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
                 Duration.ofSeconds(30),
                 2);
         CodingModelTurnService modelService = new CodingModelTurnService(
@@ -104,7 +110,7 @@ class CodingHandlerStageServiceTest {
         ProfileModelBindingService profileModelBindings =
                 mock(ProfileModelBindingService.class);
         when(profileModelBindings.resolve(
-                PROFILE, "analyze", "coding.analyze", ModelUseCase.CHAT))
+                PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT))
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
@@ -152,7 +158,19 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
 
         assertThat(response.resultPort()).isEqualTo("feasible");
-        assertThat(response.payload().path("summary").asText()).isEqualTo("ok");
+        assertThat(response.payload()).isEqualTo(
+                mapper.createObjectNode().put("summary", "ok"));
+        verify(profileModelBindings).resolve(
+                PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT);
+        ArgumentCaptor<CodingModelTurnContract.Request> structuredRequest =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(guard).reserve(eq("Bearer worker"), structuredRequest.capture());
+        assertThat(structuredRequest.getValue().responseFormat().path("type").asText())
+                .isEqualTo("JSON_SCHEMA");
+        assertThat(structuredRequest.getValue().responseFormat()
+                .path("outputSchema").path("required"))
+                .extracting(JsonNode::asText)
+                .containsExactly("port", "payload");
 
         // Prose alone carries no object to recover, so the stage still fails.
         when(gateway.chat(any())).thenReturn(assistantText("I could not decide."));
@@ -161,7 +179,9 @@ class CodingHandlerStageServiceTest {
                 "Bearer worker", JOB, 1, RESULT,
                 new CodingHandlerContract.StageExecutionRequest(
                         "1.0", TRACE, 4, 1, "coding.analyze", RESULT)))
-                .isInstanceOf(CodingWorkerException.class);
+                .isInstanceOfSatisfying(ProviderGatewayException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID));
     }
 
     /** A stage with no tools receives the model text verbatim, fence and all. */
@@ -238,15 +258,17 @@ class CodingHandlerStageServiceTest {
                 new ProviderChatResponse(
                         ModelProvider.GOOGLE_GENAI,
                         "coding-test-model",
-                        "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_diff\","
-                                + "\"arguments\":{}}]}",
+                        "",
+                        List.of(new ProviderChatMessage.ToolCall(
+                                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                                "read_diff",
+                                "{}")),
                         10, 5, Duration.ofMillis(10)),
                 new ProviderChatResponse(
                         ModelProvider.GOOGLE_GENAI,
                         "coding-test-model",
-                        "{\"assistant\":\"{\\\"port\\\":\\\"completed\\\","
-                                + "\\\"payload\\\":{\\\"summary\\\":\\\"done\\\"}}\","
-                                + "\"toolCalls\":[]}",
+                        "{\"port\":\"completed\","
+                                + "\"payload\":{\"summary\":\"done\"}}",
                         12, 6, Duration.ofMillis(10)));
         AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
         when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {

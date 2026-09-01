@@ -63,15 +63,42 @@ public class EncryptedProviderSecretRepository {
                 """, this::mapStoredSecret);
     }
 
-    public void updateState(ModelProvider provider, ProviderCredentialState state) {
+    public boolean recordTestIfCurrent(
+            ModelProvider provider,
+            String credentialFingerprint,
+            String modelId,
+            ProviderCredentialState state,
+            String outcome,
+            String safeErrorCode,
+            Integer inputTokens,
+            Integer outputTokens,
+            long latencyMs) {
         int changed = jdbcTemplate.update("""
-                UPDATE app.local_provider_secret
-                   SET connection_state = ?, last_tested_at = CURRENT_TIMESTAMP
-                 WHERE provider = ?
-                """, state.name(), provider.name());
-        if (changed != 1) {
-            throw new IllegalStateException("Provider credential state update did not target exactly one row.");
-        }
+                WITH current_credential AS (
+                    UPDATE app.local_provider_secret
+                       SET connection_state = ?, last_tested_at = CURRENT_TIMESTAMP
+                     WHERE provider = ?
+                       AND fingerprint = ?
+                    RETURNING provider
+                )
+                INSERT INTO app.local_provider_connection_audit (
+                    audit_id, provider, model_id, capability, outcome, safe_error_code,
+                    input_tokens, output_tokens, latency_ms
+                )
+                SELECT ?, provider, ?, 'CHAT', ?, ?, ?, ?, ?
+                  FROM current_credential
+                """,
+                state.name(),
+                provider.name(),
+                credentialFingerprint,
+                UUID.randomUUID(),
+                modelId,
+                outcome,
+                safeErrorCode,
+                inputTokens,
+                outputTokens,
+                latencyMs);
+        return changed == 1;
     }
 
     public void delete(ModelProvider provider) {
@@ -79,30 +106,6 @@ public class EncryptedProviderSecretRepository {
                 DELETE FROM app.local_provider_secret
                  WHERE provider = ?
                 """, provider.name());
-    }
-
-    public void recordAudit(
-            ModelProvider provider,
-            String modelId,
-            String outcome,
-            String safeErrorCode,
-            Integer inputTokens,
-            Integer outputTokens,
-            long latencyMs) {
-        jdbcTemplate.update("""
-                INSERT INTO app.local_provider_connection_audit (
-                    audit_id, provider, model_id, capability, outcome, safe_error_code,
-                    input_tokens, output_tokens, latency_ms
-                ) VALUES (?, ?, ?, 'CHAT', ?, ?, ?, ?, ?)
-                """,
-                UUID.randomUUID(),
-                provider.name(),
-                modelId,
-                outcome,
-                safeErrorCode,
-                inputTokens,
-                outputTokens,
-                latencyMs);
     }
 
     private StoredProviderSecret mapStoredSecret(ResultSet resultSet, int rowNumber) throws SQLException {

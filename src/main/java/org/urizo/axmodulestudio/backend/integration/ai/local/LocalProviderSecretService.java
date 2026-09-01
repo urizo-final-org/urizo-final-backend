@@ -12,6 +12,7 @@ import java.util.stream.Collectors;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialLease;
 import org.urizo.axmodulestudio.backend.integration.ai.local.ProviderSecretCrypto.EncryptedSecret;
 
 @Service
@@ -57,16 +58,20 @@ public class LocalProviderSecretService {
         }
     }
 
-    byte[] decryptForProviderCall(ModelProvider provider) {
+    ProviderCredentialLease leaseForProviderCall(ModelProvider provider) {
         requireSupported(provider);
         StoredProviderSecret stored = repository.find(provider)
                 .orElseThrow(() -> new IllegalArgumentException("Provider credential is not configured."));
-        return crypto.decrypt(provider, stored.encryptedSecret());
-    }
-
-    public void updateState(ModelProvider provider, ProviderCredentialState state) {
-        requireSupported(provider);
-        repository.updateState(provider, state);
+        byte[] plaintext = crypto.decrypt(provider, stored.encryptedSecret());
+        try {
+            return ProviderCredentialLease.fromBytes(
+                    provider,
+                    plaintext,
+                    stored.encryptedSecret().fingerprint());
+        }
+        finally {
+            Arrays.fill(plaintext, (byte) 0);
+        }
     }
 
     public ProviderCredentialStatus delete(ModelProvider provider) {

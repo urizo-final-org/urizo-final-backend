@@ -6,8 +6,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Clock;
 import java.time.Instant;
@@ -19,6 +22,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.PreparedStatementCreator;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.transaction.TransactionStatus;
 import org.springframework.transaction.support.TransactionCallback;
@@ -37,7 +41,7 @@ class JdbcCodingJobLifecycleRepositoryTest {
             new JdbcCodingJobLifecycleRepository(
                     jdbc,
                     transactions,
-                    new ObjectMapper(),
+                    new ObjectMapper().findAndRegisterModules(),
                     Clock.fixed(Instant.parse("2026-08-11T11:00:00Z"), ZoneOffset.UTC));
 
     @BeforeEach
@@ -52,7 +56,8 @@ class JdbcCodingJobLifecycleRepositoryTest {
     @SuppressWarnings("unchecked")
     void rejectsAnUnknownProfileVersionBeforeCreatingTheJob() {
         when(jdbc.query(
-                argThat(sql -> sql.contains("FROM app.ai_profile_version")),
+                argThat(sql -> sql.contains("FROM app.ai_profile_version")
+                        && sql.contains("snapshot_json")),
                 any(RowMapper.class),
                 eq(PROFILE_VERSION_ID))).thenReturn(List.of());
 
@@ -80,6 +85,38 @@ class JdbcCodingJobLifecycleRepositoryTest {
                 UUID.randomUUID(), "job.create.profile.draft", new byte[32], request()))
                 .isInstanceOfSatisfying(CodingJobLifecycleException.class,
                         failure -> assertThat(failure.code()).isEqualTo("PROFILE_VERSION_NOT_ACTIVE"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void copiesTheBoundProfileSnapshotAttemptLimitIntoTheCreatedJob() throws Exception {
+        ResultSet resultSet = mock(ResultSet.class);
+        when(resultSet.getString("profile_key")).thenReturn("LLM_OPS");
+        when(resultSet.getString("status")).thenReturn("ACTIVE");
+        when(resultSet.getObject("worker_max_attempts", Integer.class)).thenReturn(7);
+        when(jdbc.query(
+                argThat(sql -> sql.contains("FROM app.ai_profile_version")
+                        && sql.contains("snapshot_json")),
+                any(RowMapper.class),
+                eq(PROFILE_VERSION_ID))).thenAnswer(invocation -> {
+                    RowMapper<Object> mapper = invocation.getArgument(1);
+                    return List.of(mapper.mapRow(resultSet, 0));
+                });
+
+        Connection connection = mock(Connection.class);
+        PreparedStatement statement = mock(PreparedStatement.class);
+        when(connection.prepareStatement(any(String.class))).thenReturn(statement);
+        when(jdbc.update(any(PreparedStatementCreator.class))).thenAnswer(invocation -> {
+            PreparedStatementCreator creator = invocation.getArgument(0);
+            creator.createPreparedStatement(connection);
+            return 1;
+        });
+        when(jdbc.update(any(String.class), any(Object[].class))).thenReturn(1);
+
+        repository.create(
+                UUID.randomUUID(), "job.create.profile.attempts", new byte[32], request());
+
+        verify(statement).setInt(17, 7);
     }
 
     private static CodingJobLifecycleContract.CreateRequest request() {

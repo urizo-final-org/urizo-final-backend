@@ -27,6 +27,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayError
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
@@ -127,9 +128,14 @@ public final class CodingHandlerStageService {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(), initialMessages(request.handlerKey(), aggregate),
-                modelBindings(authority, request, ModelUseCase.CHAT));
+                outcomeResponseFormat(),
+                modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
+        if (!(response.responseFormat()
+                instanceof CodingModelTurnContract.JsonSchemaResponseFormat structured)) {
+            throw contract("The Coding analyze result is not structured output.");
+        }
         ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), response.assistant().content(),
+                structured.structuredOutput(),
                 Set.of("feasible", "infeasible"));
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
                 null, null, null, outcome.payload());
@@ -158,7 +164,9 @@ public final class CodingHandlerStageService {
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             modelResponse = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages, modelBindings);
+                    turn, schemas, messages,
+                    objectMapper.createObjectNode().put("type", "TEXT"),
+                    modelBindings);
             if (modelResponse.toolCalls().isEmpty()) {
                 break;
             }
@@ -285,14 +293,19 @@ public final class CodingHandlerStageService {
             int turn,
             List<JsonNode> schemas,
             List<JsonNode> messages,
+            JsonNode responseFormat,
             List<ProviderModelRegistration> modelBindings) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
         String key = "stage." + hash(
                 resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn);
-        List<String> capabilities = schemas.isEmpty()
-                ? List.of("CHAT") : List.of("CHAT", "TOOL_CALLING");
+        List<String> capabilities = "JSON_SCHEMA".equals(
+                responseFormat.path("type").asText())
+                        ? List.of("CHAT", "STRUCTURED_OUTPUT")
+                        : schemas.isEmpty()
+                                ? List.of("CHAT")
+                                : List.of("CHAT", "TOOL_CALLING");
         CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 turnId,
@@ -307,7 +320,7 @@ public final class CodingHandlerStageService {
                 capabilities,
                 messages,
                 schemas,
-                objectMapper.createObjectNode().put("type", "TEXT"),
+                responseFormat,
                 authority.expiresAt());
         CodingModelTurnPermit permit = modelGuard.reserve(authorization, request);
         if (permit.replay()) {
@@ -335,6 +348,17 @@ public final class CodingHandlerStageService {
             ModelUseCase useCase) {
         return profileModelBindings.resolve(
                 authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
+    }
+
+    private JsonNode outcomeResponseFormat() {
+        ObjectNode schema = objectMapper.createObjectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        properties.putObject("payload").put("type", "object");
+        return ProviderResponseFormat.jsonSchema(schema).requestContract();
     }
 
     private CodingToolContract.ResultContent executeTool(
@@ -610,6 +634,17 @@ public final class CodingHandlerStageService {
             throw contract("The Coding Model stage result is invalid.");
         }
         return outcome;
+    }
+
+    private ModelOutcome parseOutcome(JsonNode value, Set<String> ports) {
+        if (value == null || !value.isObject() || value.size() != 2
+                || !value.path("port").isTextual()
+                || !ports.contains(value.path("port").asText())
+                || !value.path("payload").isObject()) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        return new ModelOutcome(
+                value.path("port").asText(), value.path("payload").deepCopy());
     }
 
     /** Returns null when the text is not the declared stage result object. */

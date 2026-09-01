@@ -47,6 +47,17 @@ public final class CmsRequests {
             @NotBlank @Size(max = 40) String defaultTemplateKey) {
     }
 
+    public record SiteCreateRequest(
+            @NotBlank @Size(max = 40)
+            @Pattern(regexp = "^[A-Za-z0-9_-]+$") String key,
+            @NotBlank @Size(max = 100) String siteName,
+            @NotBlank @Size(max = 180)
+            @Pattern(regexp = "^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")
+            String publicPath,
+            @NotBlank @Size(max = 40) String templateKey,
+            boolean enabled) {
+    }
+
     public record SiteRequest(
             @NotBlank @Size(max = 100) String siteName,
             @NotBlank @Size(max = 180)

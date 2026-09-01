@@ -267,6 +267,9 @@ public final class McpPlatformClient {
                 throw new McpPlatformException("MCP platform catalog contract was rejected.");
             }
         }
+        if (!exposedTools.equals(McpPlatformContract.allowedToolNames())) {
+            throw new McpPlatformException("MCP platform catalog contract was rejected.");
+        }
         return Set.copyOf(exposedTools);
     }
 }

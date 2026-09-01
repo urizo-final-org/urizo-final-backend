@@ -1,7 +1,5 @@
 package org.urizo.axmodulestudio.backend.integration.ai.local;
 
-import java.util.Arrays;
-
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
@@ -22,10 +20,8 @@ public final class CmsProviderCredentialResolver implements ProviderCredentialRe
 
     @Override
     public ProviderCredentialLease resolve(ModelProvider provider) {
-        byte[] plaintext = null;
         try {
-            plaintext = secretService.decryptForProviderCall(provider);
-            return ProviderCredentialLease.fromBytes(provider, plaintext);
+            return secretService.leaseForProviderCall(provider);
         }
         catch (IllegalArgumentException failure) {
             throw new ProviderGatewayException(
@@ -36,11 +32,6 @@ public final class CmsProviderCredentialResolver implements ProviderCredentialRe
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_PROVIDER_UNAVAILABLE,
                     "Provider credential could not be resolved.");
-        }
-        finally {
-            if (plaintext != null) {
-                Arrays.fill(plaintext, (byte) 0);
-            }
         }
     }
 }

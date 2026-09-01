@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.coding.controller;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -21,6 +22,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.urizo.axmodulestudio.backend.auth.security.SecurityConfig;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingWorkerContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingWorkerService;
 
@@ -45,6 +47,48 @@ class CodingWorkerControllerTest {
 
     @MockitoBean
     private CodingWorkerService service;
+
+    @Test
+    void outcomeReceiptsEchoPendingApprovalOnlyWhileWaiting() throws Exception {
+        UUID leaseId = UUID.fromString("99999999-9999-4999-8999-999999999999");
+        CodingWorkerContract.PendingApproval pending =
+                new CodingWorkerContract.PendingApproval(
+                        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        "snapshot_release_approval",
+                        CodingHandlerContract.ApprovalStage.GITHUB,
+                        4,
+                        "GENERAL_ADMIN");
+        CodingWorkerContract.OutcomeRequest request =
+                new CodingWorkerContract.OutcomeRequest(
+                        "1.0",
+                        JOB_ID,
+                        TRACE_ID,
+                        leaseId,
+                        "outcome.snapshot-approval",
+                        7,
+                        "WAITING_APPROVAL",
+                        null,
+                        pending);
+        when(service.outcome("Bearer local-service-test-token", request)).thenReturn(
+                new CodingWorkerContract.OutcomeResponse(
+                        "1.0", JOB_ID, TRACE_ID, 8, "WAITING_APPROVAL", pending));
+
+        mockMvc.perform(post("/internal/coding/worker/jobs/{jobId}/outcomes", JOB_ID)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer local-service-test-token")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsBytes(request)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pendingApproval.approvalId")
+                        .value(pending.approvalId().toString()))
+                .andExpect(jsonPath("$.pendingApproval.nodeId").value(pending.nodeId()))
+                .andExpect(jsonPath("$.pendingApproval.stage").value("GITHUB"))
+                .andExpect(jsonPath("$.pendingApproval.stageRound").value(4))
+                .andExpect(jsonPath("$.pendingApproval.requiredRole").value("GENERAL_ADMIN"));
+
+        assertThat(objectMapper.valueToTree(new CodingWorkerContract.OutcomeResponse(
+                "1.0", JOB_ID, TRACE_ID, 9, "COMPLETED", null))
+                .has("pendingApproval")).isFalse();
+    }
 
     @Test
     void resolvesTheDatabaseAuthoritativeClaimContextWithoutSnapshotContent() throws Exception {

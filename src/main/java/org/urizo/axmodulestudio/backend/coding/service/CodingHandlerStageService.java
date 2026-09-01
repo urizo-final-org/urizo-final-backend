@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -256,6 +257,16 @@ public final class CodingHandlerStageService {
                 || !diffDigest.equals(scan.path("diffDigest").asText())) {
             throw conflict("The Coding diff changed during preview validation.");
         }
+        List<String> denied = deniedChangedPaths(diff, scan);
+        if (!denied.isEmpty()) {
+            // No approval path exists past this point. A fixed Denylist that a person can wave
+            // through is not a Denylist.
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_DENIED",
+                    "The Coding candidate changed files the fixed guardrail forbids: "
+                            + String.join(", ", denied),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         String validationHash = digest(objectMapper.valueToTree(List.of(
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
@@ -267,6 +278,27 @@ public final class CodingHandlerStageService {
         return response(resultId, request.handlerKey(), "ready",
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
                 code.candidateSha(), diffDigest, validationHash, payload);
+    }
+
+    /**
+     * The guardrail verdict, taken from what Git reports rather than from what the model says it
+     * changed. A model that does not know how far it reached and a model that is describing its
+     * work falsely both fail here, so its intent never has to be judged.
+     *
+     * <p>{@code read_diff} and {@code scan_changed_files} each list the changed files. Both are
+     * read so that a disagreement between the two cannot become a gap, even though the digest
+     * check above already requires them to describe the same diff.
+     */
+    static List<String> deniedChangedPaths(JsonNode... toolResults) {
+        Set<String> changedPaths = new LinkedHashSet<>();
+        for (JsonNode toolResult : toolResults) {
+            for (JsonNode path : toolResult.path("changedPaths")) {
+                if (path.isTextual()) {
+                    changedPaths.add(path.textValue());
+                }
+            }
+        }
+        return GuardrailPathPolicy.deniedPaths(List.copyOf(changedPaths));
     }
 
     private CodingHandlerContract.StageExecutionResponse sideEffect(

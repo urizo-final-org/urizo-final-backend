@@ -20,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -342,5 +343,72 @@ class CodingHandlerStageServiceTest {
                 .contains("[tool]")
                 .contains(DIFF_DIGEST);
         verify(guard, times(2)).complete(any(), any());
+    }
+
+    private static JsonNode changedPaths(String... paths) {
+        ObjectNode result = new ObjectMapper().createObjectNode();
+        ArrayNode changed = result.putArray("changedPaths");
+        for (String path : paths) {
+            changed.add(path);
+        }
+        return result;
+    }
+
+    @Test
+    void allowedProductWorkPassesThePostCheck() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/service/BoardService.java",
+                "src/features/cms/MemberListPage.tsx");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).isEmpty();
+    }
+
+    @Test
+    void aChangedFileInsideTheFixedDenylistIsReported() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/service/BoardService.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).containsExactly(
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+    }
+
+    /**
+     * Guide check 6-8. The model plans member work, edits a login file, and reports only the
+     * member file. The verdict comes from the tool results, so the report changes nothing.
+     */
+    @Test
+    void aTruthfulLookingReportDoesNotSaveADeniedChange() {
+        JsonNode honestLookingDiff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/controller/MemberController.java");
+        JsonNode whatGitActuallySaw = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/controller/MemberController.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(
+                honestLookingDiff, whatGitActuallySaw)).containsExactly(
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+    }
+
+    @Test
+    void aMigrationEditIsReportedEvenWhenItIsTheOnlyChange() {
+        JsonNode diff = changedPaths("src/main/resources/db/migration/V20260901__add_column.sql");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void theSamePathListedByBothToolsIsReportedOnce() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/coding/service/CodingToolService.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void aToolResultWithoutAChangedPathListIsTreatedAsEmpty() {
+        JsonNode empty = new ObjectMapper().createObjectNode();
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(empty, empty)).isEmpty();
     }
 }

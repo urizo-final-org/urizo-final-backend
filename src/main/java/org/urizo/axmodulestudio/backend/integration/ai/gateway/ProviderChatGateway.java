@@ -61,7 +61,13 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
             }
             completedAttempts++;
             try {
-                return adapter.chat(registration, request);
+                ProviderChatResponse response = adapter.chat(registration, request);
+                if (!response.finishReason().completed()) {
+                    throw new ProviderGatewayException(
+                            ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                            "Model provider returned an incomplete response.");
+                }
+                return response;
             }
             catch (ProviderGatewayException failure) {
                 throw failure;

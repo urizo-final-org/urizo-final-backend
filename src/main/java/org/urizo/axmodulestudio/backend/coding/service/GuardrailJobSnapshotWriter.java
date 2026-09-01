@@ -51,10 +51,37 @@ public class GuardrailJobSnapshotWriter {
         ObjectNode snapshot = objectMapper.createObjectNode();
         ArrayNode allowedPaths = snapshot.putArray("allowedPaths");
         allowed.forEach(allowedPaths::add);
+        snapshot.set("rules", rules());
         // The job request is replayable, so a repeated initialize must not rewrite the copy.
         jdbc.update("INSERT INTO app.guardrail_job_snapshot (job_id, snapshot_json) "
                         + "VALUES (?, ?::jsonb) ON CONFLICT (job_id) DO NOTHING",
                 jobId, snapshot.toString());
         return List.copyOf(allowed);
+    }
+
+    /**
+     * The path-independent rules, copied for the same reason the paths are.
+     *
+     * <p>Read through the Job lifecycle connection so that the whole copy is written in one
+     * transaction with the job. Reading the rules on a second connection would leave a window in
+     * which the paths came from before an administrator's edit and the rules from after it.
+     */
+    private ObjectNode rules() {
+        List<ObjectNode> stored = jdbc.query(
+                "SELECT allow_new_dependency, max_changed_files, max_changed_lines "
+                        + "FROM app.guardrail_rule",
+                (row, index) -> {
+                    ObjectNode node = objectMapper.createObjectNode();
+                    node.put("allowNewDependency", row.getBoolean("allow_new_dependency"));
+                    // Written as null rather than omitted, so a reader cannot mistake an unset
+                    // limit for a snapshot that was taken before limits existed.
+                    node.put("maxChangedFiles", (Integer) row.getObject("max_changed_files"));
+                    node.put("maxChangedLines", (Integer) row.getObject("max_changed_lines"));
+                    return node;
+                });
+        if (stored.isEmpty()) {
+            throw new IllegalStateException("The guardrail rule row is missing.");
+        }
+        return stored.get(0);
     }
 }

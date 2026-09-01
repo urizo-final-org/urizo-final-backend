@@ -61,3 +61,38 @@ CREATE TABLE app.guardrail_job_snapshot (
 -- reads it, because the worker judges against the copy and must never be able to change it.
 GRANT INSERT, SELECT ON app.guardrail_job_snapshot TO dev_operator;
 GRANT SELECT ON app.guardrail_job_snapshot TO ai_workspace;
+
+-- The guardrail rules that have nothing to do with paths: whether the model may add a library,
+-- and how large a change it may produce.
+--
+-- These cannot be decided before the model runs. A request that sounds small can still produce a
+-- thousand lines, so the only honest place to judge them is the finished candidate.
+--
+-- One row, always. The primary key is a constant, so a second row cannot be inserted, and neither
+-- INSERT nor DELETE is granted to anybody, so the row can be edited but never removed or
+-- duplicated. A settings table that can end up empty turns "no rule" and "table broken" into the
+-- same state.
+--
+-- A limit left NULL means no limit. Refusing everything until somebody fills the screen in would
+-- stop ordinary work the moment the setting was forgotten, and the paths that actually matter are
+-- closed by the fixed Denylist either way. This matches how an empty path selection is treated.
+CREATE TABLE app.guardrail_rule (
+    guardrail_rule_id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    allow_new_dependency BOOLEAN NOT NULL DEFAULT FALSE,
+    max_changed_files INTEGER,
+    max_changed_lines INTEGER,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_guardrail_rule_single_row CHECK (guardrail_rule_id),
+    CONSTRAINT ck_guardrail_rule_max_changed_files CHECK (
+        max_changed_files IS NULL OR max_changed_files > 0),
+    CONSTRAINT ck_guardrail_rule_max_changed_lines CHECK (
+        max_changed_lines IS NULL OR max_changed_lines > 0)
+);
+
+-- The row exists from the start, so reading the rules never has to handle an absent one.
+INSERT INTO app.guardrail_rule (guardrail_rule_id) VALUES (TRUE);
+
+-- ai_workspace serves the administrator screen and may change the values. dev_operator only reads,
+-- because the Job lifecycle connection copies the rules into the job snapshot and never edits them.
+GRANT SELECT, UPDATE ON app.guardrail_rule TO ai_workspace;
+GRANT SELECT ON app.guardrail_rule TO dev_operator;

@@ -28,6 +28,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
+import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
@@ -90,7 +91,8 @@ class CodingHandlerStageServiceTest {
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), anyBindings,
-                mock(GuardrailPathSelectionService.class), mapper, clock);
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -260,7 +262,8 @@ class CodingHandlerStageServiceTest {
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), profileModelBindings,
-                mock(GuardrailPathSelectionService.class), mapper, clock);
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -370,7 +373,8 @@ class CodingHandlerStageServiceTest {
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), profileModelBindings,
-                mock(GuardrailPathSelectionService.class), mapper, clock);
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -615,5 +619,140 @@ class CodingHandlerStageServiceTest {
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
                 List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+    }
+
+    private static JsonNode diffBody(String body, String... paths) {
+        ObjectNode result = (ObjectNode) changedPaths(paths);
+        result.put("diff", body);
+        return result;
+    }
+
+    /** Two added lines and one removed line, with the file headers a real diff carries. */
+    private static final String THREE_CHANGED_LINES = String.join("\n",
+            "diff --git a/A.java b/A.java",
+            "--- a/A.java",
+            "+++ b/A.java",
+            "@@ -1,2 +1,3 @@",
+            " unchanged",
+            "-removed",
+            "+added",
+            "+added too");
+
+    private static final GuardrailRuleContract.Rules DEFAULT_RULES =
+            GuardrailRuleContract.Rules.unrestrictedSize();
+
+    @Test
+    void aJobWithNoCopiedRulesIsJudgedByNone() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, "pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(null, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void addingALibraryIsRefusedWhileTheRuleIsOff() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java", "pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff))
+                .singleElement().asString().contains("pom.xml");
+    }
+
+    @Test
+    void addingALibraryPassesOnceTheRuleIsOn() {
+        JsonNode diff = changedPaths("pom.xml");
+        GuardrailRuleContract.Rules allowed =
+                new GuardrailRuleContract.Rules(true, null, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(allowed, diff, diff)).isEmpty();
+    }
+
+    /** Moving the manifest must not turn a refusal into a pass. */
+    @Test
+    void aManifestIsRecognisedAtAnyDepth() {
+        JsonNode diff = changedPaths("modules/report/pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).hasSize(1);
+    }
+
+    /** A lock file brings the dependency in just as the manifest naming it does. */
+    @Test
+    void aLockFileCountsAsAddingALibrary() {
+        JsonNode diff = changedPaths("package-lock.json");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void ordinaryProductWorkBreaksNoRule() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES,
+                CMS_BACKEND + "/service/BoardService.java");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void anUnsetLimitRefusesNothingHowLargeTheChange() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES,
+                CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java", CMS_BACKEND + "/C.java");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void tooManyChangedFilesIsRefused() {
+        JsonNode diff = changedPaths(
+                CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java", CMS_BACKEND + "/C.java");
+        GuardrailRuleContract.Rules twoFiles =
+                new GuardrailRuleContract.Rules(false, 2, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoFiles, diff, diff))
+                .singleElement().asString().contains("3 files");
+    }
+
+    @Test
+    void exactlyTheFileLimitPasses() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java");
+        GuardrailRuleContract.Rules twoFiles =
+                new GuardrailRuleContract.Rules(false, 2, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoFiles, diff, diff)).isEmpty();
+    }
+
+    /** Only the body counts: the +++ and --- headers are not changed lines. */
+    @Test
+    void diffHeadersAreNotCountedAsChangedLines() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules threeLines =
+                new GuardrailRuleContract.Rules(false, null, 3);
+
+        assertThat(CodingHandlerStageService.brokenRules(threeLines, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void tooManyChangedLinesIsRefused() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules twoLines =
+                new GuardrailRuleContract.Rules(false, null, 2);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoLines, diff, diff))
+                .singleElement().asString().contains("3 lines");
+    }
+
+    /** Both tools describe the same diff, so the body must not be counted twice. */
+    @Test
+    void theSameDiffSeenByBothToolsIsCountedOnce() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules threeLines =
+                new GuardrailRuleContract.Rules(false, null, 3);
+
+        assertThat(CodingHandlerStageService.brokenRules(threeLines, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void everyBrokenRuleIsReportedTogether() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, "pom.xml", CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules strict =
+                new GuardrailRuleContract.Rules(false, 1, 2);
+
+        assertThat(CodingHandlerStageService.brokenRules(strict, diff, diff)).hasSize(3);
     }
 }

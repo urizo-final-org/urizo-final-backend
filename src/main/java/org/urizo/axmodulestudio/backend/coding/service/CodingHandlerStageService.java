@@ -23,6 +23,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
+import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
@@ -58,6 +59,14 @@ public final class CodingHandlerStageService {
             + "numbers, context lines copied verbatim, and no added trailing whitespace.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+    /**
+     * The files that declare a dependency. Lock files are included: a library arrives through
+     * one just as surely as through the manifest that names it.
+     */
+    private static final Set<String> DEPENDENCY_MANIFESTS = Set.of(
+            "pom.xml", "package.json", "package-lock.json",
+            "pnpm-lock.yaml", "yarn.lock");
+
     private static final Set<String> REVIEW_TOOLS = Set.of(
             "read_file", "search_code", "read_diff", "run_check",
             "check_package_allowlist", "scan_changed_files");
@@ -68,6 +77,7 @@ public final class CodingHandlerStageService {
     private final CodingModelTurnService models;
     private final ProfileModelBindingService profileModelBindings;
     private final GuardrailPathSelectionService guardrailSelections;
+    private final GuardrailRuleService guardrailRules;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
@@ -83,6 +93,7 @@ public final class CodingHandlerStageService {
             CodingRunnerService runner,
             ProfileModelBindingService profileModelBindings,
             GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
@@ -94,6 +105,8 @@ public final class CodingHandlerStageService {
                 profileModelBindings, "profileModelBindings are required");
         this.guardrailSelections = Objects.requireNonNull(
                 guardrailSelections, "guardrailSelections are required");
+        this.guardrailRules = Objects.requireNonNull(
+                guardrailRules, "guardrailRules are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -322,6 +335,19 @@ public final class CodingHandlerStageService {
                             + String.join(", ", outside),
                     HttpStatus.UNPROCESSABLE_ENTITY);
         }
+        // The third layer: the rules that name no path at all. They cannot be judged before the
+        // model runs, because a request that sounds small can still produce a thousand lines.
+        // Build and test success are not repeated here; the deterministic checks above already
+        // require them.
+        List<String> broken = brokenRules(
+                guardrailRules.jobRules(jobId).orElse(null), diff, scan);
+        if (!broken.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_RULE_DENIED",
+                    "The Coding candidate breaks the guardrail rules: "
+                            + String.join("; ", broken),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         String validationHash = digest(objectMapper.valueToTree(List.of(
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
@@ -392,6 +418,91 @@ public final class CodingHandlerStageService {
                 .filter(path -> folders.stream().noneMatch(
                         folder -> path.equals(folder) || path.startsWith(folder + "/")))
                 .toList();
+    }
+
+    /**
+     * The guardrail rules that the finished candidate breaks, described for the person reading the
+     * failure rather than as codes.
+     *
+     * <p>{@code rules} is null when the job carries no copy, which happens only for a job created
+     * before the rules existed. Such a job never ran under them, so none are applied - the same
+     * choice the path layer makes for an empty selection.
+     *
+     * <p>Every rule is judged from what Git reports. The model's own account of its work is not an
+     * input here for the same reason it is not one in the path layers.
+     */
+    static List<String> brokenRules(
+            GuardrailRuleContract.Rules rules, JsonNode... toolResults) {
+        if (rules == null) {
+            return List.of();
+        }
+        List<String> broken = new ArrayList<>();
+        List<String> changed = changedPaths(toolResults);
+        if (!rules.allowNewDependency()) {
+            List<String> manifests = changed.stream()
+                    .filter(CodingHandlerStageService::isDependencyManifest)
+                    .toList();
+            if (!manifests.isEmpty()) {
+                broken.add("adding a library is not allowed: " + String.join(", ", manifests));
+            }
+        }
+        if (rules.maxChangedFiles() != null && changed.size() > rules.maxChangedFiles()) {
+            broken.add("changed " + changed.size() + " files, limit is "
+                    + rules.maxChangedFiles());
+        }
+        if (rules.maxChangedLines() != null) {
+            int lines = changedLines(toolResults);
+            if (lines > rules.maxChangedLines()) {
+                broken.add("changed " + lines + " lines, limit is " + rules.maxChangedLines());
+            }
+        }
+        return List.copyOf(broken);
+    }
+
+    /**
+     * Whether a path is a file that declares the project's dependencies.
+     *
+     * <p>Matched on the file name at any depth, so moving the file does not evade the rule. Lock
+     * files count: a dependency arrives through them just as surely as through the manifest that
+     * names it.
+     *
+     * <p>The frontend manifest and lock file are already in the fixed Denylist, so allowing new
+     * libraries opens the Backend {@code pom.xml} only. That is deliberate - a rule an
+     * administrator can switch on must not be able to reopen a fixed one.
+     */
+    private static boolean isDependencyManifest(String path) {
+        String normalized = path.replace('\\', '/');
+        String name = normalized.substring(normalized.lastIndexOf('/') + 1);
+        return DEPENDENCY_MANIFESTS.contains(name);
+    }
+
+    /**
+     * How many lines the diff adds or removes.
+     *
+     * <p>Counted from the unified diff body, so a header line - {@code +++ b/...} or
+     * {@code --- a/...} - is not counted as a change. The tool refuses a diff larger than its cap
+     * outright, so the body being counted is never a truncated one.
+     */
+    private static int changedLines(JsonNode... toolResults) {
+        int lines = 0;
+        for (JsonNode toolResult : toolResults) {
+            JsonNode diff = toolResult.path("diff");
+            if (!diff.isTextual()) {
+                continue;
+            }
+            for (String line : diff.textValue().split("\n", -1)) {
+                if (line.startsWith("+++") || line.startsWith("---")) {
+                    continue;
+                }
+                if (line.startsWith("+") || line.startsWith("-")) {
+                    lines++;
+                }
+            }
+            // Only one tool returns the diff body, and counting a second copy of the same diff
+            // would double every number.
+            break;
+        }
+        return lines;
     }
 
     private static List<String> changedPaths(JsonNode... toolResults) {

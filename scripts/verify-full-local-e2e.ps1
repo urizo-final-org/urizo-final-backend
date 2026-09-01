@@ -686,8 +686,8 @@ try {
     Assert-ContractValue -Actual $invalidProfileError.error.retryable -Expected $false `
         -Name 'admin Profile unregistered Handler fail-closed retryability'
 
-    $profileVersions = @(Invoke-AxmsJson -Method GET `
-            -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS')
+    $profileVersions = Invoke-AxmsJson -Method GET `
+        -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS'
     $activeProfileVersions = @($profileVersions | Where-Object { $_.status -eq 'ACTIVE' })
     if ($activeProfileVersions.Count -ne 1 -or
             [string]$activeProfileVersions[0].profileVersionId -ne $profileVersionId) {
@@ -698,8 +698,8 @@ try {
         'contracts\fixtures\orchestration\llm-ops-coding-handler.snapshot.valid.json'
     $codingProfile = Publish-AdminProfileFixture -FixturePath $codingProfileFixturePath
     $codingProfileVersionId = [string]$codingProfile.profileVersionId
-    $profileVersions = @(Invoke-AxmsJson -Method GET `
-            -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS')
+    $profileVersions = Invoke-AxmsJson -Method GET `
+        -Path '/api/admin/ai/profile-versions?profileKey=LLM_OPS'
     $activeProfileVersions = @($profileVersions | Where-Object { $_.status -eq 'ACTIVE' })
     if ($activeProfileVersions.Count -ne 1 -or
             [string]$activeProfileVersions[0].profileVersionId -ne $codingProfileVersionId) {

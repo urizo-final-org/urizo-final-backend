@@ -301,6 +301,42 @@ function Get-AiWorktreePath {
     return $path
 }
 
+function Get-ScanFolders {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    # Folder depth per repository. Shallower and the choice is useless, deeper and
+    # the screen turns into a file browser. This yields roughly 7 frontend and
+    # 8 backend entries.
+    $specs = switch ($Repository) {
+        'frontend' { @('src/features/*', 'src/app', 'src/shared/*', 'src/styles') }
+        'backend' { @('src/main/java/org/urizo/axmodulestudio/backend/*') }
+        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $Repository" }
+    }
+
+    # The fixed Denylist is not applied here. The Backend holds the single copy of
+    # that list and filters this raw result, so the two cannot drift apart.
+    $folders = [System.Collections.Generic.List[string]]::new()
+    foreach ($spec in $specs) {
+        $relative = $spec -replace '/\*$', ''
+        $absolute = Join-Path $Root ($relative -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $absolute -PathType Container)) {
+            continue
+        }
+        if ($spec.EndsWith('/*')) {
+            foreach ($child in (Get-ChildItem -LiteralPath $absolute -Directory | Sort-Object Name)) {
+                $folders.Add("$relative/$($child.Name)")
+            }
+        }
+        else {
+            $folders.Add($relative)
+        }
+    }
+    return $folders.ToArray()
+}
+
 function Invoke-PrepareScanWorktree {
     param($Payload)
 
@@ -334,7 +370,11 @@ function Invoke-PrepareScanWorktree {
             if ($LASTEXITCODE -eq 0 -and $dirty) {
                 # Nothing should ever edit this folder. If something did, keep it
                 # and let a person look rather than overwriting the evidence.
-                return @{ repo = $repository; scanPath = $target; sha = 'unchanged'; note = '로컬 변경이 있어 갱신하지 않았습니다.' }
+                return @{
+                    repo = $repository; scanPath = $target; sha = 'unchanged'
+                    note = '로컬 변경이 있어 갱신하지 않았습니다.'
+                    folders = (Get-ScanFolders -Repository $repository -Root $target)
+                }
             }
             $current = "$(& git -C $target rev-parse HEAD 2>&1)".Trim()
             if ($current -ne $baseSha) {
@@ -343,7 +383,10 @@ function Invoke-PrepareScanWorktree {
                     throw "RUNNER_SCAN_FAILED|스캔 폴더 갱신 실패: $(($moved | Select-Object -Last 2) -join ' ')"
                 }
             }
-            return @{ repo = $repository; scanPath = $target; sha = $baseSha; reused = $true }
+            return @{
+                repo = $repository; scanPath = $target; sha = $baseSha; reused = $true
+                folders = (Get-ScanFolders -Repository $repository -Root $target)
+            }
         }
 
         $created = & git -C $source worktree add --detach $target $baseSha 2>&1
@@ -354,7 +397,10 @@ function Invoke-PrepareScanWorktree {
     finally {
         $ErrorActionPreference = $previous
     }
-    return @{ repo = $repository; scanPath = $target; sha = $baseSha; reused = $false }
+    return @{
+        repo = $repository; scanPath = $target; sha = $baseSha; reused = $false
+        folders = (Get-ScanFolders -Repository $repository -Root $target)
+    }
 }
 
 function Get-PreviewArguments {

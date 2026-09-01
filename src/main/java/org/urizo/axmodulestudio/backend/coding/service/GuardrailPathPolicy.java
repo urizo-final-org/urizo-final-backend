@@ -80,6 +80,21 @@ final class GuardrailPathPolicy {
     }
 
     /**
+     * Keeps only the folders the guardrail screen may offer, in the order scanned.
+     *
+     * <p>A denied folder is dropped rather than shown disabled, so no screen can present it as a
+     * choice and no stored selection can name it. A trailing {@code /**} spans zero segments too,
+     * so a folder is judged by the same list as the files inside it.
+     *
+     * <p>A folder that merely contains a denied folder stays visible: {@code .../integration} is
+     * offered even though {@code .../integration/ai} can never be written, because the fixed list
+     * is checked again against the files actually changed.
+     */
+    static List<String> visibleFolders(List<String> scannedFolders) {
+        return scannedFolders.stream().filter(folder -> !isDenied(folder)).toList();
+    }
+
+    /**
      * Strips a leading {@code ./} and collapses backslashes, so a Windows-shaped path cannot slip
      * past a pattern that the same path in Git form would match.
      */

@@ -133,4 +133,65 @@ class GuardrailPathPolicyTest {
         assertThat(GuardrailPathPolicy.isDenied("")).isFalse();
         assertThat(GuardrailPathPolicy.isDenied("   ")).isFalse();
     }
+
+    @Test
+    @DisplayName("The Backend scan the runner produces loses exactly the four closed packages")
+    void hidesDeniedFoldersFromTheBackendScan() {
+        String base = "src/main/java/org/urizo/axmodulestudio/backend/";
+        List<String> scanned = List.of(
+                base + "auth", base + "cms", base + "coding", base + "core",
+                base + "health", base + "integration", base + "knowledge", base + "orchestration");
+
+        assertThat(GuardrailPathPolicy.visibleFolders(scanned)).containsExactly(
+                base + "cms", base + "core", base + "health", base + "integration");
+    }
+
+    @Test
+    @DisplayName("The Frontend scan the runner produces loses exactly the four closed features")
+    void hidesDeniedFoldersFromTheFrontendScan() {
+        List<String> scanned = List.of(
+                "src/features/auth", "src/features/cms", "src/features/coding",
+                "src/features/knowledge", "src/features/ops", "src/features/orchestration",
+                "src/features/site", "src/app", "src/shared/api", "src/shared/ui", "src/styles");
+
+        assertThat(GuardrailPathPolicy.visibleFolders(scanned)).containsExactly(
+                "src/features/cms", "src/features/ops", "src/features/site",
+                "src/app", "src/shared/api", "src/shared/ui", "src/styles");
+    }
+
+    @Test
+    @DisplayName("A trailing /** spans zero segments, so the bare folder is denied as well")
+    void deniesTheFolderItselfNotOnlyItsFiles() {
+        String auth = "src/main/java/org/urizo/axmodulestudio/backend/auth";
+
+        assertThat(GuardrailPathPolicy.isDenied(auth)).isTrue();
+        assertThat(GuardrailPathPolicy.isDenied(auth + "/security/SecurityConfig.java")).isTrue();
+    }
+
+    @Test
+    @DisplayName("A folder that merely contains a denied folder stays offered")
+    void keepsParentsOfDeniedFolders() {
+        String integration = "src/main/java/org/urizo/axmodulestudio/backend/integration";
+
+        assertThat(GuardrailPathPolicy.isDenied(integration)).isFalse();
+        assertThat(GuardrailPathPolicy.isDenied(integration + "/ai")).isTrue();
+        assertThat(GuardrailPathPolicy.isDenied(integration + "/ai/gateway/Adapter.java")).isTrue();
+    }
+
+    @Test
+    @DisplayName("A folder below a denied folder is denied too")
+    void deniesFoldersBelowADeniedFolder() {
+        assertThat(GuardrailPathPolicy.isDenied(
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security")).isTrue();
+        assertThat(GuardrailPathPolicy.isDenied("src/main/resources/db/migration")).isTrue();
+        assertThat(GuardrailPathPolicy.isDenied("src/main/docker/nginx")).isTrue();
+    }
+
+    @Test
+    @DisplayName("A scan with nothing denied is returned unchanged")
+    void keepsACleanScanIntact() {
+        List<String> scanned = List.of("src/features/cms", "src/app", "src/styles");
+
+        assertThat(GuardrailPathPolicy.visibleFolders(scanned)).isEqualTo(scanned);
+    }
 }

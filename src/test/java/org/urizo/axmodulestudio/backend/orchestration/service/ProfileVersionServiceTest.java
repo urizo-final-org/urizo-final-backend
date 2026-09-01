@@ -118,6 +118,76 @@ class ProfileVersionServiceTest {
     }
 
     @Test
+    void rejectsCommonApprovalBeforeDraftOrActivationMutation() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        ObjectNode approval = findNode(authoring, "scope_approval");
+        approval.put("handlerKey", "common.approval");
+        approval.withObject("config").removeAll();
+
+        assertThatThrownBy(() -> service.createDraft("LLM_OPS", authoring))
+                .isInstanceOfSatisfying(ProfileVersionException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).createDraft(
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+
+        ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion(
+                PROFILE_VERSION_ID,
+                "LLM_OPS",
+                2,
+                "DRAFT",
+                fullSnapshot(PROFILE_VERSION_ID, 2, authoring));
+        when(repository.findAdminById(PROFILE_VERSION_ID)).thenReturn(Optional.of(draft));
+
+        assertThatThrownBy(() -> service.activate(PROFILE_VERSION_ID))
+                .isInstanceOfSatisfying(ProfileVersionException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).activate(PROFILE_VERSION_ID);
+    }
+
+    @Test
+    void rejectsPythonIncompatibleFeatureConfigBeforeActivationMutation() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        findNode(authoring, "analyze").withObject("config").put("unexpected", true);
+        ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion(
+                PROFILE_VERSION_ID,
+                "LLM_OPS",
+                2,
+                "DRAFT",
+                fullSnapshot(PROFILE_VERSION_ID, 2, authoring));
+        when(repository.findAdminById(PROFILE_VERSION_ID)).thenReturn(Optional.of(draft));
+
+        assertThatThrownBy(() -> service.activate(PROFILE_VERSION_ID))
+                .isInstanceOfSatisfying(ProfileVersionException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).activate(PROFILE_VERSION_ID);
+    }
+
+    @Test
+    void rejectsUnregisteredModelBindingBeforeActivationMutation() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        authoring.withObject("modelBindings").withObject("analyze")
+                .put("primary", "unregistered-binding");
+        ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion(
+                PROFILE_VERSION_ID,
+                "LLM_OPS",
+                2,
+                "DRAFT",
+                fullSnapshot(PROFILE_VERSION_ID, 2, authoring));
+        when(repository.findAdminById(PROFILE_VERSION_ID)).thenReturn(Optional.of(draft));
+
+        assertThatThrownBy(() -> service.activate(PROFILE_VERSION_ID))
+                .isInstanceOfSatisfying(ProfileVersionException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).activate(PROFILE_VERSION_ID);
+    }
+
+    @Test
     void activatesOnlyValidatedDraftsAndKeepsInactiveVersionsTerminal() throws Exception {
         JsonNode authoring = authoringSnapshot();
         ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion(
@@ -182,5 +252,14 @@ class ProfileVersionServiceTest {
             snapshot.set(field, authoring.path(field).deepCopy());
         }
         return snapshot;
+    }
+
+    private static ObjectNode findNode(ObjectNode snapshot, String id) {
+        for (JsonNode node : snapshot.withArray("nodes")) {
+            if (id.equals(node.path("id").asText())) {
+                return (ObjectNode) node;
+            }
+        }
+        throw new AssertionError("missing node " + id);
     }
 }

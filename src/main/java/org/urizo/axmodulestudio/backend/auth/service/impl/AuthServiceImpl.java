@@ -104,13 +104,27 @@ public class AuthServiceImpl implements AuthService {
             if (!authenticatedAccountId.equals(identity.accountId())) {
                 return;
             }
-            sessions.findByJwtIdForUpdate(identity.jwtId()).ifPresent(session -> {
-                String digest = passwordHasher.digestToken(refreshToken);
-                if (session.getAccountId().equals(identity.accountId())
-                        && constantTimeEquals(session.getTokenDigest(), digest)) {
-                    session.revoke(Instant.now(clock));
+            // Serialize logout with refresh. Whichever locks the account first wins, and logout
+            // can then revoke the active descendant even when the browser still presents an
+            // already-rotated ancestor cookie.
+            lockedActiveAccount(identity.accountId());
+            AdminSessionEntity session = sessions.findByJwtIdForUpdate(identity.jwtId())
+                    .orElse(null);
+            String digest = passwordHasher.digestToken(refreshToken);
+            if (session == null
+                    || !session.getAccountId().equals(identity.accountId())
+                    || !constantTimeEquals(session.getTokenDigest(), digest)) {
+                return;
+            }
+            UUID replacementJwtId = session.getReplacedByJwtId();
+            while (replacementJwtId != null) {
+                session = sessions.findByJwtIdForUpdate(replacementJwtId).orElse(null);
+                if (session == null || !session.getAccountId().equals(identity.accountId())) {
+                    return;
                 }
-            });
+                replacementJwtId = session.getReplacedByJwtId();
+            }
+            session.revoke(Instant.now(clock));
         }
         catch (AuthenticationFailedException ex) {
             // Logout is idempotent and always allows the browser to clear its cookie.

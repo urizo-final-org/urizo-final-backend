@@ -4,7 +4,6 @@ import io.micrometer.observation.ObservationRegistry;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
-import org.springframework.ai.openai.api.ResponseFormat;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.stereotype.Component;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
@@ -19,21 +18,15 @@ final class OpenAiProductChatModelFactory implements ProductChatModelFactory {
 
     @Override
     public ProductChatModelSession open(
-            String credential, String modelId, int maxOutputTokens,
-            boolean jsonObjectResponse) {
+            String credential, String modelId, int maxOutputTokens) {
         OpenAiApi api = OpenAiApi.builder()
                 .apiKey(credential)
                 .build();
-        OpenAiChatOptions.Builder builder = OpenAiChatOptions.builder()
+        OpenAiChatOptions options = OpenAiChatOptions.builder()
                 .model(modelId)
                 .maxCompletionTokens(maxOutputTokens)
-                .internalToolExecutionEnabled(false);
-        if (jsonObjectResponse) {
-            // JSON_OBJECT rather than JSON_SCHEMA: the stage contracts differ per
-            // handler, and the caller still validates the object it gets back.
-            builder.responseFormat(new ResponseFormat(ResponseFormat.Type.JSON_OBJECT, null));
-        }
-        OpenAiChatOptions options = builder.build();
+                .internalToolExecutionEnabled(false)
+                .build();
         OpenAiChatModel model = OpenAiChatModel.builder()
                 .openAiApi(api)
                 .defaultOptions(options)

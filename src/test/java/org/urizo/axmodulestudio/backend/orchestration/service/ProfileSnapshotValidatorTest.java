@@ -100,16 +100,27 @@ class ProfileSnapshotValidatorTest {
     }
 
     @Test
-    void rejectsAttemptCountsTheCurrentDatabaseContractCannotPersist() throws Exception {
-        ObjectNode authoring = (ObjectNode) authoringSnapshot();
-        authoring.withObject("config").put("maxAttempts", 2);
+    void acceptsAttemptCountsTheWorkerStoreCanPersist() throws Exception {
+        for (int maxAttempts : List.of(1, 2, 20)) {
+            ObjectNode authoring = (ObjectNode) authoringSnapshot();
+            authoring.withObject("config").put("maxAttempts", maxAttempts);
 
-        assertThatThrownBy(() -> ProfileSnapshotValidator.validateAuthoring(
-                "LLM_OPS", authoring))
-                .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
-                    assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED");
-                    assertThat(failure.getMessage()).contains("maxAttempts must be 3");
-                });
+            assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring(
+                    "LLM_OPS", authoring))
+                    .as("maxAttempts=%s", maxAttempts)
+                    .doesNotThrowAnyException();
+        }
+    }
+
+    @Test
+    void rejectsAttemptCountsTheWorkerStoreCannotPersist() throws Exception {
+        for (int maxAttempts : List.of(0, 21)) {
+            ObjectNode authoring = (ObjectNode) authoringSnapshot();
+            authoring.withObject("config").put("maxAttempts", maxAttempts);
+
+            assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring(
+                    "LLM_OPS", authoring));
+        }
     }
 
     @Test

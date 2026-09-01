@@ -97,6 +97,10 @@ public class AdminSessionEntity {
         return status;
     }
 
+    public UUID getReplacedByJwtId() {
+        return replacedByJwtId;
+    }
+
     public boolean isUsableAt(Instant now) {
         return status == RefreshTokenStatus.ACTIVE && now.isBefore(expiresAt);
     }

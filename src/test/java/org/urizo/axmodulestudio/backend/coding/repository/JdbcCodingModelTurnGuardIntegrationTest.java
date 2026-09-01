@@ -97,12 +97,7 @@ class JdbcCodingModelTurnGuardIntegrationTest {
                         assertThat(failure.code()).isEqualTo("IDEMPOTENCY_IN_PROGRESS");
                         assertThat(failure.retryable()).isTrue();
                     });
-            // A diagnostic must not reach response_json: ck_coding_model_turn_completion
-            // ties that column to COMPLETED, and an update that breaks it leaves the turn
-            // stranded IN_PROGRESS with the failure unrecorded.
-            guard.fail(activePermit, "MODEL_CAPABILITY_UNSUPPORTED", false,
-                    new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode()
-                            .put("reason", "TOP_LEVEL_SHAPE"));
+            guard.fail(activePermit, "MODEL_CAPABILITY_UNSUPPORTED", false);
             assertThatThrownBy(() -> guard.reserve(authorization, active))
                     .isInstanceOfSatisfying(CodingModelTurnAccessException.class,
                             failure -> assertThat(failure.code()).isEqualTo("MODEL_CAPABILITY_UNSUPPORTED"));

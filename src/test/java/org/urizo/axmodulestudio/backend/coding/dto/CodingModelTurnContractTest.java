@@ -27,6 +27,15 @@ class CodingModelTurnContractTest {
     }
 
     @Test
+    void readsTheAuthoritativeStructuredResponseWithoutCollapsingItToText() {
+        assertThatCode(() -> objectMapper.readValue(
+                Files.readAllBytes(FIXTURES.resolve(
+                        "model-turn.structured.response.valid.json")),
+                CodingModelTurnContract.Response.class))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void rejectsTheAuthoritativeUnknownFieldAndVersionFixtures() {
         assertThatThrownBy(() -> read("model-turn.unknown-field.invalid.json"))
                 .hasMessageNotContaining("OPENAI");

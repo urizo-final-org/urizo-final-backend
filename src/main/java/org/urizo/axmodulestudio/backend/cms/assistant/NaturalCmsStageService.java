@@ -93,11 +93,22 @@ public final class NaturalCmsStageService {
         Set<String> allowedTools = store.runtimePolicy(
                 authorization, job.profileVersionId()).allowedTools();
 
+        if ("cms.apply".equals(request.handlerKey())) {
+            JsonNode approvedCommand = revalidateApply(job, allowedTools);
+            NaturalCmsContract.HandlerResult stored = store.recordApplied(
+                    authorization,
+                    jobId,
+                    pipelineAttempt,
+                    resultId,
+                    request.expectedStateVersion(),
+                    () -> apply(job, request, resultId, approvedCommand));
+            return response(stored);
+        }
+
         NaturalCmsContract.StageExecutionResponse executed = switch (request.handlerKey()) {
             case "cms.analyze" -> analyze(job, request, resultId);
             case "cms.preview" -> preview(job, request, resultId, allowedTools);
             case "cms.discard" -> discard(job, request, resultId, allowedTools);
-            case "cms.apply" -> apply(job, request, resultId, allowedTools);
             default -> throw contract("Natural CMS stage handler is not registered.");
         };
         NaturalCmsContract.HandlerResult stored = store.record(
@@ -220,10 +231,8 @@ public final class NaturalCmsStageService {
                 payload);
     }
 
-    private NaturalCmsContract.StageExecutionResponse apply(
+    private JsonNode revalidateApply(
             NaturalCmsContract.JobResponse job,
-            NaturalCmsContract.StageExecutionRequest stage,
-            UUID resultId,
             Set<String> allowedTools) {
         requireDecision(job, "APPROVED");
         JsonNode command = resources.validateCommand(job.resource(), job.structuredCommand());
@@ -245,6 +254,14 @@ public final class NaturalCmsStageService {
                 || !ready.path("command").equals(command)) {
             throw contract("Natural CMS apply Tool changed the approved command.");
         }
+        return command;
+    }
+
+    private NaturalCmsContract.StageExecutionResponse apply(
+            NaturalCmsContract.JobResponse job,
+            NaturalCmsContract.StageExecutionRequest stage,
+            UUID resultId,
+            JsonNode command) {
         JsonNode applied = resources.apply(job.resource(), command);
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "APPLIED");

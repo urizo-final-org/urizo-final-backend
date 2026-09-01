@@ -37,6 +37,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRespo
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 
 class CodingModelTurnServiceTest {
 
@@ -95,9 +96,6 @@ class CodingModelTurnServiceTest {
         assertThat(routed.getValue().prompt()).isEqualTo(
                 "[system]\nStay in scope.\n\n[user]\nSummarize the approved contract.");
         assertThat(routed.getValue().toString()).doesNotContain("Stay in scope").contains("REDACTED");
-        // A CHAT turn is always parsed as one JSON object, so it asks the provider
-        // for that shape rather than only requesting it in the prompt.
-        assertThat(routed.getValue().jsonObjectResponse()).isTrue();
         assertThat(response.schemaVersion()).isEqualTo("1.0");
         assertThat(response.turnId()).isEqualTo(request.turnId());
         assertThat(response.jobId()).isEqualTo(request.jobId());
@@ -163,7 +161,7 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
-    void repairsOneFencedApprovedProviderToolCallAndKeepsTheStrictEnvelope() {
+    void carriesNativeToolDefinitionsAndReturnsTheNativeProviderToolCall() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -182,9 +180,11 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "Here is the result.\n```json\n"
-                        + "{\"assistant\":\"\",\"toolCalls\":[{\"name\":\"read_file\","
-                        + "\"arguments\":{\"path\":\"src/App.java\"}}]}\n```",
+                "",
+                List.of(new ProviderChatMessage.ToolCall(
+                        "99999999-9999-4999-8999-999999999999",
+                        "read_file",
+                        "{\"path\":\"src/App.java\"}")),
                 8,
                 3,
                 Duration.ZERO));
@@ -203,16 +203,14 @@ class CodingModelTurnServiceTest {
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
                         ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER);
-        // The first message is the native conversion trigger, so the request declares
-        // the tools natively instead of asking the model to hand-write the envelope.
-        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
-        assertThat(routed.getValue().tools()).singleElement()
-                .satisfies(tool -> assertThat(tool.name()).isEqualTo("read_file"));
-        // A tool-calling turn carries its own reply shape, so the provider-native
-        // JSON setting stays off and the two never share a request mode.
-        assertThat(routed.getValue().jsonObjectResponse()).isFalse();
+        assertThat(routed.getValue().messages().get(0).content())
+                .isEqualTo("Stay in scope.");
+        assertThat(routed.getValue().tools()).singleElement().satisfies(tool -> {
+            assertThat(tool.name()).isEqualTo("read_file");
+            assertThat(tool.schemaDigest()).isEqualTo(
+                    "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194");
+        });
     }
 
     @Test
@@ -257,7 +255,7 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "{\"assistant\":\"done\",\"toolCalls\":[]}",
+                "done",
                 8,
                 3,
                 Duration.ZERO));
@@ -270,129 +268,64 @@ class CodingModelTurnServiceTest {
         assertThat(routed.getValue().messages())
                 .extracting(ProviderChatMessage::role)
                 .containsExactly(
-                        ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.SYSTEM,
                         ProviderChatMessage.Role.USER,
                         ProviderChatMessage.Role.ASSISTANT,
                         ProviderChatMessage.Role.TOOL);
-        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
-        assertThat(routed.getValue().messages().get(3).toolCalls())
+        assertThat(routed.getValue().messages().get(2).toolCalls())
                 .singleElement()
-                .satisfies(call -> assertThat(call.name()).isEqualTo("read_file"));
-        assertThat(routed.getValue().messages().get(4).toolName()).isEqualTo("read_file");
+                .satisfies(call -> {
+                    assertThat(call.id()).isEqualTo(toolCallId);
+                    assertThat(call.name()).isEqualTo("read_file");
+                });
+        assertThat(routed.getValue().messages().get(3).toolCallId())
+                .isEqualTo(toolCallId);
     }
 
     @Test
-    void declaresToolsNativelyThroughTheConversionTriggerMessage() {
-        // The provider path leads with the byte-exact conversion trigger: the request
-        // recognizes it, declares the tools natively and strips the message, so the
-        // provider sees one system instruction and never two.
+    void preservesJsonSchemaThroughTheProviderRequestAndStructuredResponse() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Set.of(ModelCapability.CHAT, ModelCapability.STRUCTURED_OUTPUT),
                 Duration.ofSeconds(30),
                 2);
-        CodingModelTurnService providerToolService = new CodingModelTurnService(
+        CodingModelTurnService structuredService = new CodingModelTurnService(
                 registry(List.of(google)), gateway, objectMapper,
                 Clock.fixed(NOW, ZoneOffset.UTC), false);
-        CodingModelTurnContract.Request chat = chatRequest();
-        CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
-                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
-                chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
-                chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"),
-                chat.messages(), List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+        CodingModelTurnContract.Request request = structuredRequest();
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "{\"assistant\":\"done\",\"toolCalls\":[]}",
+                "```json\n{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}\n```",
                 8,
                 3,
                 Duration.ZERO));
 
-        providerToolService.execute(toolRequest);
+        CodingModelTurnContract.Response response = structuredService.execute(request);
 
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(gateway).chat(routed.capture());
-        assertThat(routed.getValue().messages())
-                .extracting(ProviderChatMessage::role)
-                .containsExactly(
-                        ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.USER);
-        assertThat(routed.getValue().legacyToolEnvelope()).isTrue();
-        assertThat(routed.getValue().providerMessages())
-                .extracting(ProviderChatMessage::role)
-                .containsExactly(
-                        ProviderChatMessage.Role.SYSTEM,
-                        ProviderChatMessage.Role.USER);
-        assertThat(routed.getValue().providerMessages().get(0).content())
-                .contains("Stay in scope.");
+        assertThat(routed.getValue().responseFormat().type())
+                .isEqualTo(ProviderResponseFormat.Type.JSON_SCHEMA);
+        assertThat(routed.getValue().responseFormat().schemaDigest())
+                .isEqualTo(request.responseFormat().path("schemaDigest").asText());
+        assertThat(routed.getValue().responseFormat().outputSchema())
+                .isEqualTo(request.responseFormat().path("outputSchema"));
+        JsonNode resultFormat = objectMapper.valueToTree(response.responseFormat());
+        assertThat(resultFormat.path("type").asText()).isEqualTo("JSON_SCHEMA");
+        assertThat(resultFormat.path("schemaDigest").asText())
+                .isEqualTo(request.responseFormat().path("schemaDigest").asText());
+        assertThat(resultFormat.path("structuredOutput").path("port").asText())
+                .isEqualTo("feasible");
+        assertThat(resultFormat.path("structuredOutput").path("payload")
+                .path("summary").asText()).isEqualTo("ok");
+        assertThat(response.assistant().content()).isEmpty();
     }
 
     @Test
-    void repairsAnEnvelopeThatCarriesOneStrayBraceAfterTheObject() {
-        // Observed against a real provider: the object is whole and one extra closing brace
-        // follows it. Cutting to the last brace keeps the stray one and repairs nothing.
-        String reply = "{\"assistant\":\"done\",\"toolCalls\":[]}}";
-
-        assertThat(CodingModelTurnService.firstBalancedJsonObject(reply))
-                .isEqualTo("{\"assistant\":\"done\",\"toolCalls\":[]}");
-    }
-
-    @Test
-    void leavesTwoWholeEnvelopesUnrepairedBecauseTheChoiceWouldBeAGuess() {
-        String reply = "{\"assistant\":\"one\",\"toolCalls\":[]} {\"assistant\":\"two\",\"toolCalls\":[]}";
-
-        assertThat(CodingModelTurnService.firstBalancedJsonObject(reply)).isEqualTo(reply);
-    }
-
-    @Test
-    void leavesABraceInsideAStringOutOfTheEnvelopeRepair() {
-        String reply = "{\"assistant\":\"a } brace\",\"toolCalls\":[]} trailing words";
-
-        assertThat(CodingModelTurnService.firstBalancedJsonObject(reply))
-                .isEqualTo("{\"assistant\":\"a } brace\",\"toolCalls\":[]}");
-    }
-
-    @Test
-    void acceptsADirectStageResultObjectAsTheTerminalToolEnvelope() {
-        // Models regularly answer the finished stage with the result object itself
-        // instead of wrapping it inside the assistant string. Both carry the same
-        // terminal reply, so the direct shape must parse instead of being re-asked.
-        ProviderModelRegistration google = new ProviderModelRegistration(
-                ModelProvider.GOOGLE_GENAI,
-                MODEL,
-                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
-                Duration.ofSeconds(30),
-                2);
-        CodingModelTurnService providerToolService = new CodingModelTurnService(
-                registry(List.of(google)), gateway, objectMapper,
-                Clock.fixed(NOW, ZoneOffset.UTC), false);
-        CodingModelTurnContract.Request chat = chatRequest();
-        CodingModelTurnContract.Request toolRequest = new CodingModelTurnContract.Request(
-                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(), chat.idempotencyKey(),
-                chat.attempt(), chat.expectedStateVersion(), chat.nodeName(), chat.promptVersion(),
-                chat.contextDigest(), List.of("CHAT", "TOOL_CALLING"),
-                chat.messages(), List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
-        when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
-                ModelProvider.GOOGLE_GENAI,
-                MODEL,
-                "{\"port\":\"completed\",\"payload\":{\"summary\":\"done\"}}",
-                8,
-                3,
-                Duration.ZERO));
-
-        CodingModelTurnContract.Response response = providerToolService.execute(toolRequest);
-
-        assertThat(response.toolCalls()).isEmpty();
-        assertThat(response.assistant().content())
-                .contains("\"port\":\"completed\"");
-    }
-
-    @Test
-    void rejectsAnEnvelopeThatIsStillInvalidAfterOneRepair() {
+    void rejectsMalformedNativeToolArguments() {
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -411,8 +344,11 @@ class CodingModelTurnServiceTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
-                "prefix {\"assistant\":\"ok\",\"toolCalls\":[]} "
-                        + "{\"assistant\":\"second\",\"toolCalls\":[]}",
+                "",
+                List.of(new ProviderChatMessage.ToolCall(
+                        "99999999-9999-4999-8999-999999999999",
+                        "read_file",
+                        "{\"path\":\"README.md\",\"path\":\"other\"}")),
                 8,
                 3,
                 Duration.ZERO));
@@ -643,6 +579,24 @@ class CodingModelTurnServiceTest {
                 List.of(),
                 JsonNodeFactory.instance.objectNode().put("type", "TEXT"),
                 NOW.plusSeconds(60));
+    }
+
+    private static CodingModelTurnContract.Request structuredRequest() {
+        CodingModelTurnContract.Request chat = chatRequest();
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        properties.putObject("payload").put("type", "object");
+        ObjectNode format = ProviderResponseFormat.jsonSchema(schema).requestContract();
+        return new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(),
+                chat.idempotencyKey(), chat.attempt(), chat.expectedStateVersion(),
+                chat.nodeName(), chat.promptVersion(), chat.contextDigest(),
+                List.of("CHAT", "STRUCTURED_OUTPUT"), chat.messages(), List.of(),
+                format, chat.deadlineAt());
     }
 
     private static JsonNode toolSchema() {

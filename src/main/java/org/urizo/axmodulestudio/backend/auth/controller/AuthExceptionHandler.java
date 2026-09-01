@@ -6,7 +6,6 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -17,28 +16,18 @@ import org.urizo.axmodulestudio.backend.auth.dto.response.ErrorDetail;
 import org.urizo.axmodulestudio.backend.auth.dto.response.ErrorResponse;
 import org.urizo.axmodulestudio.backend.auth.service.AuthenticationFailedException;
 import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
-import org.urizo.axmodulestudio.backend.auth.config.JwtProperties;
 
 @RestControllerAdvice(basePackageClasses = AuthController.class)
 @Profile("local-full & !dev-session")
 public class AuthExceptionHandler {
 
-    private final JwtProperties properties;
-
-    public AuthExceptionHandler(JwtProperties properties) {
-        this.properties = properties;
-    }
-
     @ExceptionHandler(AuthenticationFailedException.class)
     public ResponseEntity<ErrorResponse> authenticationFailure(
             AuthenticationFailedException failure, HttpServletRequest request) {
-        ResponseEntity.BodyBuilder response = ResponseEntity.status(HttpStatus.UNAUTHORIZED)
-                .header(HttpHeaders.WWW_AUTHENTICATE, "Bearer");
-        if ("/api/auth/refresh".equals(request.getRequestURI())) {
-            response.header(HttpHeaders.SET_COOKIE, expiredRefreshCookie().toString());
-        }
-        return response.body(error(request, AuthenticationFailedException.CODE,
-                "A valid session is required."));
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                .header(HttpHeaders.WWW_AUTHENTICATE, "Bearer")
+                .body(error(request, AuthenticationFailedException.CODE,
+                        "A valid session is required."));
     }
 
     @ExceptionHandler({
@@ -62,13 +51,4 @@ public class AuthExceptionHandler {
                 new ErrorDetail(code, message, false, null));
     }
 
-    private ResponseCookie expiredRefreshCookie() {
-        return ResponseCookie.from(AuthController.REFRESH_COOKIE, "")
-                .httpOnly(true)
-                .secure(properties.secureRefreshCookie())
-                .sameSite("Strict")
-                .path("/api/auth")
-                .maxAge(java.time.Duration.ZERO)
-                .build();
-    }
 }

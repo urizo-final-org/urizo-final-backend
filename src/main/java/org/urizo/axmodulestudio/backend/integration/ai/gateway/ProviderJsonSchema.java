@@ -82,6 +82,10 @@ final class ProviderJsonSchema {
     }
 
     static String normalizeArguments(JsonNode canonicalSchema, String rawArguments) {
+        return canonicalJson(normalizeObject(canonicalSchema, rawArguments));
+    }
+
+    static JsonNode normalizeObject(JsonNode canonicalSchema, String rawArguments) {
         if (rawArguments == null || rawArguments.isBlank()
                 || rawArguments.length() > MAX_ARGUMENT_CHARACTERS) {
             throw invalidArguments();
@@ -94,7 +98,7 @@ final class ProviderJsonSchema {
             Bounds bounds = new Bounds(MAX_ARGUMENT_NODES);
             validateTreeBounds(arguments, 1, MAX_ARGUMENT_DEPTH, bounds, false);
             validateValue(arguments, canonicalSchema);
-            return canonicalJson(arguments);
+            return canonicalize(arguments);
         }
         catch (JsonProcessingException failure) {
             throw invalidArguments();

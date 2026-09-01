@@ -31,6 +31,8 @@ class ProfileModelBindingServiceTest {
 
     private static final UUID PROFILE =
             UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    private static final UUID NEXT_PROFILE =
+            UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
@@ -87,6 +89,17 @@ class ProfileModelBindingServiceTest {
                     assertThat(model.modelId())
                             .isEqualTo(Stage2ProviderModels.GOOGLE_GENAI_CHAT);
                 });
+        assertThat(service.resolve(
+                snapshot, PROFILE, "analyze", "coding.analyze",
+                ModelUseCase.STRUCTURED_OUTPUT))
+                .extracting(ProviderModelRegistration::provider,
+                        ProviderModelRegistration::modelId)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI,
+                                Stage2ProviderModels.GOOGLE_GENAI_CHAT));
     }
 
     @Test
@@ -143,12 +156,52 @@ class ProfileModelBindingServiceTest {
                                 .isEqualTo(ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED));
     }
 
+    @Test
+    void theSameNodeIdUsesTheProviderAndModelFromItsFrozenProfileVersion() throws Exception {
+        ProfileModelBindingService service = service(registry(
+                registration(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
+                registration(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT)));
+        JsonNode first = snapshot(PROFILE, """
+                {
+                  "analyze":{"primary":"llm-ops-analyze","fallback":[]},
+                  "review":{"primary":"llm-ops-review","fallback":[]}
+                }
+                """);
+        JsonNode next = snapshot(NEXT_PROFILE, """
+                {
+                  "analyze":{"primary":"llm-ops-review","fallback":[]},
+                  "review":{"primary":"llm-ops-review","fallback":[]}
+                }
+                """);
+
+        assertThat(service.resolve(
+                first, PROFILE, "analyze", "coding.analyze",
+                ModelUseCase.STRUCTURED_OUTPUT))
+                .extracting(ProviderModelRegistration::provider,
+                        ProviderModelRegistration::modelId)
+                .containsExactly(org.assertj.core.groups.Tuple.tuple(
+                        ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT));
+        assertThat(service.resolve(
+                next, NEXT_PROFILE, "analyze", "coding.analyze",
+                ModelUseCase.STRUCTURED_OUTPUT))
+                .extracting(ProviderModelRegistration::provider,
+                        ProviderModelRegistration::modelId)
+                .containsExactly(org.assertj.core.groups.Tuple.tuple(
+                        ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT));
+    }
+
     private ProfileModelBindingService service(ProviderCapabilityRegistry registry) {
         return new ProfileModelBindingService(
                 mock(JdbcTemplate.class), objectMapper, registry);
     }
 
     private JsonNode snapshot(String modelBindings) throws Exception {
+        return snapshot(PROFILE, modelBindings);
+    }
+
+    private JsonNode snapshot(UUID profileVersionId, String modelBindings) throws Exception {
         return objectMapper.readTree("""
                 {
                   "profileVersionId":"%s",
@@ -159,7 +212,7 @@ class ProfileModelBindingServiceTest {
                   ],
                   "modelBindings":%s
                 }
-                """.formatted(PROFILE, modelBindings));
+                """.formatted(profileVersionId, modelBindings));
     }
 
     private static ProviderCapabilityRegistry registry(
@@ -175,7 +228,10 @@ class ProfileModelBindingServiceTest {
         return new ProviderModelRegistration(
                 provider,
                 modelId,
-                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Set.of(
+                        ModelCapability.CHAT,
+                        ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
                 Duration.ofSeconds(30),
                 2);
     }

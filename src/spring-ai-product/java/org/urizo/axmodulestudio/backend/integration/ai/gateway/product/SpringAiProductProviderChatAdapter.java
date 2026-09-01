@@ -32,6 +32,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.context.annotation.Profile;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.StructuredOutputChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Component;
 import org.springframework.ai.tool.ToolCallback;
@@ -46,6 +47,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentia
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailure;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailureKind;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
 
 @Component
@@ -110,8 +112,7 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 try (ProductChatModelSession session = factory.open(
                         credential,
                         registration.modelId(),
-                        registration.maxOutputTokens(),
-                        request.jsonObjectResponse())) {
+                        registration.maxOutputTokens())) {
                     ChatResponse response = session.chatModel().call(prompt(request));
                     return response(request, response, startedAt);
                 }
@@ -128,14 +129,36 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         for (int index = 0; index < providerMessages.size(); index++) {
             messages.add(springMessage(request, providerMessages.get(index), index));
         }
-        if (request.tools().isEmpty()) {
+        if (request.tools().isEmpty() && !request.responseFormat().structured()) {
             return new Prompt(messages);
+        }
+        if (request.responseFormat().structured()) {
+            return new Prompt(messages, structuredOptions(
+                    request.provider(), request.responseFormat()));
         }
         List<ToolCallback> callbacks = request.tools().stream()
                 .map(SpringAiProductProviderChatAdapter::toolCallback)
                 .toList();
         ToolCallingChatOptions options = toolOptions(request.provider(), callbacks);
         return new Prompt(messages, options);
+    }
+
+    private static StructuredOutputChatOptions structuredOptions(
+            ModelProvider provider,
+            ProviderResponseFormat responseFormat) {
+        StructuredOutputChatOptions options = switch (provider) {
+            case OPENAI -> new OpenAiChatOptions();
+            case GOOGLE_GENAI -> {
+                GoogleGenAiChatOptions google = new GoogleGenAiChatOptions();
+                google.setResponseMimeType("application/json");
+                yield google;
+            }
+            case ANTHROPIC -> new AnthropicChatOptions();
+            case VERTEX_AI_GEMINI ->
+                    throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        };
+        options.setOutputSchema(responseFormat.providerOutputSchema());
+        return options;
     }
 
     private static ToolCallingChatOptions toolOptions(

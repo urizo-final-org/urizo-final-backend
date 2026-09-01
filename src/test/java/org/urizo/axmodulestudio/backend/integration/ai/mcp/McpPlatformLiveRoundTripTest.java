@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 class McpPlatformLiveRoundTripTest {
 
     @Test
-    void springClientDiscoversTheRealMcpServiceAndItsEmptyBootstrapCatalog() throws Exception {
+    void springClientDiscoversTheRealMcpServiceAndExactProductionCatalog() throws Exception {
         String endpoint = System.getProperty("axms.mcp.live.endpoint");
         String credentialFile = System.getProperty("axms.mcp.live.credential-file");
         Assumptions.assumeTrue(endpoint != null && credentialFile != null,
@@ -34,6 +34,7 @@ class McpPlatformLiveRoundTripTest {
 
         assertThat(snapshot.protocolVersion()).isEqualTo("2026-07-28");
         assertThat(snapshot.serverName()).isEqualTo("urizo-final-mcp-server");
-        assertThat(snapshot.exposedTools()).isEmpty();
+        assertThat(snapshot.exposedTools())
+                .containsExactlyInAnyOrderElementsOf(McpPlatformContract.allowedToolNames());
     }
 }

@@ -13,7 +13,6 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PublicSiteView;
-import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
 import org.urizo.axmodulestudio.backend.cms.service.CmsSiteSettingsService;
 
@@ -58,11 +57,6 @@ public class CmsSiteController {
     @GetMapping("/posts/{id}")
     PostView post(@PathVariable long id) {
         return cms.post(id);
-    }
-
-    @GetMapping("/template")
-    TemplateView template(@RequestParam(defaultValue = "/") String path) {
-        return siteSettings.resolveTemplate(path);
     }
 
     @GetMapping("/context")

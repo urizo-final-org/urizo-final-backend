@@ -42,13 +42,30 @@ public class CmsSiteSettingsService {
         }
         template(defaultTemplateKey);
         sites.selectDefault(site.key(), defaultTemplateKey);
-        cms.activateTemplate(defaultTemplateKey);
         return settings();
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
     public List<SiteView> sites() {
         return sites.findAll();
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public SiteView createSite(
+            String key, String siteName, String publicPath,
+            String templateKey, boolean enabled) {
+        String normalizedKey = normalizeSiteKey(key);
+        requireText(siteName, "사이트명");
+        String path = normalizePublicPath(publicPath);
+        if (sites.findByKey(normalizedKey).isPresent()) {
+            throw invalidRequest("이미 사용 중인 사이트 키입니다.");
+        }
+        if (sites.findByPublicPath(path).isPresent()) {
+            throw invalidRequest("이미 사용 중인 공개 경로입니다.");
+        }
+        template(templateKey);
+        return sites.create(
+                normalizedKey, siteName.trim(), path, templateKey.trim(), enabled);
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
@@ -86,16 +103,6 @@ public class CmsSiteSettingsService {
         return new PublicSiteView(site.key(), site.name(), site.publicPath(), presentation);
     }
 
-    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
-    public TemplateView resolveTemplate(String requestPath) {
-        return resolveSite(requestPath).template();
-    }
-
-    @Transactional(transactionManager = "authJpaTransactionManager")
-    public void applyTemplateToDefaultSite(String templateKey) {
-        sites.applyTemplateToDefault(templateKey);
-    }
-
     private SiteView defaultSite() {
         return sites.findDefault()
                 .filter(SiteView::enabled)
@@ -124,7 +131,30 @@ public class CmsSiteSettingsService {
         if (!path.matches("^/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?$")) {
             throw invalidRequest("공개 경로는 / 또는 /로 시작하는 영문·숫자 경로여야 합니다.");
         }
+        if (isReservedPublicPath(path)) {
+            throw invalidRequest("관리자 및 내부 API 경로는 공개 경로로 사용할 수 없습니다.");
+        }
         return path;
+    }
+
+    private static String normalizeSiteKey(String value) {
+        requireText(value, "사이트 키");
+        String key = value.trim();
+        if (!key.matches("^[A-Za-z0-9_-]+$")) {
+            throw invalidRequest("사이트 키는 영문·숫자·-·_만 사용할 수 있습니다.");
+        }
+        return key;
+    }
+
+    private static boolean isReservedPublicPath(String path) {
+        return reservedPath(path, "/admin")
+                || reservedPath(path, "/api")
+                || reservedPath(path, "/internal")
+                || reservedPath(path, "/actuator");
+    }
+
+    private static boolean reservedPath(String path, String reserved) {
+        return path.equals(reserved) || path.startsWith(reserved + "/");
     }
 
     private static String normalizeRequestPath(String value) {

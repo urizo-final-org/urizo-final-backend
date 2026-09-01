@@ -90,7 +90,7 @@ class NaturalCmsModelBoundaryTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.OPENAI,
                 "cms-test-model",
-                "{\"assistant\":\"resolved\",\"toolCalls\":[]}",
+                "resolved",
                 1,
                 1,
                 Duration.ofMillis(1)));

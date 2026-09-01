@@ -8,19 +8,13 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-/**
- * @param jsonObjectResponse asks the provider for a bare JSON object through its
- *     own response-format setting. Only a CHAT request may set it: a tool-calling
- *     request carries its own reply shape, and this lane keeps structured output
- *     and tool calling in separate request modes.
- */
 public record ProviderChatRequest(
         ModelProvider provider,
         String modelId,
         List<ProviderChatMessage> messages,
         List<ProviderToolDefinition> tools,
-        Instant deadline,
-        boolean jsonObjectResponse) {
+        ProviderResponseFormat responseFormat,
+        Instant deadline) {
 
     private static final int MAX_MESSAGES = 200;
     private static final int MAX_TOOLS = 50;
@@ -31,6 +25,7 @@ public record ProviderChatRequest(
         modelId = Objects.requireNonNull(modelId, "modelId is required");
         messages = List.copyOf(Objects.requireNonNull(messages, "messages are required"));
         tools = List.copyOf(Objects.requireNonNull(tools, "tools are required"));
+        responseFormat = Objects.requireNonNull(responseFormat, "responseFormat is required");
         deadline = Objects.requireNonNull(deadline, "deadline is required");
         if (modelId.isBlank()) {
             throw new IllegalArgumentException("modelId cannot be blank");
@@ -55,6 +50,10 @@ public record ProviderChatRequest(
         if (!tools.isEmpty()) {
             validateToolHistory(messages, definitions);
         }
+        if (!tools.isEmpty() && responseFormat.structured()) {
+            throw new IllegalArgumentException(
+                    "Structured output and tool calling cannot be combined.");
+        }
         List<ProviderChatMessage> providerMessages = legacyTools.isEmpty()
                 ? messages : messages.subList(1, messages.size());
         long characters = providerMessages.stream()
@@ -67,30 +66,14 @@ public record ProviderChatRequest(
                         .mapToLong(tool -> tool.name().length()
                                 + tool.description().length()
                                 + tool.providerInputSchema().length())
-                        .sum();
+                        .sum()
+                + (responseFormat.structured()
+                        ? responseFormat.providerOutputSchema().length() : 0);
         if (messages.isEmpty() || messages.size() > MAX_MESSAGES
                 || tools.size() > MAX_TOOLS
                 || characters > MAX_REQUEST_CHARACTERS) {
             throw new IllegalArgumentException("chat request exceeds its collection or size bounds");
         }
-    }
-
-    /** Plain text remains the default reply shape for every existing caller. */
-    public ProviderChatRequest(
-            ModelProvider provider,
-            String modelId,
-            List<ProviderChatMessage> messages,
-            Instant deadline) {
-        this(provider, modelId, messages, List.of(), deadline, false);
-    }
-
-    public ProviderChatRequest(
-            ModelProvider provider,
-            String modelId,
-            List<ProviderChatMessage> messages,
-            Instant deadline,
-            boolean jsonObjectResponse) {
-        this(provider, modelId, messages, List.of(), deadline, jsonObjectResponse);
     }
 
     public ProviderChatRequest(
@@ -99,7 +82,15 @@ public record ProviderChatRequest(
             List<ProviderChatMessage> messages,
             List<ProviderToolDefinition> tools,
             Instant deadline) {
-        this(provider, modelId, messages, tools, deadline, false);
+        this(provider, modelId, messages, tools, ProviderResponseFormat.text(), deadline);
+    }
+
+    public ProviderChatRequest(
+            ModelProvider provider,
+            String modelId,
+            List<ProviderChatMessage> messages,
+            Instant deadline) {
+        this(provider, modelId, messages, List.of(), ProviderResponseFormat.text(), deadline);
     }
 
     public ProviderChatRequest(
@@ -111,7 +102,7 @@ public record ProviderChatRequest(
                 List.of(ProviderChatMessage.plain(
                         ProviderChatMessage.Role.USER,
                         Objects.requireNonNull(prompt, "prompt is required"))),
-                List.of(), deadline, false);
+                List.of(), ProviderResponseFormat.text(), deadline);
     }
 
     public List<ProviderChatMessage> providerMessages() {
@@ -144,8 +135,8 @@ public record ProviderChatRequest(
         return "ProviderChatRequest[provider=" + provider
                 + ", modelId=" + modelId
                 + ", messages=REDACTED, tools=" + tools.size()
-                + ", deadline=" + deadline
-                + ", jsonObjectResponse=" + jsonObjectResponse + "]";
+                + ", responseFormat=" + responseFormat.type()
+                + ", deadline=" + deadline + "]";
     }
 
     private static void validateToolHistory(

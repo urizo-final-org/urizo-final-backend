@@ -16,18 +16,9 @@ final class AnthropicProductChatModelFactory implements ProductChatModelFactory 
         return ModelProvider.ANTHROPIC;
     }
 
-    /**
-     * Anthropic keeps its structured output behind the beta that
-     * {@code AnthropicApi.DEFAULT_ANTHROPIC_BETA_VERSION} names, and its
-     * {@code OutputFormat} record takes a free-form type string with no constant to
-     * follow. Guessing that string is not something a local credential can verify
-     * here, so this provider leaves the reply as text and relies on the caller's
-     * repair and re-ask passes. Anthropic is also last in the selection order.
-     */
     @Override
     public ProductChatModelSession open(
-            String credential, String modelId, int maxOutputTokens,
-            boolean jsonObjectResponse) {
+            String credential, String modelId, int maxOutputTokens) {
         AnthropicApi api = AnthropicApi.builder()
                 .apiKey(credential)
                 .build();

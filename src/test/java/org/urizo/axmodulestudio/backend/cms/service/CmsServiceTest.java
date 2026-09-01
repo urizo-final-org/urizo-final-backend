@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -75,26 +77,28 @@ class CmsServiceTest {
     }
 
     @Test
-    void activatesOnlyTheSavedTemplate() {
-        TemplateView active = new TemplateView(
+    void savesTemplatePresentationWithoutChangingSiteOrGlobalSelection() {
+        TemplateView saved = new TemplateView(
                 "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
                 "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
-                "자세히 보기", "/about", true, Instant.now());
+                "자세히 보기", "/about", false, Instant.now());
         when(repository.templateExists("MINIMAL")).thenReturn(true);
-        when(repository.findActiveTemplate()).thenReturn(Optional.of(active));
+        when(repository.findTemplate("MINIMAL")).thenReturn(Optional.of(saved));
 
         TemplateView result = service.saveTemplate(
                 "MINIMAL", "MINIMAL", "#0e9f76", " AX Studio ", "간결한 콘텐츠",
                 "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
                 "자세히 보기", "/about");
 
-        assertThat(result).isEqualTo(active);
-        verify(repository).deactivateTemplates();
+        assertThat(result).isEqualTo(saved);
+        verify(repository).templateExists("MINIMAL");
         verify(repository).updateTemplate(
                 "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
                 "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
                 "자세히 보기", "/about");
-        verify(siteSettings).applyTemplateToDefaultSite("MINIMAL");
+        verify(repository).findTemplate("MINIMAL");
+        verifyNoMoreInteractions(repository);
+        verifyNoInteractions(siteSettings);
     }
 
     @Test

@@ -172,7 +172,7 @@ public class CodingModelTurnService {
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),
-                normalizedMessages(request),
+                normalizedMessages(request, requestOverhead(providerTools, responseFormat)),
                 providerTools,
                 responseFormat,
                 request.deadlineAt()));
@@ -299,7 +299,7 @@ public class CodingModelTurnService {
     }
 
     private List<ProviderChatMessage> normalizedMessages(
-            CodingModelTurnContract.Request request) {
+            CodingModelTurnContract.Request request, long requestOverhead) {
         List<ProviderChatMessage> messages = new ArrayList<>();
         Map<String, String> pendingToolNames = new HashMap<>();
         for (JsonNode message : request.messages()) {
@@ -348,7 +348,22 @@ public class CodingModelTurnService {
         if (!pendingToolNames.isEmpty()) {
             throw invalidContract();
         }
-        return withinRequestBudget(messages);
+        return withinRequestBudget(messages, requestOverhead);
+    }
+
+    /**
+     * What ProviderChatRequest counts besides the messages. Tool definitions and a structured
+     * output schema ride in the same budget, so the message budget is what is left after them.
+     */
+    private static long requestOverhead(
+            List<ProviderToolDefinition> tools, ProviderResponseFormat responseFormat) {
+        return tools.stream()
+                .mapToLong(tool -> tool.name().length()
+                        + tool.description().length()
+                        + tool.providerInputSchema().length())
+                .sum()
+                + (responseFormat.structured()
+                        ? responseFormat.providerOutputSchema().length() : 0);
     }
 
     /**
@@ -375,11 +390,17 @@ public class CodingModelTurnService {
      * exceeds the ProviderChatRequest budget and the request would be rejected as a
      * raw argument failure. The oldest tool bodies are dropped first, and only once
      * the request would not fit, so a request that already fits is unchanged.
+     *
+     * <p>The tool definitions and any structured output schema are reserved first, because
+     * ProviderChatRequest counts them in the same budget. Measuring the messages alone left a
+     * band where nothing was elided here and the request was still refused on construction.
      */
-    private List<ProviderChatMessage> withinRequestBudget(List<ProviderChatMessage> messages) {
+    private List<ProviderChatMessage> withinRequestBudget(
+            List<ProviderChatMessage> messages, long requestOverhead) {
+        long messageBudget = MAX_REQUEST_CHARACTERS - requestOverhead;
         List<ProviderChatMessage> bounded = new ArrayList<>(messages);
         long characters = characters(bounded);
-        for (int index = 0; index < bounded.size() && characters > MAX_REQUEST_CHARACTERS; index++) {
+        for (int index = 0; index < bounded.size() && characters > messageBudget; index++) {
             ProviderChatMessage message = bounded.get(index);
             if (message.role() != ProviderChatMessage.Role.TOOL
                     || ELIDED_TOOL_CONTENT.equals(message.content())) {
@@ -389,7 +410,7 @@ public class CodingModelTurnService {
             bounded.set(index, ProviderChatMessage.tool(
                     message.toolCallId(), message.toolName(), ELIDED_TOOL_CONTENT));
         }
-        if (characters > MAX_REQUEST_CHARACTERS) {
+        if (characters > messageBudget) {
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
                     "The Coding stage context exceeds the model request budget.");
@@ -397,7 +418,7 @@ public class CodingModelTurnService {
         return List.copyOf(bounded);
     }
 
-    /** Counts exactly what ProviderChatRequest bounds. */
+    /** Counts what ProviderChatRequest bounds for the messages themselves. */
     private static long characters(List<ProviderChatMessage> messages) {
         return messages.stream()
                 .mapToLong(message -> message.content().length()

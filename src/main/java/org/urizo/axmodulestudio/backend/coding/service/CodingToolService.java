@@ -42,7 +42,7 @@ public final class CodingToolService {
             "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
             "read_diff", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "apply_patch", "sha256:f6594e18aaedfb029106fa669c557027854ec5f86cce436fcec1723791743cd7",
-            "run_check", "sha256:aa918940b10451be6405b9bd83cf8cf372f3d60f126fdd5a17a1270fe957cb38",
+            "run_check", "sha256:9c8ff63f21a3414335f7f7788d00bdfb096480b37a1cee5e9084d2954439824a",
             "check_package_allowlist", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "scan_changed_files", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa");
     private static final Pattern SHA256_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");

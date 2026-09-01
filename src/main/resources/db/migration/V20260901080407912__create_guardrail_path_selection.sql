@@ -26,7 +26,10 @@ CREATE TABLE app.guardrail_path_selection (
         path <> ''
         AND path NOT LIKE '/%'
         AND path NOT LIKE '%/'
-        AND path NOT LIKE '%\%'
+        -- strpos, not LIKE: inside a LIKE pattern a backslash escapes the next character,
+        -- so '%\%' asks whether the path ends in a literal per-cent sign rather than
+        -- whether it contains a backslash.
+        AND strpos(path, '\') = 0
         AND path NOT LIKE '%..%'),
     CONSTRAINT ck_guardrail_path_selection_label CHECK (
         label IS NULL OR label <> '')

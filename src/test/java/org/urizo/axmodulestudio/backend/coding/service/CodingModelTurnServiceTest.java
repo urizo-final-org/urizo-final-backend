@@ -464,6 +464,59 @@ class CodingModelTurnServiceTest {
         assertThat(contents.get(2)).contains("C".repeat(25_000));
     }
 
+    /**
+     * The two tests below carry the same messages and differ only in how large the tool
+     * definition is. Measuring the messages alone left a band where nothing was elided and
+     * ProviderChatRequest still refused the request on construction.
+     */
+    private static final String NEAR_BUDGET_TOOL_BODY = "A".repeat(65_000);
+    /** The contract caps a tool description at 2,000 characters; this fills it. */
+    private static final int MAX_DESCRIPTION_PADDING = 1_968;
+
+    @Test
+    void keepsTheToolBodyWhenTheMessagesAndToolDefinitionsBothFit() {
+        CodingModelTurnContract.Request request =
+                providerToolRequest(List.of(NEAR_BUDGET_TOOL_BODY));
+        when(gateway.chat(any())).thenReturn(toolEnvelopeResponse());
+
+        providerToolService().execute(request);
+
+        assertThat(toolContents().get(0)).contains(NEAR_BUDGET_TOOL_BODY);
+    }
+
+    @Test
+    void elidesWhenTheToolDefinitionsPushFittingMessagesOverTheBudget() {
+        CodingModelTurnContract.Request request =
+                providerToolRequest(List.of(NEAR_BUDGET_TOOL_BODY), MAX_DESCRIPTION_PADDING);
+        when(gateway.chat(any())).thenReturn(toolEnvelopeResponse());
+
+        // Before the overhead was reserved this threw from the ProviderChatRequest constructor,
+        // because nothing was elided and the tool definitions were counted only there.
+        providerToolService().execute(request);
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        long messageCharacters = routed.getValue().messages().stream()
+                .mapToLong(message -> message.content().length()
+                        + message.toolCalls().stream()
+                                .mapToLong(call -> call.arguments().length())
+                                .sum())
+                .sum();
+        long toolCharacters = routed.getValue().tools().stream()
+                .mapToLong(tool -> tool.name().length()
+                        + tool.description().length()
+                        + tool.providerInputSchema().length())
+                .sum();
+        assertThat(toolCharacters).isGreaterThan(2_000);
+        assertThat(messageCharacters + toolCharacters).isLessThanOrEqualTo(65_536);
+        List<String> contents = routed.getValue().messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList();
+        assertThat(contents.get(0)).doesNotContain("AAAA").contains("elided");
+    }
+
     @Test
     void failsAsAGatewayErrorWhenNoToolBodyCanBeDropped() {
         CodingModelTurnContract.Request chat = chatRequest();
@@ -514,6 +567,11 @@ class CodingModelTurnServiceTest {
 
     /** One assistant tool call and its tool result per body, in the order given. */
     private CodingModelTurnContract.Request providerToolRequest(List<String> toolBodies) {
+        return providerToolRequest(toolBodies, 0);
+    }
+
+    private CodingModelTurnContract.Request providerToolRequest(
+            List<String> toolBodies, int descriptionPadding) {
         CodingModelTurnContract.Request chat = chatRequest();
         List<JsonNode> messages = new java.util.ArrayList<>(
                 List.of(chat.messages().get(0), chat.messages().get(1)));
@@ -544,7 +602,7 @@ class CodingModelTurnServiceTest {
                 chat.idempotencyKey(), chat.attempt(), chat.expectedStateVersion(),
                 chat.nodeName(), chat.promptVersion(), chat.contextDigest(),
                 List.of("CHAT", "TOOL_CALLING"), List.copyOf(messages),
-                List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+                List.of(toolSchema(descriptionPadding)), chat.responseFormat(), chat.deadlineAt());
     }
 
 
@@ -600,9 +658,14 @@ class CodingModelTurnServiceTest {
     }
 
     private static JsonNode toolSchema() {
+        return toolSchema(0);
+    }
+
+    private static JsonNode toolSchema(int descriptionPadding) {
         var toolSchema = JsonNodeFactory.instance.objectNode()
                 .put("name", "read_file")
-                .put("description", "Read one approved relative file.")
+                .put("description",
+                        "Read one approved relative file." + " ".repeat(descriptionPadding))
                 .put("schemaDigest",
                         "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194");
         var inputSchema = JsonNodeFactory.instance.objectNode()

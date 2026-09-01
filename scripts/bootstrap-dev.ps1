@@ -135,7 +135,8 @@ SELECT format('ALTER ROLE axms_checkpoint PASSWORD %L', :'checkpoint_password') 
 SQL
 unset password
 '@
-    & $docker exec $checkpointContainer bash -euc $checkpointRoleSync
+    $checkpointRoleSync = $checkpointRoleSync.Replace("`r`n", "`n")
+    $checkpointRoleSync | & $docker exec -i $checkpointContainer bash -seu
     if ($LASTEXITCODE -ne 0) {
         throw 'Checkpoint database role synchronization failed.'
     }

@@ -5,6 +5,8 @@ param(
 
     [int]$WaitTimeoutSeconds = 180,
 
+    [switch]$SnapshotOnly,
+
     [string]$ProductProbeScript
 )
 
@@ -13,6 +15,9 @@ Set-StrictMode -Version Latest
 
 if ($WaitTimeoutSeconds -lt 30 -or $WaitTimeoutSeconds -gt 1800) {
     throw 'WaitTimeoutSeconds must be between 30 and 1800.'
+}
+if ($SnapshotOnly -and $ProductProbeScript) {
+    throw 'ProductProbeScript cannot be combined with SnapshotOnly.'
 }
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
@@ -52,16 +57,19 @@ if ((Get-HttpStatus -Uri "$baseUri/api/projects") -ne 401) {
     throw 'The product API did not enforce the local session boundary.'
 }
 
-$providerOverview = Invoke-RestMethod -UseBasicParsing `
-    -Uri "$baseUri/internal/dev/provider-credentials" -TimeoutSec 10
-$verifiedProviderCount = @(
-    $providerOverview.providers |
-        Where-Object { $_.configured -and $_.state -eq 'VERIFIED' }
-).Count
-if ($verifiedProviderCount -lt 3) {
-    throw 'Fewer than three local Provider CMS credentials are VERIFIED.'
-}
 $providerOverview = $null
+if (-not $SnapshotOnly) {
+    $providerOverview = Invoke-RestMethod -UseBasicParsing `
+        -Uri "$baseUri/internal/dev/provider-credentials" -TimeoutSec 10
+    $verifiedProviderCount = @(
+        $providerOverview.providers |
+            Where-Object { $_.configured -and $_.state -eq 'VERIFIED' }
+    ).Count
+    if ($verifiedProviderCount -lt 3) {
+        throw 'Fewer than three local Provider CMS credentials are VERIFIED.'
+    }
+    $providerOverview = $null
+}
 
 # This acceptance path runs on the development session, which now lives behind the
 # 'dev-session' profile. Without it the stack requires a real administrator login and
@@ -382,7 +390,27 @@ function Wait-ProductJob {
     throw "Timed out waiting for product job state: $($DesiredStatuses -join ', ')"
 }
 
+function Invoke-PrivateValkey {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$CommandArguments
+    )
+
+    $composeFile = Join-Path $repositoryRoot 'compose.dev.yaml'
+    $dockerArguments = @(
+        'compose', '-f', $composeFile, '--profile', $Profile,
+        'exec', '-T', 'valkey', 'sh', '-ec',
+        'REDISCLI_AUTH="$(cat /run/secrets/valkey_password)" exec valkey-cli --no-auth-warning --raw "$@"',
+        '--'
+    ) + $CommandArguments
+    $commandOutput = @(& docker @dockerArguments)
+    if ($LASTEXITCODE -ne 0) {
+        throw 'The private Valkey duplicate-delivery probe failed.'
+    }
+    return ($commandOutput -join '').Trim()
+}
+
 try {
+    if (-not $SnapshotOnly) {
     $productRunId = [Guid]::NewGuid().ToString('N')
     $projectBody = @{
         schemaVersion = '1.0'
@@ -543,6 +571,7 @@ try {
     if ($null -eq $refusedQuery.citations -or @($refusedQuery.citations).Count -ne 0) {
         throw 'The ungrounded RAG refusal unexpectedly included citations.'
     }
+    }
 
     $codingSession = Invoke-RestMethod -UseBasicParsing `
         -Uri "$baseUri/internal/dev/coding-jobs/session" -TimeoutSec 10
@@ -595,6 +624,46 @@ try {
     if ([int]$codingState.stateVersion -lt 3) {
         throw 'Coding job completed before the expected resolve/claim/outcome lifecycle.'
     }
+
+    $completedStateVersion = [int]$codingState.stateVersion
+    $completedFinishedAt = [string]$codingState.finishedAt
+    $codingQueue = 'axms:coding:jobs:v1'
+    $codingProcessingQueue = "$codingQueue`:processing"
+    $duplicatePayload = @{ jobId = [string]$codingJob.jobId } | ConvertTo-Json -Compress
+    $queueLength = Invoke-PrivateValkey -CommandArguments @(
+        'LPUSH', $codingQueue, $duplicatePayload)
+    if ($queueLength -notmatch '^\d+$' -or [int]$queueLength -lt 1) {
+        throw 'The completed Coding job duplicate delivery was not published.'
+    }
+
+    $replayDeadline = [DateTimeOffset]::UtcNow.AddSeconds($WaitTimeoutSeconds)
+    do {
+        $queuedPosition = Invoke-PrivateValkey -CommandArguments @(
+            'LPOS', $codingQueue, $duplicatePayload)
+        $processingPosition = Invoke-PrivateValkey -CommandArguments @(
+            'LPOS', $codingProcessingQueue, $duplicatePayload)
+        if ([string]::IsNullOrWhiteSpace($queuedPosition) -and
+                [string]::IsNullOrWhiteSpace($processingPosition)) {
+            break
+        }
+        Start-Sleep -Milliseconds 200
+    }
+    while ([DateTimeOffset]::UtcNow -lt $replayDeadline)
+    if (-not [string]::IsNullOrWhiteSpace($queuedPosition) -or
+            -not [string]::IsNullOrWhiteSpace($processingPosition)) {
+        throw 'The production WorkerLoop did not acknowledge the completed Job replay.'
+    }
+
+    $replayedCodingState = Invoke-CodingJson -Method GET `
+        -Path "/internal/dev/coding-jobs/$($codingJob.jobId)" -TraceId $codingTraceId
+    Assert-ContractValue -Actual $replayedCodingState.status -Expected 'COMPLETED' `
+        -Name 'completed Coding job replay status'
+    Assert-ContractValue -Actual $replayedCodingState.stateVersion -Expected $completedStateVersion `
+        -Name 'completed Coding job replay state version'
+    Assert-ContractValue -Actual $replayedCodingState.finishedAt -Expected $completedFinishedAt `
+        -Name 'completed Coding job replay finish time'
+    Assert-ContractValue -Actual $replayedCodingState.profileVersionId -Expected $profileVersionId `
+        -Name 'completed Coding job replay Profile binding'
 
     $invalidFixture = [System.IO.File]::ReadAllText($commonProfileFixturePath) | ConvertFrom-Json
     $invalidAuthoring = ConvertTo-ProfileAuthoringSnapshot -VersionedSnapshot $invalidFixture
@@ -659,4 +728,9 @@ finally {
     $codingSession = $null
 }
 
-Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, admin Profile publication, common Profile-bound LangGraph completion, authoring fail-closed, and active Coding Handler Profile E2E passed.'
+if ($SnapshotOnly) {
+    Write-Output 'SNAPSHOT-ONLY E2E PASS: Admin Profile publication, production Registry/WorkerLoop completion, completed Job duplicate-delivery safety, unregistered Handler fail-closed, and active Coding Handler Profile verified.'
+}
+else {
+    Write-Output 'Frontend/Nginx, Spring/Core DB/Valkey Batch, Connector/Knowledge/RAG, admin Profile publication, common Profile-bound LangGraph completion, completed Job duplicate-delivery safety, authoring fail-closed, and active Coding Handler Profile E2E passed.'
+}

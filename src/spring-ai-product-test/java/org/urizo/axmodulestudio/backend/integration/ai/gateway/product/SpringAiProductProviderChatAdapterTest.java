@@ -30,6 +30,7 @@ import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.ToolResponseMessage;
 import org.springframework.ai.chat.messages.UserMessage;
+import org.springframework.ai.chat.metadata.ChatGenerationMetadata;
 import org.springframework.ai.chat.metadata.ChatResponseMetadata;
 import org.springframework.ai.chat.metadata.DefaultUsage;
 import org.springframework.ai.chat.model.ChatModel;
@@ -55,6 +56,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatRespo
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialLease;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialResolver;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFinishReason;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
@@ -356,7 +358,8 @@ class SpringAiProductProviderChatAdapterTest {
                 modelId,
                 ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
                 .thenReturn(new ProductChatModelSession(chatModel, () -> { }));
-        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(response());
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(response(provider));
 
         SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
                 resolver,
@@ -396,6 +399,7 @@ class SpringAiProductProviderChatAdapterTest {
         assertThat(result.inputTokens()).isEqualTo(6);
         assertThat(result.outputTokens()).isEqualTo(1);
         assertThat(result.latency()).isZero();
+        assertThat(result.finishReason()).isEqualTo(ProviderFinishReason.COMPLETED);
         ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
         verify(chatModel).call(prompt.capture());
         assertThat(prompt.getValue().getInstructions())
@@ -510,7 +514,8 @@ class SpringAiProductProviderChatAdapterTest {
                 .thenAnswer(ignored -> new ProductChatModelSession(chatModel, () -> { }));
         when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
                 .thenReturn(new ChatResponse(List.of(new Generation(
-                        new AssistantMessage("{\"port\":\"feasible\",\"payload\":{}}")))));
+                        new AssistantMessage("{\"port\":\"feasible\",\"payload\":{}}"),
+                        completedMetadata(provider)))));
         ObjectNode schema = JsonNodeFactory.instance.objectNode()
                 .put("type", "object")
                 .put("additionalProperties", false);
@@ -707,10 +712,24 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     private static ChatResponse response() {
+        return response(ModelProvider.GOOGLE_GENAI);
+    }
+
+    private static ChatResponse response(ModelProvider provider) {
         return new ChatResponse(
-                List.of(new Generation(new AssistantMessage("OK"))),
+                List.of(new Generation(new AssistantMessage("OK"), completedMetadata(provider))),
                 ChatResponseMetadata.builder()
                         .usage(new DefaultUsage(6, 1))
                         .build());
+    }
+
+    private static ChatGenerationMetadata completedMetadata(ModelProvider provider) {
+        String reason = switch (provider) {
+            case OPENAI -> "stop";
+            case GOOGLE_GENAI -> "STOP";
+            case ANTHROPIC -> "end_turn";
+            case VERTEX_AI_GEMINI -> throw new IllegalArgumentException("Unsupported fixture provider.");
+        };
+        return ChatGenerationMetadata.builder().finishReason(reason).build();
     }
 }

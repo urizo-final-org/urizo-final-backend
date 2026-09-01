@@ -178,7 +178,7 @@ services:
     restart: unless-stopped
     init: true
     environment:
-      SPRING_PROFILES_ACTIVE: ${AXMS_SPRING_PROFILES_ACTIVE:-dev,local-full,coding-job-local-fixture,coding-model-turn-local-mock}
+      SPRING_PROFILES_ACTIVE: ${AXMS_SPRING_PROFILES_ACTIVE:-dev,local-full,coding-job-local-fixture}
       JAVA_TOOL_OPTIONS: -XX:InitialRAMPercentage=20 -XX:MaxRAMPercentage=70 -XX:+ExitOnOutOfMemoryError
       AXMS_CORE_DB_JDBC_URL: jdbc:postgresql://database:5432/ax_module_studio
       AXMS_CORE_DB_USERNAME: cms_app

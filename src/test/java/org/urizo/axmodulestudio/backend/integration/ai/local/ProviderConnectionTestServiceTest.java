@@ -91,7 +91,61 @@ class ProviderConnectionTestServiceTest {
     }
 
     @Test
-    void classifiesAnthropicBillingWithoutPaidInference() throws Exception {
+    void recordsAnthropicOnlyAfterARealMinimalInference() throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                200,
+                "{\"content\":[{\"type\":\"text\",\"text\":\"OK\"}],"
+                        + "\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}"));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.modelId()).isEqualTo("claude-haiku-4-5-20251001");
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.VERIFIED);
+        assertThat(result.inferenceExecuted()).isTrue();
+        assertThat(result.inputTokens()).isEqualTo(7);
+        assertThat(result.outputTokens()).isEqualTo(1);
+        verify(transport).exchange(
+                eq("POST"),
+                eq(URI.create("https://api.anthropic.com/v1/messages")),
+                eq(Map.of(
+                        "x-api-key", "sk-ant-fixture-only-not-a-real-key-1234567890",
+                        "anthropic-version", "2023-06-01",
+                        "Content-Type", "application/json")),
+                eq("{\"model\":\"claude-haiku-4-5-20251001\",\"max_tokens\":8,"
+                        + "\"messages\":[{\"role\":\"user\","
+                        + "\"content\":\"Reply with exactly OK.\"}]}"),
+                eq(Duration.ofSeconds(30)));
+        verify(repository).recordTestIfCurrent(
+                eq(ModelProvider.ANTHROPIC),
+                eq("fingerprint-ANTHROPIC"),
+                eq(result.modelId()),
+                eq(ProviderCredentialState.VERIFIED),
+                eq("PASSED"),
+                isNull(),
+                eq(7),
+                eq(1),
+                eq(0L));
+    }
+
+    @Test
+    void doesNotVerifyAnthropicWhenInferenceReturnsNoOutput() throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                200,
+                "{\"content\":[],\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}"));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.PROVIDER_UNAVAILABLE);
+        assertThat(result.inferenceExecuted()).isFalse();
+        assertThat(result.safeCode()).isEqualTo("MODEL_RESPONSE_INVALID");
+    }
+
+    @Test
+    void classifiesAnthropicBillingDuringMinimalInference() throws Exception {
         when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
                 .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
         when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
@@ -104,12 +158,13 @@ class ProviderConnectionTestServiceTest {
         assertThat(result.inferenceExecuted()).isFalse();
         assertThat(result.safeCode()).isEqualTo("BILLING_BLOCKED");
         verify(transport).exchange(
-                eq("GET"),
-                eq(URI.create("https://api.anthropic.com/v1/models?limit=1")),
+                eq("POST"),
+                eq(URI.create("https://api.anthropic.com/v1/messages")),
                 eq(Map.of(
                         "x-api-key", "sk-ant-fixture-only-not-a-real-key-1234567890",
-                        "anthropic-version", "2023-06-01")),
-                eq(""),
+                        "anthropic-version", "2023-06-01",
+                        "Content-Type", "application/json")),
+                any(String.class),
                 eq(Duration.ofSeconds(30)));
     }
 

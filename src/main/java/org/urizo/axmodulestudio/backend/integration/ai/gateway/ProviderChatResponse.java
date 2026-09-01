@@ -13,7 +13,8 @@ public record ProviderChatResponse(
         List<ProviderChatMessage.ToolCall> toolCalls,
         int inputTokens,
         int outputTokens,
-        Duration latency) {
+        Duration latency,
+        ProviderFinishReason finishReason) {
 
     private static final int MAX_TOOL_CALLS = 50;
 
@@ -23,6 +24,7 @@ public record ProviderChatResponse(
         content = Objects.requireNonNull(content, "content is required");
         toolCalls = List.copyOf(Objects.requireNonNull(toolCalls, "toolCalls are required"));
         latency = Objects.requireNonNull(latency, "latency is required");
+        finishReason = Objects.requireNonNull(finishReason, "finishReason is required");
         if (modelId.isBlank() || content.isBlank() && toolCalls.isEmpty()) {
             throw new IllegalArgumentException(
                     "modelId and assistant response cannot be blank");
@@ -39,6 +41,24 @@ public record ProviderChatResponse(
         if (inputTokens < 0 || outputTokens < 0 || latency.isNegative()) {
             throw new IllegalArgumentException("token counters and latency cannot be negative");
         }
+        if (finishReason == ProviderFinishReason.TOOL_CALLS != !toolCalls.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "tool-call finish reason must match the normalized tool calls");
+        }
+    }
+
+    public ProviderChatResponse(
+            ModelProvider provider,
+            String modelId,
+            String content,
+            List<ProviderChatMessage.ToolCall> toolCalls,
+            int inputTokens,
+            int outputTokens,
+            Duration latency) {
+        this(provider, modelId, content, toolCalls, inputTokens, outputTokens, latency,
+                toolCalls.isEmpty()
+                        ? ProviderFinishReason.COMPLETED
+                        : ProviderFinishReason.TOOL_CALLS);
     }
 
     public ProviderChatResponse(
@@ -48,7 +68,8 @@ public record ProviderChatResponse(
             int inputTokens,
             int outputTokens,
             Duration latency) {
-        this(provider, modelId, content, List.of(), inputTokens, outputTokens, latency);
+        this(provider, modelId, content, List.of(), inputTokens, outputTokens, latency,
+                ProviderFinishReason.COMPLETED);
     }
 
     @Override
@@ -58,6 +79,7 @@ public record ProviderChatResponse(
                 + ", content=REDACTED, toolCalls=" + toolCalls.size()
                 + ", inputTokens=" + inputTokens
                 + ", outputTokens=" + outputTokens
-                + ", latency=" + latency + "]";
+                + ", latency=" + latency
+                + ", finishReason=" + finishReason + "]";
     }
 }

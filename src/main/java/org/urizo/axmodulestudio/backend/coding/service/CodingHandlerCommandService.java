@@ -112,6 +112,13 @@ public final class CodingHandlerCommandService {
             CodingHandlerContract.InitializeRequest request) {
         Objects.requireNonNull(actor, "actor is required");
         Objects.requireNonNull(jobId, "jobId is required");
+        // Before anything is written or any model is called. A request that was never going to be
+        // allowed should not cost three model conversations to find that out.
+        GuardrailRequestPrecheck.Refusal refusal =
+                GuardrailRequestPrecheck.refusalFor(request.requestText());
+        if (refusal != null) {
+            throw failure(refusal.code(), refusal.message(), HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         byte[] digest = digest("INITIALIZE", jobId, actor.actorId(), request);
         try {
             CodingHandlerContract.JobRequestResponse response = transactions.execute(status -> {

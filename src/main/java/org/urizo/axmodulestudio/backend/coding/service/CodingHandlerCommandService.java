@@ -38,6 +38,19 @@ public final class CodingHandlerCommandService {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$");
 
     private final JdbcTemplate jdbc;
+    /**
+     * Reads only the accepted Worker outcome that the approval projection needs.
+     * {@code app.coding_worker_command} is granted to the Worker lane alone, so the
+     * lifecycle template cannot see it and every human approval failed as a store
+     * outage. The Worker owns that row; this lane only reads it.
+     *
+     * <p>This binds the Job lifecycle to the Model Turn bridge datasource, which is
+     * the only lane that can read the Worker command. Enabling
+     * {@code ax.coding.job-lifecycle} without {@code ax.coding.model-turn-bridge}
+     * therefore fails startup. No configuration does that today, and an approval
+     * cannot exist without the Worker that the bridge runs.
+     */
+    private final JdbcTemplate workerReadJdbc;
     private final TransactionTemplate transactions;
     private final CodingJobLifecycleRepository lifecycle;
     private final CodingJobLifecycleService lifecycleService;
@@ -47,6 +60,7 @@ public final class CodingHandlerCommandService {
 
     CodingHandlerCommandService(
             @Qualifier("codingJobLifecycleJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate workerReadJdbc,
             @Qualifier("codingJobLifecycleTransactionTemplate") TransactionTemplate transactions,
             CodingJobLifecycleRepository lifecycle,
             CodingJobLifecycleService lifecycleService,
@@ -54,6 +68,7 @@ public final class CodingHandlerCommandService {
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = jdbc;
+        this.workerReadJdbc = workerReadJdbc;
         this.transactions = transactions;
         this.lifecycle = lifecycle;
         this.lifecycleService = lifecycleService;
@@ -232,7 +247,7 @@ public final class CodingHandlerCommandService {
         }
         AttemptAuthority attempt = requireActiveAttempt(jobId, request.pipelineAttempt());
         CodingApprovalReadiness.ReadyApproval ready = CodingApprovalReadiness.find(
-                        jdbc,
+                        workerReadJdbc,
                         objectMapper,
                         jobId,
                         job.traceId(),

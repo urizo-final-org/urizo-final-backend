@@ -38,6 +38,19 @@ public final class CodingHandlerCommandService {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$");
 
     private final JdbcTemplate jdbc;
+    /**
+     * Reads only the accepted Worker outcome that the approval projection needs.
+     * {@code app.coding_worker_command} is granted to the Worker lane alone, so the
+     * lifecycle template cannot see it and every human approval failed as a store
+     * outage. The Worker owns that row; this lane only reads it.
+     *
+     * <p>This binds the Job lifecycle to the Model Turn bridge datasource, which is
+     * the only lane that can read the Worker command. Enabling
+     * {@code ax.coding.job-lifecycle} without {@code ax.coding.model-turn-bridge}
+     * therefore fails startup. No configuration does that today, and an approval
+     * cannot exist without the Worker that the bridge runs.
+     */
+    private final JdbcTemplate workerReadJdbc;
     private final TransactionTemplate transactions;
     private final CodingJobLifecycleRepository lifecycle;
     private final CodingJobLifecycleService lifecycleService;
@@ -47,6 +60,7 @@ public final class CodingHandlerCommandService {
 
     CodingHandlerCommandService(
             @Qualifier("codingJobLifecycleJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate workerReadJdbc,
             @Qualifier("codingJobLifecycleTransactionTemplate") TransactionTemplate transactions,
             CodingJobLifecycleRepository lifecycle,
             CodingJobLifecycleService lifecycleService,
@@ -54,6 +68,7 @@ public final class CodingHandlerCommandService {
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = jdbc;
+        this.workerReadJdbc = workerReadJdbc;
         this.transactions = transactions;
         this.lifecycle = lifecycle;
         this.lifecycleService = lifecycleService;
@@ -173,7 +188,6 @@ public final class CodingHandlerCommandService {
         Objects.requireNonNull(actor, "actor is required");
         Objects.requireNonNull(jobId, "jobId is required");
         requireIdempotencyKey(idempotencyKey);
-        requireRole(actor.role(), request.stage());
         UUID expectedApprovalId = CodingApprovalId.forStage(
                 jobId,
                 request.pipelineAttempt(),
@@ -233,22 +247,25 @@ public final class CodingHandlerCommandService {
         }
         AttemptAuthority attempt = requireActiveAttempt(jobId, request.pipelineAttempt());
         CodingApprovalReadiness.ReadyApproval ready = CodingApprovalReadiness.find(
-                        jdbc, jobId, attempt.pipelineAttempt())
+                        workerReadJdbc,
+                        objectMapper,
+                        jobId,
+                        job.traceId(),
+                        job.stateVersion(),
+                        attempt.pipelineAttempt())
                 .orElseThrow(() -> conflict(
                         "APPROVAL_STAGE_NOT_READY",
                         "No Coding approval stage is ready for this Job state."));
-        if (ready.stage() != request.stage()
+        requireRole(actor.role(), ready.requiredRole());
+        if (!ready.approvalId().equals(request.approvalId())
+                || !ready.nodeId().equals(request.nodeId())
+                || ready.stage() != request.stage()
+                || ready.stageRound() != request.stageRound()
                 || !Objects.equals(ready.candidateSha(), request.candidateSha())
                 || !Objects.equals(ready.validationHash(), request.validationHash())) {
             throw conflict(
                     "APPROVAL_STAGE_NOT_READY",
                     "The requested Coding approval is out of order or bound to stale evidence.");
-        }
-        int expectedRound = decisionCount(jobId, request.stage()) + 1;
-        if (request.stageRound() != expectedRound) {
-            throw conflict(
-                    "APPROVAL_ROUND_CONFLICT",
-                    "stageRound does not match the next Coding approval round.");
         }
         Instant now = Instant.now(clock);
         Integer nextAttempt = null;
@@ -398,14 +415,6 @@ public final class CodingHandlerCommandService {
         return rows.get(0);
     }
 
-    private int decisionCount(UUID jobId, CodingHandlerContract.ApprovalStage stage) {
-        Integer count = jdbc.queryForObject("""
-                SELECT COUNT(*) FROM app.coding_approval_decision
-                WHERE job_id = ? AND stage = ?
-                """, Integer.class, jobId, stage.name());
-        return count == null ? 0 : count;
-    }
-
     private ExistingRequest findRequest(UUID jobId) {
         List<ExistingRequest> rows = jdbc.query("""
                 SELECT cjr.request_text, cjr.system_work_id, cjr.work_slug,
@@ -493,11 +502,11 @@ public final class CodingHandlerCommandService {
         }
     }
 
-    static void requireRole(
-            AdminRole role, CodingHandlerContract.ApprovalStage stage) {
-        boolean permitted = switch (stage) {
-            case SCOPE, CANDIDATE, CMS -> role.isCmsAdministrator();
-            case GITHUB, DEPLOY -> role.isPlatformGlobal();
+    static void requireRole(AdminRole role, String requiredRole) {
+        boolean permitted = switch (requiredRole) {
+            case "GENERAL_ADMIN" -> role.isCmsAdministrator();
+            case "SUPER_ADMIN" -> role.isPlatformGlobal();
+            default -> false;
         };
         if (!permitted) {
             throw failure(

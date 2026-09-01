@@ -41,18 +41,26 @@ public class ProfileModelBindingService {
                     "llm-ops-code", new ModelTarget(
                             ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
                     "llm-ops-review", new ModelTarget(
-                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT)),
+                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                    "llm-ops-claude", new ModelTarget(
+                            ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT)),
             "NATURAL_CMS", Map.of(
                     "natural-cms-analyze", new ModelTarget(
                             ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
                     "natural-cms-command", new ModelTarget(
-                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT)));
+                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                    "natural-cms-claude", new ModelTarget(
+                            ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT)));
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
     private final ProviderCapabilityRegistry capabilityRegistry;
 
     public ProfileModelBindingService(
+            // The profile snapshot table is granted to ai_workspace, not to the primary
+            // cms_app datasource, so the unqualified template failed every local lookup
+            // with a permission error surfaced as INTERNAL_TRANSIENT_ERROR.
+            @org.springframework.beans.factory.annotation.Qualifier("codingModelTurnJdbcTemplate")
             JdbcTemplate jdbcTemplate,
             ObjectMapper objectMapper,
             ProviderCapabilityRegistry capabilityRegistry) {
@@ -151,6 +159,11 @@ public class ProfileModelBindingService {
             }
         }
         return List.copyOf(selected.values());
+    }
+
+    static boolean isRegisteredBindingKey(String profileKey, String bindingKey) {
+        Map<String, ModelTarget> catalog = BINDINGS.get(profileKey);
+        return catalog != null && catalog.containsKey(bindingKey);
     }
 
     private static List<String> bindingKeys(JsonNode binding) {

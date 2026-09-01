@@ -124,7 +124,15 @@
         "type": "string",
         "minLength": 1,
         "maxLength": 128,
-        "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$"
+        "pattern": "^[a-z][a-z0-9_-]*(?:\\.[a-z][a-z0-9_-]*)*$",
+        "description": "Executable Backend-owned handler registry. common.approval is intentionally unavailable until a Backend approval authority exists.",
+        "enum": [
+          "common.start", "common.guardrail", "common.check", "common.end",
+          "coding.analyze", "coding.code", "coding.review", "coding.preview",
+          "coding.approval", "coding.preview_approval", "coding.pr_request",
+          "coding.deploy_request", "coding.rework_gate", "cms.analyze",
+          "cms.preview", "cms.discard", "cms.apply", "cms.approval"
+        ]
       },
       "ResultPort": {
         "type": "string",
@@ -177,11 +185,15 @@
             "uniqueItems": true,
             "items": { "$ref": "#/components/schemas/ResultPort" }
           },
-          "config": { "$ref": "#/components/schemas/JsonObject" }
+          "config": {
+            "$ref": "#/components/schemas/JsonObject",
+            "description": "Fixed runtime registry config: common.start/check/end, coding analyze/code/review/preview/pr_request, and CMS analyze/preview/discard/apply require {}; common.guardrail requires exactly {locked:true}; coding.deploy_request requires {mode:request_record_only}; coding.rework_gate requires one positive integer maxReworkRounds; coding approvals require the registered stage/role rule; cms.approval requires {stage:PREVIEW,requiredRole:GENERAL_ADMIN}."
+          }
         }
       },
       "SnapshotEdge": {
         "type": "object",
+        "description": "Every declared result port has exactly one edge. The failed port of common.guardrail and common.check routes directly to the sole common.end node.",
         "additionalProperties": false,
         "required": ["from", "resultPort", "to"],
         "properties": {
@@ -207,7 +219,12 @@
         "required": ["maxNodes", "maxAttempts", "loopLimits"],
         "properties": {
           "maxNodes": { "type": "integer", "minimum": 1 },
-          "maxAttempts": { "type": "integer", "minimum": 3, "maximum": 3 },
+          "maxAttempts": {
+            "type": "integer",
+            "minimum": 3,
+            "maximum": 3,
+            "description": "Fixed at the Python compiler and worker persistence invariant of three attempts."
+          },
           "loopLimits": {
             "type": "array",
             "uniqueItems": true,
@@ -215,9 +232,31 @@
           }
         }
       },
+      "ModelBindingKey": {
+        "type": "string",
+        "description": "Backend-registered semantic binding key. LLM_OPS uses llm-ops-* keys and NATURAL_CMS uses natural-cms-* keys.",
+        "enum": [
+          "llm-ops-analyze", "llm-ops-code", "llm-ops-review", "llm-ops-claude",
+          "natural-cms-analyze", "natural-cms-command", "natural-cms-claude"
+        ]
+      },
+      "ModelBinding": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["primary", "fallback"],
+        "properties": {
+          "primary": { "$ref": "#/components/schemas/ModelBindingKey" },
+          "fallback": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/ModelBindingKey" }
+          }
+        }
+      },
       "ModelBindings": {
         "type": "object",
-        "additionalProperties": { "$ref": "#/components/schemas/JsonObject" }
+        "propertyNames": { "$ref": "#/components/schemas/NodeId" },
+        "additionalProperties": { "$ref": "#/components/schemas/ModelBinding" }
       },
       "VersionedSnapshot": {
         "type": "object",

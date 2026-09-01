@@ -7,6 +7,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -87,6 +88,31 @@ public class CodingRunnerService {
                     task.kind(), readJson(task.payload()), leaseId, leaseExpiresAt,
                     task.attempt() + 1, task.maxAttempts());
         });
+    }
+
+    /**
+     * Adds one runner command to the queue. The runner claims a single PENDING
+     * row ordered by creation time, so commands queued together run in the order
+     * they are added here. The kind is bounded by the table check constraint and
+     * the runner's own allowlist; the payload never names a build target.
+     */
+    public UUID enqueue(String kind, JsonNode payload) {
+        Objects.requireNonNull(kind, "kind is required");
+        Objects.requireNonNull(payload, "payload is required");
+        if (!LEASE_BY_KIND.containsKey(kind) || !payload.isObject()) {
+            throw new IllegalArgumentException("The runner command is not registered.");
+        }
+        UUID taskId = UUID.randomUUID();
+        String encoded;
+        try {
+            encoded = objectMapper.writeValueAsString(payload);
+        }
+        catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("The runner payload is invalid.", failure);
+        }
+        jdbc.update("INSERT INTO app.coding_runner_task (task_id, kind, payload) "
+                + "VALUES (?, ?, ?::jsonb)", taskId, kind, encoded);
+        return taskId;
     }
 
     public CodingRunnerContract.HeartbeatResponse heartbeat(

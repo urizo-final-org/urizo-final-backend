@@ -49,7 +49,8 @@ public final class CodingWorkerContract {
             @NotBlank @Pattern(regexp = "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$") String idempotencyKey,
             @Min(1) int expectedStateVersion,
             @NotBlank String outcome,
-            @Pattern(regexp = "^[A-Z][A-Z0-9_]{2,119}$") String errorCode) {
+            @Pattern(regexp = "^[A-Z][A-Z0-9_]{2,119}$") String errorCode,
+            @Valid PendingApproval pendingApproval) {
         public OutcomeRequest {
             requireVersion(schemaVersion);
             if (!OUTCOMES.contains(outcome)) {
@@ -58,8 +59,19 @@ public final class CodingWorkerContract {
             if (outcome.endsWith("FAILURE") != (errorCode != null)) {
                 throw new IllegalArgumentException("errorCode is required only for a failure outcome.");
             }
+            if ("WAITING_APPROVAL".equals(outcome) != (pendingApproval != null)) {
+                throw new IllegalArgumentException(
+                        "pendingApproval is required only for a WAITING_APPROVAL outcome.");
+            }
         }
     }
+
+    public record PendingApproval(
+            @NotNull UUID approvalId,
+            @NotBlank @Pattern(regexp = "^[a-z][a-z0-9_-]{0,63}$") String nodeId,
+            @NotNull CodingHandlerContract.ApprovalStage stage,
+            @Min(1) int stageRound,
+            @NotBlank @Pattern(regexp = "^(GENERAL_ADMIN|SUPER_ADMIN)$") String requiredRole) { }
 
     public record ClaimResponse(
             String schemaVersion,
@@ -133,12 +145,14 @@ public final class CodingWorkerContract {
             Instant leaseExpiresAt,
             int stateVersion) { }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record OutcomeResponse(
             String schemaVersion,
             UUID jobId,
             UUID traceId,
             int stateVersion,
-            String status) { }
+            String status,
+            @Valid PendingApproval pendingApproval) { }
 
     public record JobErrorEnvelope(
             String schemaVersion,
@@ -153,7 +167,13 @@ public final class CodingWorkerContract {
             UUID traceId,
             @Valid ErrorDetail error) { }
 
-    @JsonInclude(JsonInclude.Include.NON_NULL)
+    /**
+     * Every field stays on the wire, including a null retryAfterMs. The Orchestrator
+     * accepts this envelope only when the key is present, and requires it to be null
+     * for a non-retryable failure. Dropping the key made every such rejection decode
+     * as a malformed reply, so the worker reported WORKER_RESPONSE_INVALID and the
+     * real cause - an authorization denial, for example - never reached the Job.
+     */
     public record ErrorDetail(
             String code,
             String message,

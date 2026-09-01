@@ -31,7 +31,8 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatReque
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
-import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -43,8 +44,12 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
             "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
-    private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
-            new StructuredOutputGuard();
+    /** Mirrors the ProviderChatRequest budget so an oversized context fails as a gateway error. */
+    private static final int MAX_REQUEST_CHARACTERS = 65_536;
+    // A JSON object because a native tool response body must parse as JSON.
+    private static final String ELIDED_TOOL_CONTENT =
+            "{\"content\":\"[elided for the request budget. "
+                    + "Re-read the file when its body is required.]\"}";
     private final ProviderCapabilityRegistry capabilityRegistry;
     private final ProviderChatGatewayPort chatGateway;
     private final ObjectMapper objectMapper;
@@ -92,8 +97,11 @@ public class CodingModelTurnService {
             List<ProviderModelRegistration> boundModels) {
         Objects.requireNonNull(request, "request is required");
         ToolMode toolMode = requireSupportedSubset(request, naturalCms);
-        ModelUseCase useCase = toolMode == ToolMode.PROVIDER
-                ? ModelUseCase.TOOL_CALL : ModelUseCase.CHAT;
+        ModelUseCase useCase = switch (toolMode) {
+            case PROVIDER -> ModelUseCase.TOOL_CALL;
+            case STRUCTURED -> ModelUseCase.STRUCTURED_OUTPUT;
+            case NONE, LOCAL_FIXTURE -> ModelUseCase.CHAT;
+        };
         List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
         ProviderGatewayException lastFailure = null;
         for (ProviderModelRegistration selected : candidates) {
@@ -158,10 +166,15 @@ public class CodingModelTurnService {
             CodingModelTurnContract.Request request,
             ToolMode toolMode,
             ProviderModelRegistration selected) {
+        ProviderResponseFormat responseFormat = providerResponseFormat(request);
+        List<ProviderToolDefinition> providerTools = toolMode == ToolMode.PROVIDER
+                ? providerTools(request) : List.of();
         ProviderChatResponse providerResponse = chatGateway.chat(new ProviderChatRequest(
                 selected.provider(),
                 selected.modelId(),
-                normalizedMessages(request, toolMode),
+                normalizedMessages(request, requestOverhead(providerTools, responseFormat)),
+                providerTools,
+                responseFormat,
                 request.deadlineAt()));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
@@ -172,25 +185,36 @@ public class CodingModelTurnService {
                     "Model provider returned an invalid normalized response.");
         }
         int totalTokens = providerResponse.inputTokens() + providerResponse.outputTokens();
-        ParsedAssistant parsed = toolMode == ToolMode.PROVIDER
-                ? parseProviderToolEnvelope(request, providerResponse.content())
-                : new ParsedAssistant(providerResponse.content(), List.of());
+        if (toolMode != ToolMode.PROVIDER && !providerResponse.toolCalls().isEmpty()) {
+            throw invalidProviderResponse();
+        }
+        List<CodingModelTurnContract.ToolCall> nativeCalls = toolMode == ToolMode.PROVIDER
+                ? nativeToolCalls(providerResponse, providerTools)
+                : List.of();
         List<CodingModelTurnContract.ToolCall> toolCalls = toolMode == ToolMode.LOCAL_FIXTURE
                 ? List.of(new CodingModelTurnContract.ToolCall(
                         UUID.nameUUIDFromBytes((request.turnId() + ":" + LOCAL_TOOL_NAME)
                                 .getBytes(StandardCharsets.UTF_8)),
                         LOCAL_TOOL_NAME,
                         JsonNodeFactory.instance.objectNode().put("path", LOCAL_TOOL_PATH)))
-                : parsed.toolCalls();
+                : nativeCalls;
+        JsonNode structuredOutput = toolMode == ToolMode.STRUCTURED
+                ? responseFormat.validateOrRepair(providerResponse.content()) : null;
+        String assistantContent = structuredOutput == null
+                ? providerResponse.content() : "";
+        CodingModelTurnContract.ResponseFormat resultFormat = structuredOutput == null
+                ? CodingModelTurnContract.TextResponseFormat.text()
+                : new CodingModelTurnContract.JsonSchemaResponseFormat(
+                        "JSON_SCHEMA", responseFormat.schemaDigest(), structuredOutput);
         return new CodingModelTurnContract.Response(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 request.turnId(),
                 request.jobId(),
                 request.traceId(),
                 request.idempotencyKey(),
-                new CodingModelTurnContract.Assistant("assistant", parsed.content()),
+                new CodingModelTurnContract.Assistant("assistant", assistantContent),
                 toolCalls,
-                CodingModelTurnContract.TextResponseFormat.text(),
+                resultFormat,
                 new CodingModelTurnContract.SelectedModel(
                         contractProvider(providerResponse.provider()),
                         providerResponse.modelId()),
@@ -205,25 +229,29 @@ public class CodingModelTurnService {
 
     private ToolMode requireSupportedSubset(
             CodingModelTurnContract.Request request, boolean naturalCms) {
-        JsonNode responseFormat = request.responseFormat();
-        boolean textFormat = responseFormat.isObject()
-                && responseFormat.size() == 1
-                && responseFormat.path("type").isTextual()
-                && "TEXT".equals(responseFormat.path("type").textValue());
+        ProviderResponseFormat responseFormat = providerResponseFormat(request);
         Set<String> capabilities = Set.copyOf(request.requiredCapabilities());
-        boolean chatOnly = capabilities.equals(CHAT_ONLY) && request.toolSchemas().isEmpty();
+        boolean chatOnly = capabilities.equals(CHAT_ONLY)
+                && request.toolSchemas().isEmpty()
+                && !responseFormat.structured();
+        boolean structured = capabilities.equals(Set.of("CHAT", "STRUCTURED_OUTPUT"))
+                && request.toolSchemas().isEmpty()
+                && responseFormat.structured();
         boolean localToolCandidate = localMockToolCandidateEnabled
                 && capabilities.equals(CHAT_WITH_TOOLS)
                 && validLocalToolSchema(request.toolSchemas());
         boolean providerToolCandidate = capabilities.equals(CHAT_WITH_TOOLS)
                 && validApprovedToolSchemas(request.toolSchemas(), naturalCms);
-        if ((!chatOnly && !localToolCandidate && !providerToolCandidate) || !textFormat) {
+        if (!chatOnly && !structured && !localToolCandidate && !providerToolCandidate) {
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
                     "The local Model Turn bridge cannot satisfy the requested capability set.");
         }
         if (localToolCandidate) {
             return ToolMode.LOCAL_FIXTURE;
+        }
+        if (structured) {
+            return ToolMode.STRUCTURED;
         }
         return providerToolCandidate ? ToolMode.PROVIDER : ToolMode.NONE;
     }
@@ -271,23 +299,9 @@ public class CodingModelTurnService {
     }
 
     private List<ProviderChatMessage> normalizedMessages(
-            CodingModelTurnContract.Request request, ToolMode toolMode) {
+            CodingModelTurnContract.Request request, long requestOverhead) {
         List<ProviderChatMessage> messages = new ArrayList<>();
         Map<String, String> pendingToolNames = new HashMap<>();
-        if (toolMode == ToolMode.PROVIDER) {
-            try {
-                messages.add(ProviderChatMessage.plain(
-                        ProviderChatMessage.Role.SYSTEM,
-                        "Return exactly one JSON object with fields assistant and toolCalls. "
-                                + "assistant must be a string and toolCalls must contain zero or one "
-                                + "declared tool call with name and arguments. Do not add markdown.\n"
-                                + "Declared tools: "
-                                + objectMapper.writeValueAsString(request.toolSchemas())));
-            }
-            catch (JsonProcessingException failure) {
-                throw invalidContract();
-            }
-        }
         for (JsonNode message : request.messages()) {
             String role = message.path("role").textValue();
             String content = message.path("content").textValue();
@@ -322,7 +336,7 @@ public class CodingModelTurnService {
                             throw invalidContract();
                         }
                         messages.add(ProviderChatMessage.tool(
-                                toolCallId, name, content));
+                                toolCallId, name, jsonToolResult(content)));
                     }
                     default -> throw invalidContract();
                 }
@@ -334,116 +348,142 @@ public class CodingModelTurnService {
         if (!pendingToolNames.isEmpty()) {
             throw invalidContract();
         }
-        return List.copyOf(messages);
+        return withinRequestBudget(messages, requestOverhead);
     }
 
-    private ParsedAssistant parseProviderToolEnvelope(
-            CodingModelTurnContract.Request request, String content) {
-        StructuredOutputGuard.ValidatedOutput<String> validated;
-        try {
-            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
-                    content,
-                    candidate -> readProviderToolEnvelope(request, candidate) != null,
-                    StructuredOutputGuard::extractOutermostJsonObject);
-        }
-        catch (ProviderGatewayException failure) {
-            throw new ProviderGatewayException(
-                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid Coding tool envelope.");
-        }
-        ParsedAssistant parsed = readProviderToolEnvelope(request, validated.value());
-        if (parsed == null) {
-            throw new ProviderGatewayException(
-                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid Coding tool envelope.");
-        }
-        return parsed;
+    /**
+     * What ProviderChatRequest counts besides the messages. Tool definitions and a structured
+     * output schema ride in the same budget, so the message budget is what is left after them.
+     */
+    private static long requestOverhead(
+            List<ProviderToolDefinition> tools, ProviderResponseFormat responseFormat) {
+        return tools.stream()
+                .mapToLong(tool -> tool.name().length()
+                        + tool.description().length()
+                        + tool.providerInputSchema().length())
+                .sum()
+                + (responseFormat.structured()
+                        ? responseFormat.providerOutputSchema().length() : 0);
     }
 
-    private ParsedAssistant readProviderToolEnvelope(
-            CodingModelTurnContract.Request request, String content) {
-        if (content == null) {
-            return null;
-        }
+    /**
+     * A native tool response must be JSON: Gemini parses the function response body and
+     * rejects the whole request when a text tool result - a read file, for example -
+     * does not parse. A result that is already a JSON object or array passes through
+     * unchanged; anything else is wrapped as one field.
+     */
+    private String jsonToolResult(String content) {
         try {
-            JsonNode envelope = StructuredOutputGuard.readSingleJsonObject(
-                    objectMapper, content);
-            if (envelope == null
-                    || envelope.size() != 2
-                    || !envelope.path("assistant").isTextual()
-                    || !envelope.path("toolCalls").isArray()
-                    || envelope.path("toolCalls").size() > 1) {
-                throw new IllegalArgumentException();
+            JsonNode parsed = objectMapper.readTree(content);
+            if (parsed != null && (parsed.isObject() || parsed.isArray())) {
+                return content;
             }
-            Map<String, JsonNode> declared = new HashMap<>();
-            for (JsonNode schema : request.toolSchemas()) {
-                declared.put(schema.path("name").asText(), schema.path("inputSchema"));
+        }
+        catch (JsonProcessingException ignored) {
+            // Not JSON - wrapped below.
+        }
+        return objectMapper.createObjectNode().put("content", content).toString();
+    }
+
+    /**
+     * A tool message carries the whole tool body, so a handful of file reads alone
+     * exceeds the ProviderChatRequest budget and the request would be rejected as a
+     * raw argument failure. The oldest tool bodies are dropped first, and only once
+     * the request would not fit, so a request that already fits is unchanged.
+     *
+     * <p>The tool definitions and any structured output schema are reserved first, because
+     * ProviderChatRequest counts them in the same budget. Measuring the messages alone left a
+     * band where nothing was elided here and the request was still refused on construction.
+     */
+    private List<ProviderChatMessage> withinRequestBudget(
+            List<ProviderChatMessage> messages, long requestOverhead) {
+        long messageBudget = MAX_REQUEST_CHARACTERS - requestOverhead;
+        List<ProviderChatMessage> bounded = new ArrayList<>(messages);
+        long characters = characters(bounded);
+        for (int index = 0; index < bounded.size() && characters > messageBudget; index++) {
+            ProviderChatMessage message = bounded.get(index);
+            if (message.role() != ProviderChatMessage.Role.TOOL
+                    || ELIDED_TOOL_CONTENT.equals(message.content())) {
+                continue;
             }
-            List<CodingModelTurnContract.ToolCall> calls = new ArrayList<>();
-            for (JsonNode call : envelope.path("toolCalls")) {
-                if (!call.isObject() || call.size() != 2
-                        || !call.path("name").isTextual()
-                        || !call.path("arguments").isObject()) {
+            characters -= message.content().length() - ELIDED_TOOL_CONTENT.length();
+            bounded.set(index, ProviderChatMessage.tool(
+                    message.toolCallId(), message.toolName(), ELIDED_TOOL_CONTENT));
+        }
+        if (characters > messageBudget) {
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
+                    "The Coding stage context exceeds the model request budget.");
+        }
+        return List.copyOf(bounded);
+    }
+
+    /** Counts what ProviderChatRequest bounds for the messages themselves. */
+    private static long characters(List<ProviderChatMessage> messages) {
+        return messages.stream()
+                .mapToLong(message -> message.content().length()
+                        + message.toolCalls().stream()
+                                .mapToLong(call -> call.arguments().length())
+                                .sum())
+                .sum();
+    }
+
+    private ProviderResponseFormat providerResponseFormat(
+            CodingModelTurnContract.Request request) {
+        try {
+            return ProviderResponseFormat.fromContract(request.responseFormat());
+        }
+        catch (IllegalArgumentException failure) {
+            throw invalidContract();
+        }
+    }
+
+    private static List<ProviderToolDefinition> providerTools(
+            CodingModelTurnContract.Request request) {
+        try {
+            return request.toolSchemas().stream()
+                    .map(ProviderToolDefinition::fromContract)
+                    .toList();
+        }
+        catch (IllegalArgumentException failure) {
+            throw invalidContract();
+        }
+    }
+
+    private List<CodingModelTurnContract.ToolCall> nativeToolCalls(
+            ProviderChatResponse response,
+            List<ProviderToolDefinition> definitions) {
+        Map<String, ProviderToolDefinition> declared = new HashMap<>();
+        definitions.forEach(definition -> declared.put(definition.name(), definition));
+        List<CodingModelTurnContract.ToolCall> normalized = new ArrayList<>();
+        try {
+            for (ProviderChatMessage.ToolCall call : response.toolCalls()) {
+                ProviderToolDefinition definition = declared.get(call.name());
+                if (definition == null) {
                     throw new IllegalArgumentException();
                 }
-                String name = call.path("name").asText();
-                JsonNode schema = declared.get(name);
-                if (schema == null || !matchesInputSchema(call.path("arguments"), schema)) {
-                    throw new IllegalArgumentException();
-                }
-                byte[] identity = objectMapper.writeValueAsBytes(List.of(
-                        request.turnId().toString(), name, call.path("arguments")));
-                calls.add(new CodingModelTurnContract.ToolCall(
-                        UUID.nameUUIDFromBytes(identity), name,
-                        call.path("arguments").deepCopy()));
+                String arguments = definition.normalizeArguments(call.arguments());
+                JsonNode decoded = objectMapper.readTree(arguments);
+                normalized.add(new CodingModelTurnContract.ToolCall(
+                        UUID.fromString(call.id()), call.name(), decoded));
             }
-            String assistant = envelope.path("assistant").asText();
-            if (assistant.isBlank() && calls.isEmpty()) {
-                throw new IllegalArgumentException();
-            }
-            return new ParsedAssistant(assistant, List.copyOf(calls));
+            return List.copyOf(normalized);
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
-            return null;
+            throw invalidProviderResponse();
         }
-    }
-
-    private static boolean matchesInputSchema(JsonNode arguments, JsonNode schema) {
-        if (!schema.isObject()
-                || !"object".equals(schema.path("type").asText())
-                || !schema.path("additionalProperties").isBoolean()
-                || schema.path("additionalProperties").asBoolean()
-                || !schema.path("properties").isObject()
-                || !schema.path("required").isArray()) {
-            return false;
-        }
-        Set<String> actual = new HashSet<>();
-        arguments.fieldNames().forEachRemaining(actual::add);
-        Set<String> allowed = new HashSet<>();
-        schema.path("properties").fieldNames().forEachRemaining(allowed::add);
-        if (!allowed.containsAll(actual)) {
-            return false;
-        }
-        for (JsonNode required : schema.path("required")) {
-            if (!required.isTextual() || !actual.contains(required.asText())) {
-                return false;
-            }
-        }
-        for (String field : actual) {
-            JsonNode definition = schema.path("properties").path(field);
-            JsonNode value = arguments.path(field);
-            if (("string".equals(definition.path("type").asText()) && !value.isTextual())
-                    || ("integer".equals(definition.path("type").asText()) && !value.isInt())) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private static ProviderGatewayException invalidContract() {
         return new ProviderGatewayException(
                 ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
                 "Coding Model Turn messages could not be normalized.");
+    }
+
+    private static ProviderGatewayException invalidProviderResponse() {
+        return new ProviderGatewayException(
+                ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                "Model provider returned an invalid normalized response.");
     }
 
     private static String contractProvider(ModelProvider provider) {
@@ -454,8 +494,5 @@ public class CodingModelTurnService {
         };
     }
 
-    private enum ToolMode { NONE, LOCAL_FIXTURE, PROVIDER }
-
-    private record ParsedAssistant(
-            String content, List<CodingModelTurnContract.ToolCall> toolCalls) { }
+    private enum ToolMode { NONE, LOCAL_FIXTURE, PROVIDER, STRUCTURED }
 }

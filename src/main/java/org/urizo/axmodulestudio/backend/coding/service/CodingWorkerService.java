@@ -258,7 +258,8 @@ public final class CodingWorkerService {
             updateActivePipelineAttempt(request.jobId(), terminalAttemptStatus, now);
         }
         return new CodingWorkerContract.OutcomeResponse(
-                version(), request.jobId(), request.traceId(), nextVersion, status);
+                version(), request.jobId(), request.traceId(), nextVersion, status,
+                request.pendingApproval());
     }
 
     static String terminalAttemptStatus(String outcome, String resultingJobStatus) {

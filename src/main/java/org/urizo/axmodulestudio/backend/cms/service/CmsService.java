@@ -22,11 +22,9 @@ import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
 public class CmsService {
 
     private final CmsRepository repository;
-    private final CmsSiteSettingsService siteSettings;
 
-    public CmsService(CmsRepository repository, CmsSiteSettingsService siteSettings) {
+    public CmsService(CmsRepository repository) {
         this.repository = repository;
-        this.siteSettings = siteSettings;
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
@@ -196,12 +194,6 @@ public class CmsService {
         return repository.findTemplates();
     }
 
-    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
-    public TemplateView activeTemplate() {
-        return repository.findActiveTemplate()
-                .orElseThrow(() -> notFound("활성 템플릿을 찾을 수 없습니다."));
-    }
-
     @Transactional(transactionManager = "authJpaTransactionManager")
     public TemplateView saveTemplate(
             String key, String layout, String color, String siteName, String header, String footer,
@@ -211,13 +203,12 @@ public class CmsService {
         if (!repository.templateExists(key)) {
             throw notFound("템플릿을 찾을 수 없습니다.");
         }
-        repository.deactivateTemplates();
         repository.updateTemplate(
                 key, layout.trim(), color.toUpperCase(), siteName.trim(), text(header), text(footer),
                 heroImageUrl.trim(), heroTitle.trim(), text(heroSubtitle),
                 text(heroButtonLabel), text(heroButtonUrl));
-        siteSettings.applyTemplateToDefaultSite(key);
-        return activeTemplate();
+        return repository.findTemplate(key)
+                .orElseThrow(() -> notFound("템플릿을 찾을 수 없습니다."));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")

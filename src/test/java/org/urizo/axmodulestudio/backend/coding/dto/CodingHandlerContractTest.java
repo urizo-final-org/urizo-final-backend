@@ -52,6 +52,27 @@ class CodingHandlerContractTest {
     }
 
     @Test
+    void acceptsTheSnapshotSelectedApprovalNodeAndRound() {
+        CodingHandlerContract.ApprovalDecisionRequest request =
+                new CodingHandlerContract.ApprovalDecisionRequest(
+                        "1.0",
+                        TRACE_ID,
+                        3,
+                        1,
+                        UUID.randomUUID(),
+                        "snapshot-release_approval",
+                        CodingHandlerContract.ApprovalStage.GITHUB,
+                        4,
+                        CANDIDATE,
+                        DIGEST,
+                        CodingHandlerContract.Decision.APPROVED,
+                        null);
+
+        assertThat(request.nodeId()).isEqualTo("snapshot-release_approval");
+        assertThat(request.stageRound()).isEqualTo(4);
+    }
+
+    @Test
     void stageExecutionUsesOnlyExistingAi04HandlersAndResultPorts() {
         UUID resultId = UUID.randomUUID();
         CodingHandlerContract.StageExecutionRequest request =

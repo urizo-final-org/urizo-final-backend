@@ -8,6 +8,8 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonSubTypes;
+import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.JsonNode;
 
 public final class CodingModelTurnContract {
@@ -114,12 +116,24 @@ public final class CodingModelTurnContract {
             String idempotencyKey,
             Assistant assistant,
             List<ToolCall> toolCalls,
-            TextResponseFormat responseFormat,
+            ResponseFormat responseFormat,
             SelectedModel selectedModel,
             TokenUsage usage,
             long latencyMs,
             String finishReason,
             Instant completedAt) {
+
+        public Response {
+            Objects.requireNonNull(assistant, "assistant is required");
+            toolCalls = List.copyOf(Objects.requireNonNull(toolCalls, "toolCalls are required"));
+            Objects.requireNonNull(responseFormat, "responseFormat is required");
+            if (responseFormat instanceof JsonSchemaResponseFormat
+                    && (!assistant.content().isEmpty() || !toolCalls.isEmpty()
+                            || !"STOP".equals(finishReason))) {
+                throw new IllegalArgumentException(
+                        "Structured output cannot carry assistant text or tool calls.");
+            }
+        }
 
         @Override
         public String toString() {
@@ -138,9 +152,52 @@ public final class CodingModelTurnContract {
     public record ToolCall(UUID toolCallId, String name, JsonNode arguments) {
     }
 
-    public record TextResponseFormat(String type) {
+    @JsonTypeInfo(
+            use = JsonTypeInfo.Id.NAME,
+            include = JsonTypeInfo.As.EXISTING_PROPERTY,
+            property = "type",
+            visible = true)
+    @JsonSubTypes({
+        @JsonSubTypes.Type(value = TextResponseFormat.class, name = "TEXT"),
+        @JsonSubTypes.Type(value = JsonSchemaResponseFormat.class, name = "JSON_SCHEMA")
+    })
+    public sealed interface ResponseFormat
+            permits TextResponseFormat, JsonSchemaResponseFormat {
+        String type();
+    }
+
+    public record TextResponseFormat(String type) implements ResponseFormat {
+        public TextResponseFormat {
+            if (!"TEXT".equals(type)) {
+                throw new IllegalArgumentException("Text response format type is invalid.");
+            }
+        }
+
         public static TextResponseFormat text() {
             return new TextResponseFormat("TEXT");
+        }
+    }
+
+    public record JsonSchemaResponseFormat(
+            String type,
+            String schemaDigest,
+            JsonNode structuredOutput) implements ResponseFormat {
+
+        public JsonSchemaResponseFormat {
+            if (!"JSON_SCHEMA".equals(type)) {
+                throw new IllegalArgumentException(
+                        "Structured response format type is invalid.");
+            }
+            requireMatch(schemaDigest, SHA256_DIGEST, "response schema digest");
+            if (structuredOutput == null || !structuredOutput.isObject()) {
+                throw new IllegalArgumentException("structuredOutput is invalid.");
+            }
+            structuredOutput = structuredOutput.deepCopy();
+        }
+
+        @Override
+        public JsonNode structuredOutput() {
+            return structuredOutput.deepCopy();
         }
     }
 

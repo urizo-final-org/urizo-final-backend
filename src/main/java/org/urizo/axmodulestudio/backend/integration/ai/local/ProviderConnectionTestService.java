@@ -35,7 +35,6 @@ public class ProviderConnectionTestService {
     private static final String FIXED_PROMPT = "Reply with exactly OK.";
 
     private final ProviderCredentialResolver credentialResolver;
-    private final LocalProviderSecretService secretService;
     private final EncryptedProviderSecretRepository repository;
     private final ProviderHttpTransport transport;
     private final ObjectMapper objectMapper;
@@ -43,13 +42,11 @@ public class ProviderConnectionTestService {
 
     public ProviderConnectionTestService(
             ProviderCredentialResolver credentialResolver,
-            LocalProviderSecretService secretService,
             EncryptedProviderSecretRepository repository,
             ProviderHttpTransport transport,
             ObjectMapper objectMapper,
             Clock clock) {
         this.credentialResolver = credentialResolver;
-        this.secretService = secretService;
         this.repository = repository;
         this.transport = transport;
         this.objectMapper = objectMapper;
@@ -60,6 +57,7 @@ public class ProviderConnectionTestService {
         Instant startedAt = clock.instant();
         String modelId = modelId(provider);
         try (ProviderCredentialLease credential = credentialResolver.resolve(provider)) {
+            String credentialFingerprint = credential.credentialFingerprint();
             byte[] credentialBytes = credential.copySecret();
             try {
                 String credentialHeader = new String(credentialBytes, StandardCharsets.US_ASCII);
@@ -67,7 +65,8 @@ public class ProviderConnectionTestService {
                     LocalProviderSecretService.validateCredential(provider, credentialHeader);
                 }
                 catch (IllegalArgumentException failure) {
-                    return recordFailure(provider, modelId, ProviderCredentialState.INVALID_CREDENTIAL,
+                    return recordFailure(provider, modelId, credentialFingerprint,
+                            ProviderCredentialState.INVALID_CREDENTIAL,
                             "CREDENTIAL_FORMAT_INVALID", startedAt);
                 }
                 ProviderHttpResponse response = switch (provider) {
@@ -77,16 +76,16 @@ public class ProviderConnectionTestService {
                     default -> throw new IllegalArgumentException(
                             "Provider is not supported by the local connection test.");
                 };
-                return complete(provider, modelId, response, startedAt);
+                return complete(provider, modelId, credentialFingerprint, response, startedAt);
             }
             catch (InterruptedException failure) {
                 Thread.currentThread().interrupt();
-                return recordFailure(provider, modelId, ProviderCredentialState.PROVIDER_UNAVAILABLE,
-                        "INTERRUPTED", startedAt);
+                return recordFailure(provider, modelId, credentialFingerprint,
+                        ProviderCredentialState.PROVIDER_UNAVAILABLE, "INTERRUPTED", startedAt);
             }
             catch (IOException failure) {
-                return recordFailure(provider, modelId, ProviderCredentialState.PROVIDER_UNAVAILABLE,
-                        "NETWORK_ERROR", startedAt);
+                return recordFailure(provider, modelId, credentialFingerprint,
+                        ProviderCredentialState.PROVIDER_UNAVAILABLE, "NETWORK_ERROR", startedAt);
             }
             finally {
                 Arrays.fill(credentialBytes, (byte) 0);
@@ -144,20 +143,23 @@ public class ProviderConnectionTestService {
     private ProviderConnectionTestResult complete(
             ModelProvider provider,
             String modelId,
+            String credentialFingerprint,
             ProviderHttpResponse response,
             Instant startedAt) {
         if (response.statusCode() < 200 || response.statusCode() >= 300) {
             FailureClassification classification = classifyFailure(provider, response);
-            return recordFailure(provider, modelId, classification.state(), classification.safeCode(), startedAt);
+            return recordFailure(provider, modelId, credentialFingerprint,
+                    classification.state(), classification.safeCode(), startedAt);
         }
         try {
             ParsedSuccess parsed = parseSuccess(provider, response.body());
-            return record(provider, modelId, ProviderCredentialState.VERIFIED, parsed.inferenceExecuted(),
+            return record(provider, modelId, credentialFingerprint,
+                    ProviderCredentialState.VERIFIED, parsed.inferenceExecuted(),
                     parsed.inputTokens(), parsed.outputTokens(), "OK", startedAt);
         }
         catch (RuntimeException failure) {
-            return recordFailure(provider, modelId, ProviderCredentialState.PROVIDER_UNAVAILABLE,
-                    "MODEL_RESPONSE_INVALID", startedAt);
+            return recordFailure(provider, modelId, credentialFingerprint,
+                    ProviderCredentialState.PROVIDER_UNAVAILABLE, "MODEL_RESPONSE_INVALID", startedAt);
         }
     }
 
@@ -264,16 +266,19 @@ public class ProviderConnectionTestService {
     private ProviderConnectionTestResult recordFailure(
             ModelProvider provider,
             String modelId,
+            String credentialFingerprint,
             ProviderCredentialState state,
             String safeCode,
             Instant startedAt) {
-        return record(provider, modelId, state, provider != ModelProvider.ANTHROPIC,
+        return record(provider, modelId, credentialFingerprint,
+                state, provider != ModelProvider.ANTHROPIC,
                 null, null, safeCode, startedAt);
     }
 
     private ProviderConnectionTestResult record(
             ModelProvider provider,
             String modelId,
+            String credentialFingerprint,
             ProviderCredentialState state,
             boolean inferenceExecuted,
             Integer inputTokens,
@@ -282,10 +287,11 @@ public class ProviderConnectionTestService {
             Instant startedAt) {
         Instant completedAt = clock.instant();
         long latencyMs = Math.max(0, Duration.between(startedAt, completedAt).toMillis());
-        secretService.updateState(provider, state);
-        repository.recordAudit(
+        repository.recordTestIfCurrent(
                 provider,
+                credentialFingerprint,
                 modelId,
+                state,
                 state == ProviderCredentialState.VERIFIED ? "PASSED"
                         : state == ProviderCredentialState.BILLING_BLOCKED ? "BILLING_BLOCKED" : "FAILED",
                 "OK".equals(safeCode) ? null : safeCode,

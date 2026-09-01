@@ -40,6 +40,13 @@ class ProviderChatRequestTest {
     }
 
     @Test
+    void carriesTheRequestedResponseFormatAtTheProviderBoundary() {
+        assertThat(ProviderChatRequest.class.getRecordComponents())
+                .extracting(java.lang.reflect.RecordComponent::getName)
+                .contains("responseFormat");
+    }
+
+    @Test
     void toolCallArgumentsCountTowardTheExistingInputBound() {
         String oversizedArguments = "{\"value\":\"" + "a".repeat(65_536) + "\"}";
         ProviderChatMessage assistant = ProviderChatMessage.assistant(

@@ -361,9 +361,9 @@ public final class CodingHandlerContract {
             @Min(1) int expectedStateVersion,
             @Min(1) @Max(3) int pipelineAttempt,
             @NotNull UUID approvalId,
-            @NotBlank @Pattern(regexp = "^[a-z][a-z0-9_]{0,119}$") String nodeId,
+            @NotBlank @Pattern(regexp = "^[a-z][a-z0-9_-]{0,63}$") String nodeId,
             @NotNull ApprovalStage stage,
-            @Min(1) @Max(3) int stageRound,
+            @Min(1) int stageRound,
             @Pattern(regexp = "^(sha1:[0-9a-f]{40}|sha256:[0-9a-f]{64})$")
             String candidateSha,
             @Pattern(regexp = "^sha256:[0-9a-f]{64}$") String validationHash,
@@ -372,9 +372,6 @@ public final class CodingHandlerContract {
 
         public ApprovalDecisionRequest {
             requireVersion(schemaVersion);
-            if (stage != null && !approvalNode(stage).equals(nodeId)) {
-                throw new IllegalArgumentException("nodeId does not match the approval stage.");
-            }
             feedback = feedback == null ? null : feedback.strip();
             if (decision == Decision.REJECTED && (feedback == null || feedback.isEmpty())) {
                 throw new IllegalArgumentException("feedback is required when an approval is rejected.");
@@ -444,16 +441,6 @@ public final class CodingHandlerContract {
             throw new IllegalArgumentException(
                     "handlerKey, resultType and resultPort are not a registered combination.");
         }
-    }
-
-    public static String approvalNode(ApprovalStage stage) {
-        return switch (stage) {
-            case SCOPE -> "scope_approval";
-            case CANDIDATE -> "preview_approval";
-            case GITHUB -> "github_approval";
-            case CMS -> "cms_approval";
-            case DEPLOY -> "deploy_approval";
-        };
     }
 
     private static void requireVersion(String value) {

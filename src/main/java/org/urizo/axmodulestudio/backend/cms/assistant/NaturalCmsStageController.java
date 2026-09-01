@@ -32,6 +32,14 @@ public final class NaturalCmsStageController {
         this.stages = stages;
     }
 
+    @GetMapping
+    NaturalCmsContract.JobResponse getCurrent(
+            @PathVariable UUID jobId,
+            @RequestHeader(value = HttpHeaders.AUTHORIZATION, required = false)
+            String authorization) {
+        return store.get(authorization, jobId);
+    }
+
     @GetMapping("/attempts/{pipelineAttempt}")
     NaturalCmsContract.JobResponse get(
             @PathVariable UUID jobId,

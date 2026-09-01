@@ -1356,6 +1356,14 @@
       "validationLayer": "SCHEMA"
     },
     {
+      "id": "orchestration.llm-ops-common-runtime.snapshot.valid",
+      "contract": "orchestration/profile-version.openapi.yaml",
+      "schemaPointer": "#/components/schemas/VersionedSnapshot",
+      "fixture": "orchestration/llm-ops-common-runtime.snapshot.valid.json",
+      "expected": "VALID",
+      "validationLayer": "SCHEMA"
+    },
+    {
       "id": "orchestration.natural-cms-handler.snapshot.valid",
       "contract": "orchestration/profile-version.openapi.yaml",
       "schemaPointer": "#/components/schemas/VersionedSnapshot",

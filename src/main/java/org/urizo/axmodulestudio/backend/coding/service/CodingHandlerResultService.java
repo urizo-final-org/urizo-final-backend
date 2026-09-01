@@ -134,7 +134,8 @@ public final class CodingHandlerResultService {
             String authorization, UUID jobId, int pipelineAttempt) {
         return authenticated(authorization, () -> {
             List<AggregateRow> attempts = jdbc.query("""
-                    SELECT cj.trace_id, cpa.workspace_id, cpa.status, cjr.request_text,
+                    SELECT cj.trace_id, cj.status AS job_status, cj.state_version,
+                           cpa.workspace_id, cpa.status, cjr.request_text,
                            cpa.created_at, cpa.finished_at
                     FROM app.coding_pipeline_attempt cpa
                     JOIN app.coding_job cj ON cj.job_id = cpa.job_id
@@ -143,6 +144,8 @@ public final class CodingHandlerResultService {
                     """,
                     (rs, row) -> new AggregateRow(
                             rs.getObject("trace_id", UUID.class),
+                            rs.getString("job_status"),
+                            rs.getInt("state_version"),
                             rs.getObject("workspace_id", UUID.class),
                             CodingHandlerContract.AttemptStatus.valueOf(rs.getString("status")),
                             rs.getString("request_text"),
@@ -208,7 +211,7 @@ public final class CodingHandlerResultService {
                             rs.getTimestamp("decided_at").toInstant()),
                     jobId, pipelineAttempt, pipelineAttempt);
             List<CodingHandlerContract.PendingApprovalSummary> pendingApprovals =
-                    pendingApprovals(jobId, pipelineAttempt);
+                    pendingApprovals(attempt, jobId, pipelineAttempt);
             return new CodingHandlerContract.AttemptAggregateResponse(
                     CodingHandlerContract.SCHEMA_VERSION,
                     jobId,
@@ -226,30 +229,25 @@ public final class CodingHandlerResultService {
     }
 
     private List<CodingHandlerContract.PendingApprovalSummary> pendingApprovals(
-            UUID jobId, int pipelineAttempt) {
-        return CodingApprovalReadiness.find(jdbc, jobId, pipelineAttempt)
-                .map(ready -> {
-                    Integer previous = jdbc.queryForObject("""
-                            SELECT COUNT(*) FROM app.coding_approval_decision
-                            WHERE job_id = ? AND stage = ?
-                            """, Integer.class, jobId, ready.stage().name());
-                    int stageRound = (previous == null ? 0 : previous) + 1;
-                    String nodeId = CodingHandlerContract.approvalNode(ready.stage());
-                    return List.of(new CodingHandlerContract.PendingApprovalSummary(
-                            CodingApprovalId.forStage(
-                                    jobId, pipelineAttempt, nodeId, ready.stage(), stageRound),
-                            nodeId,
-                            ready.stage(),
-                            stageRound,
-                            requiresSuperAdmin(ready.stage())
-                                    ? "SUPER_ADMIN" : "GENERAL_ADMIN"));
-                })
+            AggregateRow attempt, UUID jobId, int pipelineAttempt) {
+        if (!"WAITING_APPROVAL".equals(attempt.jobStatus())
+                || attempt.status() != CodingHandlerContract.AttemptStatus.ACTIVE) {
+            return List.of();
+        }
+        return CodingApprovalReadiness.find(
+                        jdbc,
+                        objectMapper,
+                        jobId,
+                        attempt.traceId(),
+                        attempt.stateVersion(),
+                        pipelineAttempt)
+                .map(ready -> List.of(new CodingHandlerContract.PendingApprovalSummary(
+                        ready.approvalId(),
+                        ready.nodeId(),
+                        ready.stage(),
+                        ready.stageRound(),
+                        ready.requiredRole())))
                 .orElseGet(List::of);
-    }
-
-    private static boolean requiresSuperAdmin(CodingHandlerContract.ApprovalStage stage) {
-        return stage == CodingHandlerContract.ApprovalStage.GITHUB
-                || stage == CodingHandlerContract.ApprovalStage.DEPLOY;
     }
 
     private AttemptRow requireCurrentAttempt(UUID jobId, int requestedAttempt) {
@@ -665,6 +663,8 @@ public final class CodingHandlerResultService {
             CodingHandlerContract.HandlerResultResponse response) { }
     private record AggregateRow(
             UUID traceId,
+            String jobStatus,
+            int stateVersion,
             UUID workspaceId,
             CodingHandlerContract.AttemptStatus status,
             String requestText,

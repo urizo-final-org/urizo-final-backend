@@ -41,6 +41,13 @@ public class CmsSiteRepository {
         return repository.findFirstByPublicPath(publicPath).map(CmsSiteRepository::site);
     }
 
+    public SiteView create(
+            String key, String siteName, String publicPath,
+            String templateKey, boolean enabled) {
+        return site(repository.save(new CmsSiteEntity(
+                key, siteName, publicPath, templateKey, enabled, Instant.now())));
+    }
+
     public void update(
             String key, String siteName, String publicPath, String templateKey, boolean enabled) {
         CmsSiteEntity site = repository.findById(key).orElseThrow();
@@ -51,11 +58,6 @@ public class CmsSiteRepository {
         repository.findAllByDefaultYn(YES).forEach(CmsSiteEntity::clearDefault);
         repository.flush();
         repository.findById(key).orElseThrow().selectAsDefault(templateKey, Instant.now());
-    }
-
-    public void applyTemplateToDefault(String templateKey) {
-        repository.findFirstByDefaultYn(YES)
-                .ifPresent(site -> site.applyTemplate(templateKey, Instant.now()));
     }
 
     private static SiteView site(CmsSiteEntity site) {

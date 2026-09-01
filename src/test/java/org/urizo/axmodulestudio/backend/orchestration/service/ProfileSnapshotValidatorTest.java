@@ -3,6 +3,7 @@ package org.urizo.axmodulestudio.backend.orchestration.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertAll;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -19,11 +20,23 @@ class ProfileSnapshotValidatorTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Test
-    void acceptsTheExistingRegisteredSnapshotContract() throws Exception {
-        JsonNode authoring = authoringSnapshot();
+    void acceptsTheRegisteredSnapshotContractsForBothProfiles() throws Exception {
+        JsonNode llmOps = authoringSnapshot();
+        JsonNode naturalCms = authoringSnapshot(
+                "contracts/fixtures/orchestration/natural-cms-handler.snapshot.valid.json");
+        JsonNode contractFixture = authoringSnapshot(
+                "contracts/fixtures/orchestration/profile-version.snapshot.valid.json");
 
-        assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", authoring))
-                .doesNotThrowAnyException();
+        assertAll(
+                () -> assertThatCode(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", llmOps))
+                        .doesNotThrowAnyException(),
+                () -> assertThatCode(() ->
+                        ProfileSnapshotValidator.validateAuthoring("NATURAL_CMS", naturalCms))
+                        .doesNotThrowAnyException(),
+                () -> assertThatCode(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", contractFixture))
+                        .doesNotThrowAnyException());
     }
 
     @Test
@@ -100,16 +113,157 @@ class ProfileSnapshotValidatorTest {
     }
 
     @Test
-    void rejectsAttemptCountsTheCurrentDatabaseContractCannotPersist() throws Exception {
-        ObjectNode authoring = (ObjectNode) authoringSnapshot();
-        authoring.withObject("config").put("maxAttempts", 2);
+    void acceptsOnlyTheAttemptCountCompiledByThePythonRuntime() throws Exception {
+        ObjectNode supported = (ObjectNode) authoringSnapshot();
+        supported.withObject("config").put("maxAttempts", 3);
 
-        assertThatThrownBy(() -> ProfileSnapshotValidator.validateAuthoring(
-                "LLM_OPS", authoring))
-                .isInstanceOfSatisfying(ProfileVersionException.class, failure -> {
-                    assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED");
-                    assertThat(failure.getMessage()).contains("maxAttempts must be 3");
-                });
+        assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring(
+                "LLM_OPS", supported)).doesNotThrowAnyException();
+
+        for (int maxAttempts : List.of(0, 1, 2, 4, 20, 21)) {
+            ObjectNode authoring = (ObjectNode) authoringSnapshot();
+            authoring.withObject("config").put("maxAttempts", maxAttempts);
+
+            assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring(
+                    "LLM_OPS", authoring));
+        }
+    }
+
+    @Test
+    void rejectsUnregisteredModelBindingsBeforeActivation() throws Exception {
+        ObjectNode unknownPrimary = (ObjectNode) authoringSnapshot();
+        unknownPrimary.withObject("modelBindings").withObject("analyze")
+                .put("primary", "unregistered-binding");
+
+        ObjectNode unknownFallback = (ObjectNode) authoringSnapshot();
+        unknownFallback.withObject("modelBindings").withObject("analyze")
+                .withArray("fallback").add("unregistered-binding");
+
+        ObjectNode otherProfileBinding = (ObjectNode) authoringSnapshot();
+        otherProfileBinding.withObject("modelBindings").withObject("analyze")
+                .put("primary", "natural-cms-analyze");
+
+        assertAll(
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", unknownPrimary)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", unknownFallback)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", otherProfileBinding)));
+    }
+
+    @Test
+    void enforcesThePythonCommonHandlerConfigContract() throws Exception {
+        ObjectNode startConfig = (ObjectNode) authoringSnapshot();
+        node(startConfig, "start").withObject("config").put("unexpected", true);
+
+        ObjectNode checkConfig = commonCheckSnapshot();
+        node(checkConfig, "rework_gate").withObject("config").put("unexpected", true);
+
+        ObjectNode endConfig = (ObjectNode) authoringSnapshot();
+        node(endConfig, "end").withObject("config").put("unexpected", true);
+
+        assertAll(
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", startConfig)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", checkConfig)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", endConfig)));
+    }
+
+    @Test
+    void enforcesThePythonFeatureHandlerConfigContract() throws Exception {
+        ObjectNode codingEmptyConfig = (ObjectNode) authoringSnapshot();
+        node(codingEmptyConfig, "analyze").withObject("config").put("unexpected", true);
+
+        ObjectNode deployMode = (ObjectNode) authoringSnapshot();
+        node(deployMode, "deploy_request").withObject("config").put("mode", "execute");
+
+        ObjectNode approvalStage = (ObjectNode) authoringSnapshot();
+        node(approvalStage, "scope_approval").withObject("config")
+                .put("stage", "CANDIDATE");
+
+        ObjectNode approvalRole = (ObjectNode) authoringSnapshot();
+        node(approvalRole, "scope_approval").withObject("config")
+                .put("requiredRole", "OWNER");
+
+        ObjectNode previewApprovalStage = (ObjectNode) authoringSnapshot();
+        node(previewApprovalStage, "preview_approval").withObject("config")
+                .put("stage", "SCOPE");
+
+        ObjectNode reworkMaximum = (ObjectNode) authoringSnapshot();
+        node(reworkMaximum, "rework_gate").withObject("config")
+                .put("maxReworkRounds", 0);
+
+        ObjectNode cmsEmptyConfig = (ObjectNode) authoringSnapshot(
+                "contracts/fixtures/orchestration/natural-cms-handler.snapshot.valid.json");
+        node(cmsEmptyConfig, "analyze").withObject("config").put("unexpected", true);
+
+        ObjectNode cmsApproval = (ObjectNode) authoringSnapshot(
+                "contracts/fixtures/orchestration/natural-cms-handler.snapshot.valid.json");
+        node(cmsApproval, "approval").withObject("config")
+                .put("requiredRole", "SUPER_ADMIN");
+
+        assertAll(
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", codingEmptyConfig)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", deployMode)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", approvalStage)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", approvalRole)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", previewApprovalStage)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", reworkMaximum)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "NATURAL_CMS", cmsEmptyConfig)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "NATURAL_CMS", cmsApproval)));
+    }
+
+    @Test
+    void requiresCommonFailurePortsToTerminateAtEnd() throws Exception {
+        ObjectNode guardrailFailureContinues = (ObjectNode) authoringSnapshot();
+        edge(guardrailFailureContinues, "guardrail", "failed").put("to", "analyze");
+
+        ObjectNode checkFailureContinues = commonCheckSnapshot();
+        edge(checkFailureContinues, "rework_gate", "failed").put("to", "preview");
+
+        assertAll(
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", guardrailFailureContinues)),
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring(
+                                "LLM_OPS", checkFailureContinues)));
+    }
+
+    @Test
+    void rejectsCommonApprovalForDraftAndStoredSnapshots() throws Exception {
+        ObjectNode draft = (ObjectNode) authoringSnapshot();
+        useCommonApproval(draft);
+
+        ObjectNode stored = fullSnapshot();
+        useCommonApproval(stored);
+
+        assertAll(
+                () -> assertValidationFailure(() ->
+                        ProfileSnapshotValidator.validateAuthoring("LLM_OPS", draft)),
+                () -> assertValidationFailure(() -> ProfileSnapshotValidator.validateStored(
+                        UUID.fromString(stored.path("profileVersionId").textValue()),
+                        stored.path("profileKey").textValue(),
+                        stored.path("profileVersion").intValue(),
+                        stored)));
     }
 
     @Test
@@ -127,16 +281,65 @@ class ProfileSnapshotValidatorTest {
 
     private static JsonNode authoringSnapshot() throws Exception {
         ObjectNode snapshot = fullSnapshot();
+        removeStoredIdentity(snapshot);
+        return snapshot;
+    }
+
+    private static JsonNode authoringSnapshot(String fixture) throws Exception {
+        ObjectNode snapshot = (ObjectNode) OBJECT_MAPPER.readTree(
+                Files.readString(Path.of(fixture)));
+        removeStoredIdentity(snapshot);
+        return snapshot;
+    }
+
+    private static void removeStoredIdentity(ObjectNode snapshot) {
         for (String field : List.of(
                 "contractVersion", "profileVersionId", "profileKey", "profileVersion")) {
             snapshot.remove(field);
         }
-        return snapshot;
     }
 
     private static ObjectNode fullSnapshot() throws Exception {
         return (ObjectNode) OBJECT_MAPPER.readTree(Files.readString(Path.of(
                 "contracts/fixtures/orchestration/llm-ops-coding-handler.snapshot.valid.json")));
+    }
+
+    private static ObjectNode commonCheckSnapshot() throws Exception {
+        ObjectNode snapshot = (ObjectNode) authoringSnapshot();
+        ObjectNode check = node(snapshot, "rework_gate");
+        check.put("handlerKey", "common.check");
+        check.withArray("resultPorts").removeAll().add("passed").add("failed");
+        check.withObject("config").removeAll();
+        edge(snapshot, "rework_gate", "retry").put("resultPort", "passed");
+        edge(snapshot, "rework_gate", "handover").put("resultPort", "failed");
+        ((ObjectNode) snapshot.withObject("config").withArray("loopLimits").get(0))
+                .put("resultPort", "passed");
+        return snapshot;
+    }
+
+    private static void useCommonApproval(ObjectNode snapshot) {
+        ObjectNode approval = node(snapshot, "scope_approval");
+        approval.put("handlerKey", "common.approval");
+        approval.withObject("config").removeAll();
+    }
+
+    private static ObjectNode node(ObjectNode snapshot, String id) {
+        for (JsonNode candidate : snapshot.withArray("nodes")) {
+            if (id.equals(candidate.path("id").textValue())) {
+                return (ObjectNode) candidate;
+            }
+        }
+        throw new AssertionError("missing node " + id);
+    }
+
+    private static ObjectNode edge(ObjectNode snapshot, String from, String resultPort) {
+        for (JsonNode candidate : snapshot.withArray("edges")) {
+            if (from.equals(candidate.path("from").textValue())
+                    && resultPort.equals(candidate.path("resultPort").textValue())) {
+                return (ObjectNode) candidate;
+            }
+        }
+        throw new AssertionError("missing edge " + from + "." + resultPort);
     }
 
     private static void assertValidationFailure(ThrowingRunnable action) {

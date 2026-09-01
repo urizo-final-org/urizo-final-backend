@@ -23,16 +23,17 @@ class McpPlatformClientTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
-    void discoversTheApprovedServerAndAcceptsAnEmptyBootstrapCatalog() throws Exception {
+    void discoversTheApprovedServerAndExactProductionCatalog() throws Exception {
         FakeTransport transport = new FakeTransport(
                 success("axms-mcp-1", discoveryResult()),
-                success("axms-mcp-2", "{\"resultType\":\"complete\",\"tools\":[]}"));
+                success("axms-mcp-2", productionCatalogResult()));
 
         McpPlatformContract.Snapshot snapshot = client(transport).probeCatalog();
 
         assertThat(snapshot.protocolVersion()).isEqualTo(McpPlatformContract.PROTOCOL_VERSION);
         assertThat(snapshot.serverName()).isEqualTo(McpPlatformContract.SERVER_NAME);
-        assertThat(snapshot.exposedTools()).isEmpty();
+        assertThat(snapshot.exposedTools())
+                .containsExactlyInAnyOrderElementsOf(McpPlatformContract.allowedToolNames());
         assertThat(transport.requests).hasSize(2);
         assertThat(transport.requests.get(0).headers())
                 .containsEntry("Authorization", "Bearer " + TOKEN)
@@ -48,13 +49,14 @@ class McpPlatformClientTest {
     }
 
     @Test
-    void acceptsOnlyThePreviouslyApprovedToolNames() {
+    void rejectsAProductionCatalogWithMissingTools() {
         FakeTransport transport = new FakeTransport(
                 success("axms-mcp-1", discoveryResult()),
                 success("axms-mcp-2", "{\"resultType\":\"complete\",\"tools\":[{\"name\":\"read_file\"},{\"name\":\"create_cms_preview\"}]}"));
 
-        assertThat(client(transport).probeCatalog().exposedTools())
-                .containsExactlyInAnyOrder("read_file", "create_cms_preview");
+        assertThatThrownBy(() -> client(transport).probeCatalog())
+                .isInstanceOf(McpPlatformException.class)
+                .hasMessage("MCP platform catalog contract was rejected.");
         assertThat(McpPlatformContract.packageFor("read_file")).isEqualTo("coding");
         assertThat(McpPlatformContract.packageFor("create_cms_preview")).isEqualTo("cms");
         assertThat(McpPlatformContract.allowedToolNames()).hasSize(13);
@@ -188,6 +190,17 @@ class McpPlatformClientTest {
         return "{\"resultType\":\"complete\",\"supportedVersions\":[\"2026-07-28\"],"
                 + "\"capabilities\":{\"tools\":{}},\"_meta\":{\"io.modelcontextprotocol/serverInfo\":{"
                 + "\"name\":\"urizo-final-mcp-server\",\"version\":\"0.1.0\"}}}";
+    }
+
+    private static String productionCatalogResult() {
+        return "{\"resultType\":\"complete\",\"tools\":["
+                + "{\"name\":\"read_file\"},{\"name\":\"search_code\"},"
+                + "{\"name\":\"read_diff\"},{\"name\":\"apply_patch\"},"
+                + "{\"name\":\"run_check\"},{\"name\":\"check_package_allowlist\"},"
+                + "{\"name\":\"scan_changed_files\"},{\"name\":\"resolve_cms_target\"},"
+                + "{\"name\":\"validate_cms_command\"},{\"name\":\"create_cms_preview\"},"
+                + "{\"name\":\"discard_cms_preview\"},{\"name\":\"revalidate_cms_preview\"},"
+                + "{\"name\":\"apply_cms_preview\"}]}";
     }
 
     private static McpHttpTransport.Response success(String id, String result) {

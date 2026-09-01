@@ -125,47 +125,20 @@ if ($Profile -eq 'full') {
     if (-not $checkpointContainer) {
         throw 'Checkpoint database container was not found.'
     }
-    # The role sync arrives as a file, not as an argument. Windows PowerShell strips the double
-    # quotes out of a multi-line string on its way to a native executable, so bash received
-    # `password=$(< ...)` and `--username $POSTGRES_USER` unquoted and stopped at the first
-    # newline. Passing a file removes the quoting layer entirely, which is the same fix
-    # ensure-local-llm-ops-profile.ps1 already uses for psql.
-    $checkpointRoleSync = @(
-        'password="$(< /run/secrets/checkpoint_postgres_password)"',
-        'psql --set=ON_ERROR_STOP=1 \',
-        '  --username "$POSTGRES_USER" \',
-        '  --dbname "$POSTGRES_DB" \',
-        "  --set=checkpoint_password=`"`$password`" <<'SQL'",
-        "SELECT format('ALTER ROLE axms_checkpoint PASSWORD %L', :'checkpoint_password') \gexec",
-        'SQL',
-        'unset password'
-    ) -join "`n"
-    # LF endings and no BOM: bash treats a carriage return as part of the command name, and a BOM
-    # as the first character of the first word.
-    $checkpointRoleSyncPath = Join-Path ([System.IO.Path]::GetTempPath()) (
-        'axms-checkpoint-role-sync-' + [Guid]::NewGuid().ToString('N') + '.sh')
-    $containerRoleSyncPath = '/tmp/axms-checkpoint-role-sync.sh'
-    try {
-        [System.IO.File]::WriteAllText(
-            $checkpointRoleSyncPath,
-            $checkpointRoleSync + "`n",
-            (New-Object System.Text.UTF8Encoding($false)))
-        & $docker cp $checkpointRoleSyncPath ($checkpointContainer + ':' + $containerRoleSyncPath) | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Checkpoint database role synchronization script could not be copied.'
-        }
-        & $docker exec $checkpointContainer bash -eu $containerRoleSyncPath
-        if ($LASTEXITCODE -ne 0) {
-            throw 'Checkpoint database role synchronization failed.'
-        }
-    }
-    finally {
-        # The script reads the secret from the container mount and never holds its value, but it
-        # is still removed from both sides so no copy of it outlives the run.
-        if (Test-Path -LiteralPath $checkpointRoleSyncPath) {
-            Remove-Item -LiteralPath $checkpointRoleSyncPath -Force
-        }
-        & $docker exec $checkpointContainer rm -f $containerRoleSyncPath | Out-Null
+    $checkpointRoleSync = @'
+password="$(< /run/secrets/checkpoint_postgres_password)"
+psql --set=ON_ERROR_STOP=1 \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" \
+  --set=checkpoint_password="$password" <<'SQL'
+SELECT format('ALTER ROLE axms_checkpoint PASSWORD %L', :'checkpoint_password') \gexec
+SQL
+unset password
+'@
+    $checkpointRoleSync = $checkpointRoleSync.Replace("`r`n", "`n")
+    $checkpointRoleSync | & $docker exec -i $checkpointContainer bash -seu
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Checkpoint database role synchronization failed.'
     }
     Write-Output 'Local checkpoint database role is synchronized.'
 }

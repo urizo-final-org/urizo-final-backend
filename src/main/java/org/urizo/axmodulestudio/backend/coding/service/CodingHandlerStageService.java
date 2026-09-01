@@ -35,7 +35,26 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingHandlerStageService {
 
-    private static final int MAX_MODEL_TURNS = 8;
+    /**
+     * A complete code exchange already spends about seven turns - read_diff, read_file,
+     * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
+     * bound of eight left no room for a single re-asked miss. Twelve keeps the loop
+     * bounded while allowing the re-ask layer the handful of turns it exists to spend.
+     */
+    private static final int MAX_MODEL_TURNS = 12;
+    /** Tool refusals the model itself caused and can correct when told why. */
+    private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
+            "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
+            "TOOL_ARGUMENTS_INVALID");
+    /**
+     * The workspace applies a patch with git apply --check --whitespace=error-all, so a
+     * hunk is refused unless its context matches the file exactly. A model that guessed
+     * the context needs to be pointed at the real bytes, not just told to try again.
+     */
+    private static final String APPLY_PATCH_RETRY_HINT =
+            " If the patch did not apply, call read_file on the target file first and "
+            + "rebuild the patch against its exact current content: correct @@ line "
+            + "numbers, context lines copied verbatim, and no added trailing whitespace.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
     private static final Set<String> REVIEW_TOOLS = Set.of(
@@ -50,6 +69,7 @@ public final class CodingHandlerStageService {
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
+    private final CodingRunnerService runner;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -58,9 +78,11 @@ public final class CodingHandlerStageService {
             CodingToolService tools,
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
+            CodingRunnerService runner,
             ProfileModelBindingService profileModelBindings,
             ObjectMapper objectMapper,
             Clock clock) {
+        this.runner = Objects.requireNonNull(runner, "runner is required");
         this.results = Objects.requireNonNull(results, "results are required");
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
@@ -174,9 +196,27 @@ public final class CodingHandlerStageService {
             if (!allowedTools.contains(call.name())) {
                 throw contract("The model selected a tool outside the stage allowlist.");
             }
-            CodingToolContract.ResultContent toolResult = executeTool(
-                    authorization, jobId, request, authority, aggregate,
-                    resultId, turn, call);
+            CodingToolContract.ResultContent toolResult;
+            try {
+                toolResult = executeTool(
+                        authorization, jobId, request, authority, aggregate,
+                        resultId, turn, call);
+            }
+            catch (CodingToolException failure) {
+                // A refusal the model caused is handed back as feedback instead of ending
+                // the Job, because the refusal reason is already a correction instruction.
+                // Anything else - authority, storage, gateway - stays fatal.
+                if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
+                        || turn == MAX_MODEL_TURNS) {
+                    throw failure;
+                }
+                messages.add(plainAssistantMessage(modelResponse));
+                messages.add(userMessage("Your " + call.name() + " call was refused: "
+                        + failure.getMessage()
+                        + " Correct the call and continue the task."
+                        + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
+                continue;
+            }
             messages.add(assistantToolMessage(modelResponse));
             messages.add(toolMessage(toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
@@ -260,6 +300,23 @@ public final class CodingHandlerStageService {
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
                 packages, scan)));
+        // The deterministic checks passed, so the candidate is worth showing. The
+        // runner owns Docker, so the stack is raised through its queue rather than
+        // from here. BUILD is queued first because PREVIEW_UP starts with
+        // --no-build and the runner claims one PENDING row at a time in order.
+        String workspaceId = aggregate.workspaceId() == null
+                ? null : aggregate.workspaceId().toString();
+        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", "backend");
+        if (workspaceId != null) {
+            runnerPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("BUILD", runnerPayload);
+        ObjectNode previewPayload = objectMapper.createObjectNode();
+        if (workspaceId != null) {
+            previewPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("PREVIEW_UP", previewPayload);
+
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "READY");
         payload.set("changedPaths", diff.path("changedPaths").deepCopy());
@@ -499,18 +556,25 @@ public final class CodingHandlerStageService {
                         .filter(decision -> decision.feedback() != null).count() - 5L))
                 .forEach(decision -> feedback.add(decision.feedback()));
 
+        // The values are quoted because a bare one-word list reads as prose: "port must be
+        // completed" was answered with "done", a synonym the stage refuses.
         String ports = switch (handlerKey) {
-            case "coding.analyze" -> "feasible or infeasible";
-            case "coding.code" -> "completed";
-            case "coding.review" -> "passed or changes_requested";
+            case "coding.analyze" -> "\"feasible\" or \"infeasible\"";
+            case "coding.code" -> "\"completed\"";
+            case "coding.review" -> "\"passed\" or \"changes_requested\"";
             default -> throw contract("The Coding Model stage is not registered.");
         };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
-                + "and payload. port must be " + ports + " and payload must be an object. "
+                + "and payload. port must be exactly " + ports + ", copied verbatim with no "
+                + "synonym or rewording, and payload must be an object. "
                 + ("coding.code".equals(handlerKey)
                     ? "Use read_diff before any diff-bound tool and again after the final change. "
-                    : "Do not request apply_patch in this stage. ");
+                    // Without the second sentence the model reads "no apply_patch here"
+                    // as "the request cannot be done" and answers infeasible.
+                    : "Do not request apply_patch in this stage. A later stage performs "
+                        + "the file changes, so judge only whether the request itself "
+                        + "can be carried out. ");
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", system),
                 objectMapper.createObjectNode().put("role", "user")
@@ -526,7 +590,7 @@ public final class CodingHandlerStageService {
             }
             ObjectNode schema = objectMapper.createObjectNode();
             schema.put("name", name);
-            schema.put("description", "Approved AX Module Studio Coding tool " + name + ".");
+            schema.put("description", toolDescription(name));
             schema.put("schemaDigest", CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name));
             schema.set("inputSchema", inputSchema(name));
             schemas.add(schema);
@@ -538,6 +602,38 @@ public final class CodingHandlerStageService {
         Set<String> allowed = new java.util.HashSet<>(stageTools);
         allowed.retainAll(profileTools);
         return Set.copyOf(allowed);
+    }
+
+    /** Every diff-bound tool is refused until read_diff has established the current diff. */
+    private static final String AFTER_READ_DIFF =
+            "Call read_diff first in this stage; this tool is refused until the current diff "
+                    + "has been read.";
+
+    /**
+     * The model only ever sees these words, so a rule it cannot guess belongs here. The
+     * patch format is the one the MCP workspace enforces; a diff that misses it is refused
+     * as PATCH_POLICY_DENIED after the turn is already spent.
+     */
+    private static String toolDescription(String name) {
+        return switch (name) {
+            case "read_file" -> "Read one repository-relative text file.";
+            case "search_code" -> "Search the repository for a literal string.";
+            case "read_diff" -> "Read the workspace diff as it stands now.";
+            case "apply_patch" -> "Apply one unified diff to the workspace. " + AFTER_READ_DIFF
+                    + " Every file in the patch starts with a line 'diff --git a/PATH b/PATH' "
+                    + "carrying the same repository-relative path twice, then '--- a/PATH', "
+                    + "then '+++ b/PATH', then its @@ hunks. Rename, copy, mode and binary "
+                    + "diffs are refused.";
+            case "run_check" -> "Run one approved check over the changed files. Call it "
+                    + "with exactly {\"profile\":\"git-diff-check\"} or "
+                    + "{\"profile\":\"python-syntax\"}; an empty argument object is "
+                    + "refused. " + AFTER_READ_DIFF;
+            case "check_package_allowlist" -> "Check the changed files against the package "
+                    + "allowlist. " + AFTER_READ_DIFF;
+            case "scan_changed_files" -> "Scan the changed files for forbidden content. "
+                    + AFTER_READ_DIFF;
+            default -> throw contract("The Coding tool schema is not registered.");
+        };
     }
 
     private ObjectNode inputSchema(String name) {
@@ -564,6 +660,23 @@ public final class CodingHandlerStageService {
             ObjectNode properties, ArrayNode required, String name) {
         properties.putObject(name).put("type", "string");
         required.add(name);
+    }
+
+
+    private ObjectNode userMessage(String content) {
+        return objectMapper.createObjectNode().put("role", "user").put("content", content);
+    }
+
+    /**
+     * Replays a refused call's sentence without the call itself. The refused call never
+     * ran, so pairing it with a tool result would describe an exchange that did not
+     * happen, and an assistant message may not carry an unanswered tool call.
+     */
+    private ObjectNode plainAssistantMessage(CodingModelTurnContract.Response response) {
+        String content = response.assistant().content();
+        return objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
     }
 
     private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
@@ -611,13 +724,6 @@ public final class CodingHandlerStageService {
         }
     }
 
-    /**
-     * The stage prompt asks for one JSON object, but the model turn contract only
-     * carries TEXT, so nothing can force that shape. Models routinely wrap a
-     * correct answer in a Markdown fence or a sentence, which is a formatting
-     * miss rather than a wrong answer, so one repair pass is allowed before the
-     * stage is failed. A second miss is a contract violation and is not retried.
-     */
     private ModelOutcome parseOutcome(String handlerKey, String raw, Set<String> ports) {
         StructuredOutputGuard.ValidatedOutput<String> validated;
         try {

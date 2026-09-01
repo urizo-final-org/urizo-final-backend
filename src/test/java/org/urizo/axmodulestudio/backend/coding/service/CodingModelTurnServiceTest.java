@@ -41,8 +41,15 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseF
 
 class CodingModelTurnServiceTest {
 
+
     private static final Instant NOW = Instant.parse("2026-08-11T08:00:00Z");
     private static final String MODEL = "local-google-chat-model";
+    private static final String TOOL_CALL_ONE = "11111111-1111-4111-8111-111111111111";
+    private static final String TOOL_CALL_TWO = "22222222-2222-4222-8222-222222222222";
+    private static final String TOOL_CALL_THREE = "33333333-3333-4333-8333-333333333333";
+    private static final String EXECUTION_ONE = "44444444-4444-4444-8444-444444444444";
+    private static final String EXECUTION_TWO = "77777777-7777-4777-8777-777777777777";
+    private static final String EXECUTION_THREE = "88888888-8888-4888-8888-888888888888";
 
     private final ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -207,7 +214,10 @@ class CodingModelTurnServiceTest {
     }
 
     @Test
-    void preservesAssistantToolAndToolResultRolesAcrossProviderTurns() {
+    void preservesTheNativeToolExchangeForTheProvider() {
+        // The provider path declares its tools natively through the conversion trigger,
+        // so the recorded exchange replays as native assistant tool calls and tool
+        // results instead of being collapsed to text.
         ProviderModelRegistration google = new ProviderModelRegistration(
                 ModelProvider.GOOGLE_GENAI,
                 MODEL,
@@ -417,6 +427,127 @@ class CodingModelTurnServiceTest {
                 .contains("messages=REDACTED")
                 .contains("toolSchemas=REDACTED");
     }
+
+    @Test
+    void keepsTheToolBodyWhenTheContextFitsTheRequestBudget() {
+        CodingModelTurnContract.Request request = providerToolRequest(List.of("AAAA"));
+        when(gateway.chat(any())).thenReturn(toolEnvelopeResponse());
+
+        providerToolService().execute(request);
+
+        // Text results ride in a one-field JSON object on the native path.
+        assertThat(toolContents()).containsExactly("{\"content\":\"AAAA\"}");
+    }
+
+    @Test
+    void dropsTheOldestToolBodiesWhenTheContextExceedsTheRequestBudget() {
+        CodingModelTurnContract.Request request = providerToolRequest(List.of(
+                "A".repeat(25_000), "B".repeat(25_000), "C".repeat(25_000)));
+        when(gateway.chat(any())).thenReturn(toolEnvelopeResponse());
+
+        providerToolService().execute(request);
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        long characters = routed.getValue().messages().stream()
+                .mapToLong(message -> message.content().length())
+                .sum();
+        assertThat(characters).isLessThanOrEqualTo(65_536);
+        List<String> contents = routed.getValue().messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList();
+        assertThat(contents).hasSize(3);
+        assertThat(contents.get(0)).doesNotContain("AAAA").contains("elided");
+        assertThat(contents.get(1)).contains("B".repeat(25_000));
+        assertThat(contents.get(2)).contains("C".repeat(25_000));
+    }
+
+    @Test
+    void failsAsAGatewayErrorWhenNoToolBodyCanBeDropped() {
+        CodingModelTurnContract.Request chat = chatRequest();
+        ObjectNode user = objectMapper.createObjectNode()
+                .put("role", "user")
+                .put("content", "D".repeat(70_000));
+        CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(),
+                chat.idempotencyKey(), chat.attempt(), chat.expectedStateVersion(),
+                chat.nodeName(), chat.promptVersion(), chat.contextDigest(),
+                chat.requiredCapabilities(), List.of(chat.messages().get(0), user),
+                chat.toolSchemas(), chat.responseFormat(), chat.deadlineAt());
+
+        assertThatThrownBy(() -> service.execute(request))
+                .isInstanceOfSatisfying(ProviderGatewayException.class, failure ->
+                        assertThat(failure.code())
+                                .isEqualTo(ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED));
+        verify(gateway, never()).chat(any());
+    }
+
+    private CodingModelTurnService providerToolService() {
+        ProviderModelRegistration google = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                MODEL,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        return new CodingModelTurnService(
+                registry(List.of(google)), gateway, objectMapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), false);
+    }
+
+    private ProviderChatResponse toolEnvelopeResponse() {
+        return new ProviderChatResponse(
+                ModelProvider.GOOGLE_GENAI, MODEL,
+                "{\"assistant\":\"done\",\"toolCalls\":[]}", 8, 3, Duration.ZERO);
+    }
+
+    private List<String> toolContents() {
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(routed.capture());
+        return routed.getValue().messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList();
+    }
+
+    /** One assistant tool call and its tool result per body, in the order given. */
+    private CodingModelTurnContract.Request providerToolRequest(List<String> toolBodies) {
+        CodingModelTurnContract.Request chat = chatRequest();
+        List<JsonNode> messages = new java.util.ArrayList<>(
+                List.of(chat.messages().get(0), chat.messages().get(1)));
+        for (int index = 0; index < toolBodies.size(); index++) {
+            String toolCallId = (index + 1) + "1111111-1111-4111-8111-111111111111";
+            ObjectNode assistant = objectMapper.createObjectNode()
+                    .put("role", "assistant")
+                    .put("content", "");
+            assistant.putArray("toolCalls").addObject()
+                    .put("toolCallId", toolCallId)
+                    .put("name", "read_file")
+                    .set("arguments", objectMapper.createObjectNode().put("path", "README.md"));
+            ObjectNode tool = objectMapper.createObjectNode()
+                    .put("role", "tool")
+                    .put("toolCallId", toolCallId)
+                    .put("executionId", (index + 1) + "2222222-2222-4222-8222-222222222222")
+                    .put("content", toolBodies.get(index));
+            tool.putObject("result")
+                    .put("mediaType", "application/json")
+                    .put("resultRef", "/internal/coding/tool-executions/fixture/result")
+                    .put("sizeBytes", toolBodies.get(index).length())
+                    .put("digest", "sha256:" + "c".repeat(64));
+            messages.add(assistant);
+            messages.add(tool);
+        }
+        return new CodingModelTurnContract.Request(
+                chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(),
+                chat.idempotencyKey(), chat.attempt(), chat.expectedStateVersion(),
+                chat.nodeName(), chat.promptVersion(), chat.contextDigest(),
+                List.of("CHAT", "TOOL_CALLING"), List.copyOf(messages),
+                List.of(toolSchema()), chat.responseFormat(), chat.deadlineAt());
+    }
+
+
 
     private static ProviderCapabilityRegistry registry(List<ProviderModelRegistration> registrations) {
         return new ProviderCapabilityRegistry(

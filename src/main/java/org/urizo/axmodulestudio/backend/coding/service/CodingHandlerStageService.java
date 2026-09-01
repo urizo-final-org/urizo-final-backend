@@ -556,15 +556,18 @@ public final class CodingHandlerStageService {
                         .filter(decision -> decision.feedback() != null).count() - 5L))
                 .forEach(decision -> feedback.add(decision.feedback()));
 
+        // The values are quoted because a bare one-word list reads as prose: "port must be
+        // completed" was answered with "done", a synonym the stage refuses.
         String ports = switch (handlerKey) {
-            case "coding.analyze" -> "feasible or infeasible";
-            case "coding.code" -> "completed";
-            case "coding.review" -> "passed or changes_requested";
+            case "coding.analyze" -> "\"feasible\" or \"infeasible\"";
+            case "coding.code" -> "\"completed\"";
+            case "coding.review" -> "\"passed\" or \"changes_requested\"";
             default -> throw contract("The Coding Model stage is not registered.");
         };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
-                + "and payload. port must be " + ports + " and payload must be an object. "
+                + "and payload. port must be exactly " + ports + ", copied verbatim with no "
+                + "synonym or rewording, and payload must be an object. "
                 + ("coding.code".equals(handlerKey)
                     ? "Use read_diff before any diff-bound tool and again after the final change. "
                     // Without the second sentence the model reads "no apply_patch here"

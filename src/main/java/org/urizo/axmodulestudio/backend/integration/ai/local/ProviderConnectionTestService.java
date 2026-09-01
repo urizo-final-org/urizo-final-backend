@@ -212,10 +212,11 @@ public class ProviderConnectionTestService {
                 || "UNAUTHENTICATED".equals(providerCode)) {
             return new FailureClassification(ProviderCredentialState.INVALID_CREDENTIAL, "AUTHENTICATION_FAILED");
         }
-        if (provider == ModelProvider.ANTHROPIC
-                && response.statusCode() == 400
-                && isAnthropicBillingFailure(response.body())) {
-            return new FailureClassification(ProviderCredentialState.BILLING_BLOCKED, "BILLING_BLOCKED");
+        if (provider == ModelProvider.ANTHROPIC && response.statusCode() == 400) {
+            FailureClassification anthropicClassification = classifyAnthropicInvalidRequest(response.body());
+            if (anthropicClassification != null) {
+                return anthropicClassification;
+            }
         }
         if (response.statusCode() == 402 || "BILLING_ERROR".equals(providerCode)
                 || "INSUFFICIENT_QUOTA".equals(providerCode)) {
@@ -255,20 +256,38 @@ public class ProviderConnectionTestService {
         return null;
     }
 
-    private boolean isAnthropicBillingFailure(String responseBody) {
+    private FailureClassification classifyAnthropicInvalidRequest(String responseBody) {
         try {
             String message = objectMapper.readTree(responseBody)
                     .path("error")
                     .path("message")
                     .asText("")
-                    .toLowerCase(Locale.ROOT);
-            return message.contains("credit balance")
-                    || message.contains("spend limit")
-                    || message.contains("billing");
+                    .toLowerCase(Locale.ROOT)
+                    .replaceAll("[^a-z0-9]+", " ")
+                    .trim();
+            boolean workspaceIdMentioned = message.contains("anthropic workspace id")
+                    || message.contains("workspace id");
+            boolean workspaceIdRequired = message.contains("required")
+                    || message.contains("missing")
+                    || (message.contains("must") && message.contains("provided"));
+            if (workspaceIdMentioned && workspaceIdRequired) {
+                return new FailureClassification(
+                        ProviderCredentialState.PROVIDER_UNAVAILABLE,
+                        "WORKSPACE_ID_REQUIRED");
+            }
+            if (message.contains("billing")
+                    || message.contains("credit")
+                    || message.contains("spend")
+                    || message.contains("usage limit")) {
+                return new FailureClassification(
+                        ProviderCredentialState.BILLING_BLOCKED,
+                        "BILLING_BLOCKED");
+            }
         }
         catch (JsonProcessingException ignored) {
-            return false;
+            // Raw provider bodies are intentionally neither logged nor persisted.
         }
+        return null;
     }
 
     private ProviderConnectionTestResult recordFailure(

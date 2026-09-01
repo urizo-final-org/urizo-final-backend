@@ -18,6 +18,8 @@ import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialLease;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialResolver;
@@ -184,6 +186,82 @@ class ProviderConnectionTestServiceTest {
         assertThat(result.safeCode()).isEqualTo("BILLING_BLOCKED");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "Billing is not enabled for this workspace.",
+            "Insufficient credits are available.",
+            "The organization spend cap was reached.",
+            "The workspace usage-limit was reached."
+    })
+    void classifiesAnthropicBillingMessageFamiliesWithoutReturningTheMessage(String message) throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                400,
+                anthropicInvalidRequest(message)));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.BILLING_BLOCKED);
+        assertThat(result.inferenceExecuted()).isFalse();
+        assertThat(result.safeCode()).isEqualTo("BILLING_BLOCKED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "anthropic-workspace-id header is required.",
+            "Workspace ID must be provided.",
+            "Missing workspace_id for this request."
+    })
+    void classifiesAnthropicWorkspaceIdRequirementsWithoutReturningTheMessage(String message) throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                400,
+                anthropicInvalidRequest(message)));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.PROVIDER_UNAVAILABLE);
+        assertThat(result.inferenceExecuted()).isFalse();
+        assertThat(result.safeCode()).isEqualTo("WORKSPACE_ID_REQUIRED");
+        verify(repository).recordTestIfCurrent(
+                eq(ModelProvider.ANTHROPIC),
+                eq("fingerprint-ANTHROPIC"),
+                eq(result.modelId()),
+                eq(ProviderCredentialState.PROVIDER_UNAVAILABLE),
+                eq("FAILED"),
+                eq("WORKSPACE_ID_REQUIRED"),
+                isNull(),
+                isNull(),
+                eq(0L));
+    }
+
+    @Test
+    void preservesOtherAnthropicInvalidRequestsAsSafeProviderCodes() throws Exception {
+        when(credentialResolver.resolve(ModelProvider.ANTHROPIC))
+                .thenReturn(fixtureCredential(ModelProvider.ANTHROPIC));
+        when(transport.exchange(any(), any(), any(), any(), any())).thenReturn(new ProviderHttpResponse(
+                400,
+                anthropicInvalidRequest("messages.0.role has an unsupported value.")));
+
+        ProviderConnectionTestResult result = service.test(ModelProvider.ANTHROPIC);
+
+        assertThat(result.state()).isEqualTo(ProviderCredentialState.PROVIDER_UNAVAILABLE);
+        assertThat(result.inferenceExecuted()).isFalse();
+        assertThat(result.safeCode()).isEqualTo("INVALID_REQUEST_ERROR");
+        verify(repository).recordTestIfCurrent(
+                eq(ModelProvider.ANTHROPIC),
+                eq("fingerprint-ANTHROPIC"),
+                eq(result.modelId()),
+                eq(ProviderCredentialState.PROVIDER_UNAVAILABLE),
+                eq("FAILED"),
+                eq("INVALID_REQUEST_ERROR"),
+                isNull(),
+                isNull(),
+                eq(0L));
+    }
+
     @Test
     void discardsAnOldKeyTestResultAfterTheCredentialIsReplaced() throws Exception {
         when(credentialResolver.resolve(ModelProvider.OPENAI))
@@ -215,5 +293,10 @@ class ProviderConnectionTestServiceTest {
                 provider,
                 credential.getBytes(StandardCharsets.US_ASCII),
                 "fingerprint-" + provider.name());
+    }
+
+    private static String anthropicInvalidRequest(String message) {
+        return "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+                + "\"message\":\"" + message + "\"}}";
     }
 }

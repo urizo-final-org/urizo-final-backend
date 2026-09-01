@@ -67,6 +67,7 @@ public final class CodingHandlerStageService {
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
     private final ProfileModelBindingService profileModelBindings;
+    private final GuardrailPathSelectionService guardrailSelections;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
@@ -81,6 +82,7 @@ public final class CodingHandlerStageService {
             CodingModelTurnService models,
             CodingRunnerService runner,
             ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
             ObjectMapper objectMapper,
             Clock clock) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
@@ -90,6 +92,8 @@ public final class CodingHandlerStageService {
         this.models = Objects.requireNonNull(models, "models are required");
         this.profileModelBindings = Objects.requireNonNull(
                 profileModelBindings, "profileModelBindings are required");
+        this.guardrailSelections = Objects.requireNonNull(
+                guardrailSelections, "guardrailSelections are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -307,6 +311,17 @@ public final class CodingHandlerStageService {
                             + String.join(", ", denied),
                     HttpStatus.UNPROCESSABLE_ENTITY);
         }
+        // The second layer: the folders the administrator chose when this job was created. The
+        // copy taken then is used, not what the setting says now.
+        List<String> outside = outsideAllowedFolders(
+                guardrailSelections.jobSnapshot(jobId), diff, scan);
+        if (!outside.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_NOT_SELECTED",
+                    "The Coding candidate changed files outside the selected folders: "
+                            + String.join(", ", outside),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         String validationHash = digest(objectMapper.valueToTree(List.of(
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
@@ -347,6 +362,39 @@ public final class CodingHandlerStageService {
      * check above already requires them to describe the same diff.
      */
     static List<String> deniedChangedPaths(JsonNode... toolResults) {
+        return GuardrailPathPolicy.deniedPaths(changedPaths(toolResults));
+    }
+
+    /**
+     * The changed files that fall outside the folders this job was allowed into.
+     *
+     * <p>An empty allow list means the administrator has not chosen any folder yet, and then only
+     * the fixed Denylist applies. Refusing everything instead would stop ordinary work the moment
+     * nobody had filled the screen in, while the paths that actually matter stay closed either way.
+     *
+     * <p>The allow list entries are {@code repository:path}; only the path is compared. The Coding
+     * pipeline works on the Backend checkout today and a job carries no repository name, while the
+     * two repositories' folder shapes do not overlap - Backend selections sit under
+     * {@code src/main/java/...} and Frontend ones under {@code src/features/...}, {@code src/app},
+     * {@code src/shared/...} and {@code src/styles}. When the pipeline gains a second repository,
+     * the repository has to come from the job rather than from the shape of the path.
+     */
+    static List<String> outsideAllowedFolders(
+            List<String> allowedPaths, JsonNode... toolResults) {
+        if (allowedPaths.isEmpty()) {
+            return List.of();
+        }
+        List<String> folders = allowedPaths.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        return changedPaths(toolResults).stream()
+                .filter(path -> folders.stream().noneMatch(
+                        folder -> path.equals(folder) || path.startsWith(folder + "/")))
+                .toList();
+    }
+
+    private static List<String> changedPaths(JsonNode... toolResults) {
         Set<String> changedPaths = new LinkedHashSet<>();
         for (JsonNode toolResult : toolResults) {
             for (JsonNode path : toolResult.path("changedPaths")) {
@@ -355,7 +403,7 @@ public final class CodingHandlerStageService {
                 }
             }
         }
-        return GuardrailPathPolicy.deniedPaths(List.copyOf(changedPaths));
+        return List.copyOf(changedPaths);
     }
 
     private CodingHandlerContract.StageExecutionResponse sideEffect(

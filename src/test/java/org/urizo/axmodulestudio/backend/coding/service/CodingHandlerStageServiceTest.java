@@ -89,7 +89,8 @@ class CodingHandlerStageServiceTest {
         when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), anyBindings, mapper, clock);
+                mock(CodingRunnerService.class), anyBindings,
+                mock(GuardrailPathSelectionService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -258,7 +259,8 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -367,7 +369,8 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -557,5 +560,60 @@ class CodingHandlerStageServiceTest {
         JsonNode empty = new ObjectMapper().createObjectNode();
 
         assertThat(CodingHandlerStageService.deniedChangedPaths(empty, empty)).isEmpty();
+    }
+
+    private static final String CMS_BACKEND =
+            "src/main/java/org/urizo/axmodulestudio/backend/cms";
+
+    @Test
+    void anEmptySelectionLeavesOnlyTheFixedDenylistInForce() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(List.of(), diff, diff))
+                .isEmpty();
+    }
+
+    @Test
+    void aChangeInsideASelectedFolderPasses() {
+        JsonNode diff = changedPaths(
+                CMS_BACKEND + "/service/BoardService.java",
+                CMS_BACKEND + "/controller/MemberController.java");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+    }
+
+    @Test
+    void aChangeOutsideEverySelectedFolderIsReported() {
+        String health = "src/main/java/org/urizo/axmodulestudio/backend/health/HealthCheck.java";
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java", health);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(health);
+    }
+
+    @Test
+    void aFolderWhoseNameOnlyStartsTheSameIsNotTreatedAsInside() {
+        String lookalike = CMS_BACKEND + "-archive/Old.java";
+        JsonNode diff = changedPaths(lookalike);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(lookalike);
+    }
+
+    @Test
+    void theRepositoryPrefixIsStrippedBeforeComparing() {
+        JsonNode diff = changedPaths("src/features/cms/MemberListPage.tsx");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("frontend:src/features/cms"), diff, diff)).isEmpty();
+    }
+
+    @Test
+    void theSelectedFolderItselfCountsAsInside() {
+        JsonNode diff = changedPaths(CMS_BACKEND);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
     }
 }

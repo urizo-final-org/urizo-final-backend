@@ -38,8 +38,17 @@ final class ProfileSnapshotValidator {
     private static final Pattern MODEL_KEY = Pattern.compile("^[a-z][a-z0-9_-]{0,127}$");
     private static final Pattern TOOL_KEY = Pattern.compile("^[a-z][a-z0-9_]{0,127}$");
     private static final Pattern GUARDRAIL_KEY = Pattern.compile("^[a-z][a-z0-9_.:-]{0,127}$");
-    private static final int MAX_WORKER_ATTEMPTS = 20;
+    private static final int WORKER_ATTEMPTS = 3;
     private static final String SUPPORTED_GUARDRAIL_PROFILE = "central.default";
+    private static final Set<String> EMPTY_CONFIG_HANDLERS = Set.of(
+            "common.start", "common.check", "common.end",
+            "coding.analyze", "coding.code", "coding.review", "coding.preview",
+            "coding.pr_request",
+            "cms.analyze", "cms.preview", "cms.discard", "cms.apply");
+    private static final Set<String> CODING_APPROVAL_STAGES =
+            Set.of("SCOPE", "CANDIDATE", "GITHUB", "CMS", "DEPLOY");
+    private static final Set<String> CODING_APPROVAL_ROLES =
+            Set.of("GENERAL_ADMIN", "SUPER_ADMIN");
 
     private static final Map<String, Set<String>> TOOLS = Map.of(
             "LLM_OPS", Set.of(
@@ -121,7 +130,7 @@ final class ProfileSnapshotValidator {
         SnapshotConfig config = config(snapshot.get("config"));
         ObjectNode modelBindings = object(snapshot.get("modelBindings"), "snapshot.modelBindings");
         rejectExecutionFields(modelBindings);
-        validateModelBindings(modelBindings);
+        validateModelBindings(modelBindings, expectedProfileKey);
         ObjectNode toolPolicy = object(snapshot.get("toolPolicy"), "snapshot.toolPolicy");
         rejectExecutionFields(toolPolicy);
         validateToolPolicy(toolPolicy, expectedProfileKey);
@@ -133,7 +142,7 @@ final class ProfileSnapshotValidator {
         validateGraph(nodes, edges, config, modelBindings);
     }
 
-    private static void validateModelBindings(ObjectNode bindings) {
+    private static void validateModelBindings(ObjectNode bindings, String profileKey) {
         bindings.fields().forEachRemaining(entry -> {
             ObjectNode binding = object(entry.getValue(),
                     "snapshot.modelBindings." + entry.getKey());
@@ -145,6 +154,12 @@ final class ProfileSnapshotValidator {
                     "snapshot.modelBindings." + entry.getKey() + ".fallback");
             if (fallback.contains(primary)) {
                 invalid("snapshot.modelBindings fallback must not repeat the primary model");
+            }
+            if (!ProfileModelBindingService.isRegisteredBindingKey(profileKey, primary)
+                    || fallback.stream().anyMatch(bindingKey ->
+                            !ProfileModelBindingService.isRegisteredBindingKey(
+                                    profileKey, bindingKey))) {
+                invalid("snapshot.modelBindings contains an unregistered binding for this Profile");
             }
         });
     }
@@ -185,14 +200,60 @@ final class ProfileSnapshotValidator {
             }
             ObjectNode nodeConfig = object(node.get("config"), "node.config");
             rejectExecutionFields(nodeConfig);
-            if ("guardrail".equals(type)
-                    && (nodeConfig.size() != 1 || !nodeConfig.path("locked").isBoolean()
-                    || !nodeConfig.path("locked").booleanValue())) {
-                invalid("snapshot requires locked guardrail nodes");
-            }
-            result.add(new Node(id, type, ports, nodeConfig.deepCopy()));
+            validateHandlerConfig(handlerKey, nodeConfig);
+            result.add(new Node(id, type, handlerKey, ports, nodeConfig.deepCopy()));
         }
         return result;
+    }
+
+    private static void validateHandlerConfig(String handlerKey, ObjectNode config) {
+        if ("common.approval".equals(handlerKey)) {
+            invalid("common.approval is unavailable without a Backend approval authority");
+        }
+        if (EMPTY_CONFIG_HANDLERS.contains(handlerKey) && !config.isEmpty()) {
+            invalid(handlerKey + " config must be empty");
+        }
+        if ("common.guardrail".equals(handlerKey)
+                && (config.size() != 1 || !config.path("locked").isBoolean()
+                || !config.path("locked").booleanValue())) {
+            invalid("common.guardrail config must be exactly {locked: true}");
+        }
+        if ("coding.deploy_request".equals(handlerKey)
+                && (config.size() != 1
+                || !"request_record_only".equals(config.path("mode").textValue()))) {
+            invalid("coding.deploy_request config is invalid");
+        }
+        if ("coding.rework_gate".equals(handlerKey)
+                && (config.size() != 1
+                || !config.path("maxReworkRounds").isIntegralNumber()
+                || config.path("maxReworkRounds").bigIntegerValue().signum() < 1)) {
+            invalid("coding.rework_gate config is invalid");
+        }
+        if ("coding.approval".equals(handlerKey)) {
+            validateCodingApprovalConfig(config, false);
+        }
+        if ("coding.preview_approval".equals(handlerKey)) {
+            validateCodingApprovalConfig(config, true);
+        }
+        if ("cms.approval".equals(handlerKey)
+                && (config.size() != 2
+                || !"PREVIEW".equals(config.path("stage").textValue())
+                || !"GENERAL_ADMIN".equals(config.path("requiredRole").textValue()))) {
+            invalid("cms.approval config is invalid");
+        }
+    }
+
+    private static void validateCodingApprovalConfig(ObjectNode config, boolean candidate) {
+        if (!fields(config).equals(Set.of("stage", "requiredRole"))) {
+            invalid("coding approval config is invalid");
+        }
+        String stage = text(config.get("stage"), "node.config.stage");
+        String requiredRole = text(config.get("requiredRole"), "node.config.requiredRole");
+        if (!CODING_APPROVAL_STAGES.contains(stage)
+                || !CODING_APPROVAL_ROLES.contains(requiredRole)
+                || candidate != "CANDIDATE".equals(stage)) {
+            invalid("coding approval config is invalid");
+        }
     }
 
     private static List<Edge> edges(JsonNode raw) {
@@ -216,8 +277,8 @@ final class ProfileSnapshotValidator {
         exactFields(config, Set.of("maxNodes", "maxAttempts", "loopLimits"), "config");
         int maxNodes = positiveInt(config.get("maxNodes"), "config.maxNodes");
         int maxAttempts = positiveInt(config.get("maxAttempts"), "config.maxAttempts");
-        if (maxAttempts > MAX_WORKER_ATTEMPTS) {
-            invalid("config.maxAttempts must be between 1 and 20");
+        if (maxAttempts != WORKER_ATTEMPTS) {
+            invalid("config.maxAttempts must be exactly 3");
         }
         JsonNode rawLimits = config.get("loopLimits");
         if (rawLimits == null || !rawLimits.isArray()) {
@@ -294,6 +355,12 @@ final class ProfileSnapshotValidator {
             }
             if (!source.resultPorts().contains(edge.resultPort())) {
                 invalid("snapshot.edges references an undeclared result port");
+            }
+            if ("failed".equals(edge.resultPort())
+                    && Set.of("common.guardrail", "common.check")
+                    .contains(source.handlerKey())
+                    && !edge.to().equals(end.id())) {
+                invalid(source.handlerKey() + " failed result must route directly to end");
             }
             if (!routes.add(new PortRoute(edge.from(), edge.resultPort()))) {
                 invalid("snapshot.edges contains duplicate result routes");
@@ -464,7 +531,12 @@ final class ProfileSnapshotValidator {
     }
 
     private record HandlerContract(String nodeType, Set<String> resultPorts) { }
-    private record Node(String id, String type, Set<String> resultPorts, JsonNode config) { }
+    private record Node(
+            String id,
+            String type,
+            String handlerKey,
+            Set<String> resultPorts,
+            JsonNode config) { }
     private record Edge(String from, String resultPort, String to) {
         Route route() { return new Route(from, resultPort, to); }
     }

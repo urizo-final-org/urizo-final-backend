@@ -41,12 +41,16 @@ public class ProfileModelBindingService {
                     "llm-ops-code", new ModelTarget(
                             ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
                     "llm-ops-review", new ModelTarget(
-                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT)),
+                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                    "llm-ops-claude", new ModelTarget(
+                            ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT)),
             "NATURAL_CMS", Map.of(
                     "natural-cms-analyze", new ModelTarget(
                             ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
                     "natural-cms-command", new ModelTarget(
-                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT)));
+                            ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                    "natural-cms-claude", new ModelTarget(
+                            ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT)));
 
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
@@ -155,6 +159,11 @@ public class ProfileModelBindingService {
             }
         }
         return List.copyOf(selected.values());
+    }
+
+    static boolean isRegisteredBindingKey(String profileKey, String bindingKey) {
+        Map<String, ModelTarget> catalog = BINDINGS.get(profileKey);
+        return catalog != null && catalog.containsKey(bindingKey);
     }
 
     private static List<String> bindingKeys(JsonNode binding) {

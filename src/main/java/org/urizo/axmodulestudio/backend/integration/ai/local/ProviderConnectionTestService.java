@@ -72,7 +72,7 @@ public class ProviderConnectionTestService {
                 ProviderHttpResponse response = switch (provider) {
                     case OPENAI -> callOpenAi(credentialHeader);
                     case GOOGLE_GENAI -> callGoogle(credentialHeader);
-                    case ANTHROPIC -> callAnthropicModels(credentialHeader);
+                    case ANTHROPIC -> callAnthropic(credentialHeader);
                     default -> throw new IllegalArgumentException(
                             "Provider is not supported by the local connection test.");
                 };
@@ -129,14 +129,20 @@ public class ProviderConnectionTestService {
                 REQUEST_TIMEOUT);
     }
 
-    private ProviderHttpResponse callAnthropicModels(String credential) throws IOException, InterruptedException {
+    private ProviderHttpResponse callAnthropic(String credential) throws IOException, InterruptedException {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", ANTHROPIC_MODEL_PROBE);
+        body.put("max_tokens", 8);
+        ArrayNode messages = body.putArray("messages");
+        messages.addObject().put("role", "user").put("content", FIXED_PROMPT);
         return transport.exchange(
-                "GET",
-                URI.create("https://api.anthropic.com/v1/models?limit=1"),
+                "POST",
+                URI.create("https://api.anthropic.com/v1/messages"),
                 Map.of(
                         "x-api-key", credential,
-                        "anthropic-version", "2023-06-01"),
-                "",
+                        "anthropic-version", "2023-06-01",
+                        "Content-Type", "application/json"),
+                writeJson(body),
                 REQUEST_TIMEOUT);
     }
 
@@ -185,10 +191,12 @@ public class ProviderConnectionTestService {
                             nullableInt(root.path("usageMetadata").path("candidatesTokenCount")));
                 }
                 case ANTHROPIC -> {
-                    if (!root.path("data").isArray() || root.path("data").isEmpty()) {
-                        throw new IllegalArgumentException("Anthropic Models API response was empty.");
-                    }
-                    yield new ParsedSuccess(false, null, null);
+                    String output = root.path("content").path(0).path("text").asText("");
+                    requireOutput(output);
+                    yield new ParsedSuccess(
+                            true,
+                            nullableInt(root.path("usage").path("input_tokens")),
+                            nullableInt(root.path("usage").path("output_tokens")));
                 }
                 default -> throw new IllegalArgumentException("Unsupported provider response.");
             };
@@ -204,10 +212,11 @@ public class ProviderConnectionTestService {
                 || "UNAUTHENTICATED".equals(providerCode)) {
             return new FailureClassification(ProviderCredentialState.INVALID_CREDENTIAL, "AUTHENTICATION_FAILED");
         }
-        if (provider == ModelProvider.ANTHROPIC
-                && response.statusCode() == 400
-                && isAnthropicBillingFailure(response.body())) {
-            return new FailureClassification(ProviderCredentialState.BILLING_BLOCKED, "BILLING_BLOCKED");
+        if (provider == ModelProvider.ANTHROPIC && response.statusCode() == 400) {
+            FailureClassification anthropicClassification = classifyAnthropicInvalidRequest(response.body());
+            if (anthropicClassification != null) {
+                return anthropicClassification;
+            }
         }
         if (response.statusCode() == 402 || "BILLING_ERROR".equals(providerCode)
                 || "INSUFFICIENT_QUOTA".equals(providerCode)) {
@@ -247,20 +256,38 @@ public class ProviderConnectionTestService {
         return null;
     }
 
-    private boolean isAnthropicBillingFailure(String responseBody) {
+    private FailureClassification classifyAnthropicInvalidRequest(String responseBody) {
         try {
             String message = objectMapper.readTree(responseBody)
                     .path("error")
                     .path("message")
                     .asText("")
-                    .toLowerCase(Locale.ROOT);
-            return message.contains("credit balance")
-                    || message.contains("spend limit")
-                    || message.contains("billing");
+                    .toLowerCase(Locale.ROOT)
+                    .replaceAll("[^a-z0-9]+", " ")
+                    .trim();
+            boolean workspaceIdMentioned = message.contains("anthropic workspace id")
+                    || message.contains("workspace id");
+            boolean workspaceIdRequired = message.contains("required")
+                    || message.contains("missing")
+                    || (message.contains("must") && message.contains("provided"));
+            if (workspaceIdMentioned && workspaceIdRequired) {
+                return new FailureClassification(
+                        ProviderCredentialState.PROVIDER_UNAVAILABLE,
+                        "WORKSPACE_ID_REQUIRED");
+            }
+            if (message.contains("billing")
+                    || message.contains("credit")
+                    || message.contains("spend")
+                    || message.contains("usage limit")) {
+                return new FailureClassification(
+                        ProviderCredentialState.BILLING_BLOCKED,
+                        "BILLING_BLOCKED");
+            }
         }
         catch (JsonProcessingException ignored) {
-            return false;
+            // Raw provider bodies are intentionally neither logged nor persisted.
         }
+        return null;
     }
 
     private ProviderConnectionTestResult recordFailure(

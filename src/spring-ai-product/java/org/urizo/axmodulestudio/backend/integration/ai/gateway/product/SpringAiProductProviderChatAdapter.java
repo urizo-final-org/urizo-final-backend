@@ -46,6 +46,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentia
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialResolver;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailure;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailureKind;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFinishReason;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
@@ -250,6 +251,10 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         int inputTokens = usage == null ? 0 : nonNegative(usage.getPromptTokens());
         int outputTokens = usage == null ? 0 : nonNegative(usage.getCompletionTokens());
         Duration latency = Duration.between(startedAt, clock.instant());
+        String nativeFinishReason = response.getResult().getMetadata() == null
+                ? null : response.getResult().getMetadata().getFinishReason();
+        ProviderFinishReason finishReason = ProviderFinishReason.normalize(
+                request.provider(), nativeFinishReason, !toolCalls.isEmpty());
         return new ProviderChatResponse(
                 request.provider(),
                 request.modelId(),
@@ -257,7 +262,8 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 toolCalls,
                 inputTokens,
                 outputTokens,
-                latency.isNegative() ? Duration.ZERO : latency);
+                latency.isNegative() ? Duration.ZERO : latency,
+                finishReason);
     }
 
     private static List<ProviderChatMessage.ToolCall> nativeToolCalls(

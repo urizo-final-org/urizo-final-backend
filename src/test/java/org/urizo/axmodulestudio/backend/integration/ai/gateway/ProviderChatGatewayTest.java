@@ -89,6 +89,29 @@ class ProviderChatGatewayTest {
     }
 
     @Test
+    void rejectsLengthLimitedResponsesInsteadOfTreatingThemAsComplete() {
+        ProviderChatRequest request = request("bounded response fixture");
+        when(adapter.chat(registration, request)).thenReturn(new ProviderChatResponse(
+                ModelProvider.OPENAI,
+                Stage2ProviderModels.OPENAI_CHAT,
+                "partial output",
+                List.of(),
+                4,
+                8,
+                Duration.ofMillis(25),
+                ProviderFinishReason.LENGTH_LIMIT));
+
+        assertThatThrownBy(() -> gateway.chat(request))
+                .isInstanceOfSatisfying(ProviderGatewayException.class, failure -> {
+                    assertThat(failure.code()).isEqualTo(
+                            ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
+                    assertThat(failure.getMessage()).isEqualTo(
+                            "Model provider returned an incomplete response.");
+                });
+        verify(adapter).chat(registration, request);
+    }
+
+    @Test
     void requiresTheExistingToolCallingCapabilityBeforeInvokingAnAdapter() {
         ObjectNode schema = JsonNodeFactory.instance.objectNode();
         schema.put("type", "object").put("additionalProperties", false);

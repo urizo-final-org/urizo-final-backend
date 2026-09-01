@@ -55,6 +55,7 @@ public final class CodingHandlerCommandService {
     private final CodingJobLifecycleRepository lifecycle;
     private final CodingJobLifecycleService lifecycleService;
     private final CodingJobLifecycleRequestDigester lifecycleDigester;
+    private final GuardrailJobSnapshotWriter guardrailSnapshots;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -65,6 +66,7 @@ public final class CodingHandlerCommandService {
             CodingJobLifecycleRepository lifecycle,
             CodingJobLifecycleService lifecycleService,
             CodingJobLifecycleRequestDigester lifecycleDigester,
+            GuardrailJobSnapshotWriter guardrailSnapshots,
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = jdbc;
@@ -73,6 +75,7 @@ public final class CodingHandlerCommandService {
         this.lifecycle = lifecycle;
         this.lifecycleService = lifecycleService;
         this.lifecycleDigester = lifecycleDigester;
+        this.guardrailSnapshots = guardrailSnapshots;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -164,6 +167,9 @@ public final class CodingHandlerCommandService {
                         workIdentity.workSlug(),
                         digest,
                         Timestamp.from(now));
+                // Same transaction as the request row, so a job can never exist without the
+                // guardrail it will be judged against.
+                guardrailSnapshots.capture(jobId);
                 if (inserted != 1) {
                     throw unavailable();
                 }

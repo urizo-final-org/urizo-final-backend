@@ -1,5 +1,8 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -31,12 +34,15 @@ public class GuardrailPathSelectionService {
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final ObjectMapper objectMapper;
 
     GuardrailPathSelectionService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
-            @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions) {
+            @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions,
+            ObjectMapper objectMapper) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc is required");
         this.transactions = Objects.requireNonNull(transactions, "transactions are required");
+        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
     }
 
     public GuardrailSelectionContract.SelectionList selections(String repository) {
@@ -83,6 +89,19 @@ public class GuardrailPathSelectionService {
             }
         });
         return selections(repository);
+    }
+
+    /**
+     * The guardrail the job was created under. Empty when the job predates the snapshot, which the
+     * caller must tell apart from a job that was deliberately given nothing.
+     */
+    public List<String> jobSnapshot(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        List<String> stored = jdbc.queryForList(
+                "SELECT jsonb_array_elements_text(snapshot_json -> 'allowedPaths') "
+                        + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
+                String.class, jobId);
+        return List.copyOf(stored);
     }
 
     /**

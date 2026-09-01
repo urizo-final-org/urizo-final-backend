@@ -24,7 +24,8 @@ class GuardrailPathSelectionServiceTest {
     private final JdbcTemplate jdbc = mock(JdbcTemplate.class);
     private final TransactionTemplate transactions = mock(TransactionTemplate.class);
     private final GuardrailPathSelectionService service =
-            new GuardrailPathSelectionService(jdbc, transactions);
+            new GuardrailPathSelectionService(
+                    jdbc, transactions, new com.fasterxml.jackson.databind.ObjectMapper());
 
     private static GuardrailSelectionContract.SaveRequest save(
             String repository, GuardrailSelectionContract.Selection... selections) {

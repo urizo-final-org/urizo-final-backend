@@ -36,4 +36,28 @@ CREATE INDEX idx_guardrail_path_selection_enabled
     ON app.guardrail_path_selection (repository, path)
     WHERE enabled;
 
+-- ai_workspace serves the administrator API. dev_operator only reads, because the Job lifecycle
+-- connection copies the choice into a job snapshot and never edits the choice itself.
 GRANT SELECT, INSERT, UPDATE, DELETE ON app.guardrail_path_selection TO ai_workspace;
+GRANT SELECT ON app.guardrail_path_selection TO dev_operator;
+
+-- The guardrail a single job is judged by, copied when the job is created.
+--
+-- A job can run for a long time. If it were judged by whatever the selection happens to say when it
+-- finishes, an administrator changing the setting mid-run would silently change the rules the job
+-- already worked under. The copy is what that job is measured against, start to end.
+--
+-- No UPDATE or DELETE is granted. The copy cannot be edited afterwards even by the application,
+-- which is the whole point of taking it.
+CREATE TABLE app.guardrail_job_snapshot (
+    job_id UUID PRIMARY KEY REFERENCES app.coding_job(job_id),
+    snapshot_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT ck_guardrail_job_snapshot_json CHECK (
+        jsonb_typeof(snapshot_json) = 'object')
+);
+
+-- dev_operator writes the copy in the same transaction that creates the job. ai_workspace only
+-- reads it, because the worker judges against the copy and must never be able to change it.
+GRANT INSERT, SELECT ON app.guardrail_job_snapshot TO dev_operator;
+GRANT SELECT ON app.guardrail_job_snapshot TO ai_workspace;

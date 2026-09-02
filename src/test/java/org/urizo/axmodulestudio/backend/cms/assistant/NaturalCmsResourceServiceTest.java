@@ -18,7 +18,10 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
 
@@ -100,7 +103,7 @@ class NaturalCmsResourceServiceTest {
 
         assertThatThrownBy(() -> resources.validateCommand(RESOURCE, command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("title and body");
+                .hasMessageContaining("body, title");
     }
 
     @Test
@@ -147,5 +150,96 @@ class NaturalCmsResourceServiceTest {
         assertThatThrownBy(() -> resources.validateCommand(RESOURCE, command))
                 .isInstanceOf(NaturalCmsException.class)
                 .hasMessageContaining("headings (##)");
+    }
+
+    @Test
+    void updatesAMenuWithNumberAndNullFields() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        when(cms.menu(3)).thenReturn(new MenuView(3, "회사소개", "/about", 5L, 1, "NONE", null));
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"name":"회사 소개","displayOrder":2,"parentId":null}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "3"), command);
+
+        verify(cms).updateMenu(3, "회사 소개", "/about", null, 2, "NONE", null);
+    }
+
+    @Test
+    void updatesABoardAndClearsAnOptionalTextField() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        when(cms.board(4)).thenReturn(new BoardView(
+                4, "공지사항", "안내 게시판",
+                Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z")));
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"description":null}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("BOARD", "4"), command);
+
+        verify(cms).updateBoard(4, "공지사항", null);
+    }
+
+    @Test
+    void updatesATemplateAddressedByItsKey() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        when(cms.templates()).thenReturn(java.util.List.of(template()));
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"siteName":"새 사이트"}}
+                """);
+
+        NaturalCmsContract.ResourceRef resource =
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "classic");
+        assertThat(resources.snapshot(resource).path("id").asText()).isEqualTo("classic");
+        resources.apply(resource, command);
+
+        verify(cms).saveTemplate(
+                "classic", "wide", "#112233", "새 사이트", "머리말", "꼬리말",
+                "/hero.png", "환영합니다", "부제", "자세히", "/about");
+    }
+
+    @Test
+    void rejectsAFieldValueOfTheWrongJsonType() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"displayOrder":"2"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("MENU", "3"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("displayOrder");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MENU", "BOARD", "CONTENT", "TEMPLATE"})
+    void acceptsTheFourScreenResources(String type) {
+        assertThatCode(() -> new NaturalCmsContract.ResourceRef(type, "1"))
+                .doesNotThrowAnyException();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"POST", "MEMBER", "content", "CMS_COMPOSITE"})
+    void rejectsResourcesOutsideTheScreenBoundary(String type) {
+        assertThatThrownBy(() -> new NaturalCmsContract.ResourceRef(type, "1"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static TemplateView template() {
+        return new TemplateView(
+                "classic", "wide", "#112233", "기존 사이트", "머리말", "꼬리말",
+                "/hero.png", "환영합니다", "부제", "자세히", "/about",
+                true, Instant.parse("2026-08-30T00:01:00Z"));
     }
 }

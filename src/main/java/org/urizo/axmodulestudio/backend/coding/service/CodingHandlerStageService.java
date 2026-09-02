@@ -746,6 +746,24 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
+        // The analyst is designed to refuse a request that clearly needs work outside the
+        // fence, before the expensive coding stage runs. It can only do that if it is shown
+        // the fence: the job's own snapshot, so a mid-run settings change cannot move the
+        // rules under it. An empty snapshot means an open system, and injecting a fabricated
+        // restriction into an open system would refuse work the post-check would have passed.
+        if ("coding.analyze".equals(handlerKey)) {
+            List<String> allowed = guardrailSelections.jobSnapshot(aggregate.jobId());
+            if (allowed != null && !allowed.isEmpty()) {
+                ObjectNode guardrail = context.putObject("guardrail");
+                ArrayNode folders = guardrail.putArray("allowedFolders");
+                allowed.forEach(folders::add);
+                guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
+                    guardrail.put("allowNewDependency", rules.allowNewDependency());
+                    guardrail.put("maxChangedFiles", rules.maxChangedFiles());
+                    guardrail.put("maxChangedLines", rules.maxChangedLines());
+                });
+            }
+        }
         ArrayNode prior = context.putArray("priorResults");
         aggregate.results().stream()
                 .skip(Math.max(0, aggregate.results().size() - 20L))
@@ -788,7 +806,16 @@ public final class CodingHandlerStageService {
                     + "paragraph in the language of the request that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"acceptanceCriteria\", an "
                     + "array of short plain-language statements that will each be true once the "
-                    + "request is done. ";
+                    + "request is done. "
+                    // The early block the design asks of the analyst. The post-check on the
+                    // finished candidate remains the authority; this only saves the coding
+                    // stage's cost when the refusal is obvious from the request alone.
+                    + "When the context contains guardrail.allowedFolders, files may only be "
+                    + "changed inside those folders. If the request clearly requires changing "
+                    + "files outside them, or breaking a listed guardrail rule, answer port "
+                    + "\"infeasible\" and explain in planSummary, in the language of the "
+                    + "request, which area is not allowed. If it is unclear, proceed as "
+                    + "feasible. ";
             case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
                     + "paragraph in the language of the request that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "

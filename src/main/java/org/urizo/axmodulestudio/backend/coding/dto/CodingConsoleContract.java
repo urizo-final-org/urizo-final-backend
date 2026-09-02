@@ -35,7 +35,8 @@ public final class CodingConsoleContract {
             String status,
             String currentStage,
             Instant createdAt,
-            Instant finishedAt) { }
+            Instant finishedAt,
+            String failureCode) { }
 
     /** The list endpoint's envelope. */
     public record JobList(

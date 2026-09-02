@@ -260,10 +260,15 @@ class CodingHandlerStageServiceTest {
         when(profileModelBindings.resolve(
                 PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT))
                 .thenReturn(List.of(registration));
+        // The analyst is shown the fence so it can refuse an out-of-fence request before the
+        // coding stage spends anything. The snapshot is the job's own copy.
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
+        when(selections.jobSnapshot(JOB)).thenReturn(List.of(
+                "backend:src/main/java/org/urizo/axmodulestudio/backend/cms"));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), profileModelBindings,
-                mock(GuardrailPathSelectionService.class),
+                selections,
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
@@ -338,6 +343,17 @@ class CodingHandlerStageServiceTest {
                 .isEqualTo("array");
         assertThat(payloadProperties.path("acceptanceCriteria").path("items").path("type").asText())
                 .isEqualTo("string");
+
+        // The design's early block: the analyst sees the fence and is told to answer
+        // infeasible when the request clearly needs work outside it. The post-check on the
+        // finished candidate stays the authority either way.
+        String systemPrompt = structuredRequest.getValue().messages().get(0).path("content").asText();
+        assertThat(systemPrompt).contains("guardrail.allowedFolders");
+        assertThat(systemPrompt).contains("\"infeasible\"");
+        String contextMessage = structuredRequest.getValue().messages().get(1).path("content").asText();
+        assertThat(contextMessage).contains("allowedFolders");
+        assertThat(contextMessage)
+                .contains("backend:src/main/java/org/urizo/axmodulestudio/backend/cms");
 
         // Prose alone carries no object to recover, so the stage still fails.
         when(gateway.chat(any())).thenReturn(assistantText("I could not decide."));

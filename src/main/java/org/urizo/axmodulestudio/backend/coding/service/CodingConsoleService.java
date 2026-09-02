@@ -75,6 +75,7 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobList list(int limit) {
         List<CodingConsoleContract.JobSummary> items = jdbc.query("""
                 SELECT cj.job_id, cj.status, cjr.request_text, cj.created_at, cj.finished_at,
+                       cj.failure_code,
                        COALESCE(latest.handler_key, cj.graph_step) AS stage
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
@@ -99,7 +100,8 @@ public class CodingConsoleService {
                         rs.getString("status"),
                         stageLabel(rs.getString("stage")),
                         instant(rs, "created_at"),
-                        instant(rs, "finished_at")),
+                        instant(rs, "finished_at"),
+                        rs.getString("failure_code")),
                 limit);
         return new CodingConsoleContract.JobList("1.0", items);
     }

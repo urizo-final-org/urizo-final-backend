@@ -160,7 +160,7 @@ class CodingConsoleControllerTest {
                 new CodingConsoleContract.JobSummary(
                         JOB, "backend", "회원 목록에 가입일도 보이게 해줘",
                         "WAITING_APPROVAL", "코드 검토",
-                        Instant.parse("2026-09-02T00:00:00Z"), null))));
+                        Instant.parse("2026-09-02T00:00:00Z"), null, null))));
 
         mockMvc.perform(get("/api/admin/coding/jobs")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))

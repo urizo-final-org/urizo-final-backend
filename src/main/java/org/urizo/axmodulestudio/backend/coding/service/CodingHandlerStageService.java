@@ -548,6 +548,13 @@ public final class CodingHandlerStageService {
                     putOptional(item, "candidateSha", result.candidateSha());
                     putOptional(item, "diffDigest", result.diffDigest());
                     putOptional(item, "validationHash", result.validationHash());
+                    // The payload carries the plain-language plan and the acceptance criteria
+                    // agreed at approval 1. Without it a later stage cannot judge the request
+                    // against what was promised, so the approval screens have nothing to
+                    // place side by side.
+                    if (result.payload() != null && result.payload().isObject()) {
+                        item.set("payload", result.payload().deepCopy());
+                    }
                 });
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -564,10 +571,28 @@ public final class CodingHandlerStageService {
             case "coding.review" -> "\"passed\" or \"changes_requested\"";
             default -> throw contract("The Coding Model stage is not registered.");
         };
+        // The approval screens are read by a general administrator who cannot read code, so
+        // the payload fields are named here rather than left to the model. An empty payload
+        // still satisfies "must be an object", which is exactly what the model returned before
+        // these names existed.
+        String payloadFields = switch (handlerKey) {
+            case "coding.analyze" -> "payload must contain \"planSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, and \"acceptanceCriteria\", an "
+                    + "array of short plain-language statements that will each be true once the "
+                    + "request is done. ";
+            case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, and \"criteriaResults\", an "
+                    + "array of objects each holding \"criterion\", copied verbatim from the "
+                    + "acceptanceCriteria in the coding.analyze payload you were given, and "
+                    + "\"met\", either true or false. ";
+            default -> "";
+        };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
-                + "synonym or rewording, and payload must be an object. "
+                + "synonym or rewording, and payload must be an object. " + payloadFields
                 + ("coding.code".equals(handlerKey)
                     ? "Use read_diff before any diff-bound tool and again after the final change. "
                     // Without the second sentence the model reads "no apply_patch here"

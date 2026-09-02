@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -82,6 +83,12 @@ public class CodingJobIntakeService {
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
+    /**
+     * Two constructors mean Spring cannot guess, and without this it looks for a no-arg one and
+     * fails the whole context at startup. The second constructor exists so a test can shorten
+     * the sha poll; production takes these defaults.
+     */
+    @Autowired
     CodingJobIntakeService(
             CodingHandlerCommandService commands,
             CodingRunnerService runner,

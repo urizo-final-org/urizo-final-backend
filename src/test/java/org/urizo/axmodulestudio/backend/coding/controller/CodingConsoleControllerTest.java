@@ -58,6 +58,7 @@ class CodingConsoleControllerTest {
     private static final UUID JOB = UUID.fromString("55555555-5555-4555-8555-555555555555");
     private static final UUID ACTOR_ID = UUID.fromString("11111111-1111-4111-8111-111111111111");
     private static final UUID TRACE = UUID.fromString("66666666-6666-4666-8666-666666666666");
+    private static final UUID APPROVAL = UUID.fromString("77777777-7777-4777-8777-777777777777");
     private static final String ACCESS_TOKEN = "coding-console-test-token";
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String CHANGED_PATH = "src/main/java/org/urizo/Member.java";
@@ -120,6 +121,23 @@ class CodingConsoleControllerTest {
     }
 
     @Test
+    void theApprovalEvidenceReachesTheScreenOrNoDecisionCanBeSubmitted() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        when(service.detail(eq(JOB), eq(AdminRole.GENERAL_ADMIN))).thenReturn(detail(null));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/{jobId}", JOB)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pendingApproval.approvalId").value(APPROVAL.toString()))
+                .andExpect(jsonPath("$.pendingApproval.nodeId").value("scope_approval"))
+                .andExpect(jsonPath("$.pendingApproval.stage").value("SCOPE"))
+                .andExpect(jsonPath("$.pendingApproval.stageRound").value(1))
+                .andExpect(jsonPath("$.pendingApproval.requiredRole").value("GENERAL_ADMIN"))
+                .andExpect(jsonPath("$.pendingApproval.expectedStateVersion").value(4))
+                .andExpect(jsonPath("$.pendingApproval.pipelineAttempt").value(1));
+    }
+
+    @Test
     void anUnknownJobAnswersNotFoundRatherThanAnEmptyScreen() throws Exception {
         authenticate(AdminRole.GENERAL_ADMIN);
         when(service.detail(eq(JOB), any(AdminRole.class))).thenReturn(null);
@@ -135,7 +153,7 @@ class CodingConsoleControllerTest {
         when(service.list(20)).thenReturn(new CodingConsoleContract.JobList("1.0", List.of(
                 new CodingConsoleContract.JobSummary(
                         JOB, "backend", "회원 목록에 가입일도 보이게 해줘",
-                        "WAITING_APPROVAL", "코드 검토", null,
+                        "WAITING_APPROVAL", "코드 검토",
                         Instant.parse("2026-09-02T00:00:00Z"), null))));
 
         mockMvc.perform(get("/api/admin/coding/jobs")
@@ -173,9 +191,19 @@ class CodingConsoleControllerTest {
                         "가입일을 추가했습니다.",
                         List.of(new CodingConsoleContract.CriterionResult(
                                 "목록에 가입일이 보인다", true))),
-                null, List.of(),
+                pendingApproval(), List.of(),
                 new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/"),
                 technical, Instant.parse("2026-09-02T00:00:00Z"), null);
+    }
+
+    /**
+     * Everything the decision endpoint will demand back. The screen cannot derive any of it -
+     * approvalId is a hash of the stage and round - so the read has to carry it or no approval
+     * can ever be submitted.
+     */
+    private static CodingConsoleContract.PendingApproval pendingApproval() {
+        return new CodingConsoleContract.PendingApproval(
+                APPROVAL, "scope_approval", "SCOPE", 1, "GENERAL_ADMIN", 4, 1, null, null);
     }
 
     private static CodingConsoleContract.Technical technical() {

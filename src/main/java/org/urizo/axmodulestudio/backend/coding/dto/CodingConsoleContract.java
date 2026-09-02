@@ -22,7 +22,11 @@ public final class CodingConsoleContract {
     private CodingConsoleContract() {
     }
 
-    /** One row of the request list. Enough to decide which request to open. */
+    /**
+     * One row of the request list. Enough to decide which request to open, and deliberately no
+     * more: the approval a Job waits on costs a readiness computation per row, and the screen
+     * opens one request before it needs that answer.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record JobSummary(
             UUID jobId,
@@ -30,7 +34,6 @@ public final class CodingConsoleContract {
             String requestText,
             String status,
             String currentStage,
-            PendingApproval pendingApproval,
             Instant createdAt,
             Instant finishedAt) { }
 

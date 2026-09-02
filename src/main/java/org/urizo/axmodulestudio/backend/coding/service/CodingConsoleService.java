@@ -10,6 +10,7 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -52,7 +53,12 @@ public class CodingConsoleService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
 
-    CodingConsoleService(JdbcTemplate jdbc, ObjectMapper objectMapper) {
+    // app.coding_* is granted to ai_workspace only; the primary cms_app datasource cannot
+    // read a single one of these tables. Unit tests mock the template and never notice, so the
+    // qualifier is the whole difference between this class working and failing at every query.
+    CodingConsoleService(
+            @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
+            ObjectMapper objectMapper) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
     }
@@ -74,7 +80,6 @@ public class CodingConsoleService {
                         rs.getString("request_text"),
                         rs.getString("status"),
                         stageLabel(rs.getString("graph_step")),
-                        null,
                         instant(rs, "created_at"),
                         instant(rs, "finished_at")),
                 limit);
@@ -84,14 +89,15 @@ public class CodingConsoleService {
     /** Returns null when no such Job exists, so the controller can answer 404 plainly. */
     public CodingConsoleContract.JobDetail detail(UUID jobId, AdminRole role) {
         List<JobRow> jobs = jdbc.query("""
-                SELECT cj.job_id, cj.status, cj.state_version, cj.graph_step, cj.base_sha,
-                       cj.worker_attempt, cj.worker_max_attempts,
+                SELECT cj.job_id, cj.trace_id, cj.status, cj.state_version, cj.graph_step,
+                       cj.base_sha, cj.worker_attempt, cj.worker_max_attempts,
                        cj.created_at, cj.finished_at, cjr.request_text
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
                 WHERE cj.job_id = ?
                 """,
                 (rs, row) -> new JobRow(
+                        rs.getObject("trace_id", UUID.class),
                         rs.getString("status"),
                         rs.getInt("state_version"),
                         rs.getString("graph_step"),
@@ -124,7 +130,7 @@ public class CodingConsoleService {
                 job.maxAttempts(),
                 plan(analysis),
                 report(review),
-                null,
+                pendingApproval(job, jobId, attempt),
                 decisions(jobId),
                 new CodingConsoleContract.PreviewLink(preview != null, preview == null ? null : PREVIEW_URL),
                 // Everything a general administrator must not read lives in this one object,
@@ -207,6 +213,30 @@ public class CodingConsoleService {
         return attempt == null ? 1 : attempt;
     }
 
+    /**
+     * The approval the Job is waiting on, computed by the same readiness the decision endpoint
+     * enforces. Deriving it twice by two rules would let the screen offer a decision the server
+     * then rejects; sharing the rule means what the screen shows is what will be accepted.
+     *
+     * <p>Empty for every Job that is not waiting, which is the common case.
+     */
+    private CodingConsoleContract.PendingApproval pendingApproval(
+            JobRow job, UUID jobId, int attempt) {
+        return CodingApprovalReadiness.find(
+                        jdbc, objectMapper, jobId, job.traceId(), job.stateVersion(), attempt)
+                .map(ready -> new CodingConsoleContract.PendingApproval(
+                        ready.approvalId(),
+                        ready.nodeId(),
+                        ready.stage().name(),
+                        ready.stageRound(),
+                        ready.requiredRole(),
+                        job.stateVersion(),
+                        attempt,
+                        ready.candidateSha(),
+                        ready.validationHash()))
+                .orElse(null);
+    }
+
     private List<ResultRow> results(UUID jobId, int attempt) {
         return jdbc.query("""
                 SELECT handler_key, result_port, candidate_sha, diff_digest, payload::text
@@ -282,6 +312,7 @@ public class CodingConsoleService {
     }
 
     private record JobRow(
+            UUID traceId,
             String status,
             int stateVersion,
             String graphStep,

@@ -40,10 +40,14 @@ public final class CodingHandlerStageService {
     /**
      * A complete code exchange already spends about seven turns - read_diff, read_file,
      * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
-     * bound of eight left no room for a single re-asked miss. Twelve keeps the loop
-     * bounded while allowing the re-ask layer the handful of turns it exists to spend.
+     * bound of eight left no room for a single re-asked miss. Twelve then proved too
+     * tight for any request that has to find its files first: a measured run against a
+     * trivial one-line edit still spent fourteen tool calls on the edit-and-verify
+     * cycle alone, and the first real multi-file request died at eleven productive
+     * turns without ever patching. Sixteen leaves that navigation room while keeping
+     * the loop bounded.
      */
-    private static final int MAX_MODEL_TURNS = 12;
+    private static final int MAX_MODEL_TURNS = 16;
     /** Tool refusals the model itself caused and can correct when told why. */
     private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
@@ -857,16 +861,20 @@ public final class CodingHandlerStageService {
                     ? "Request one tool call per answer; when an answer carries several, only "
                         + "the first is executed. "
                         + "Use read_diff before any diff-bound tool and again after the final change. "
-                        // Three live runs in one day spent every turn on search_code and never
-                        // reached apply_patch. Searching feels like progress to a model, so the
-                        // budget and the working order have to be said out loud.
+                        // A measured failure spent four of its turns on a natural-language
+                        // query that can never match code and on near-duplicate retries of
+                        // searches that had already answered. The budget and the search
+                        // discipline have to be said out loud - searching feels like
+                        // progress to a model.
                         + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
-                        + "answer spends one whether it searches or edits. Searching is "
-                        + "preparation, not progress: spend at most three answers on "
-                        + "search_code and read_file combined, then start editing with "
-                        + "apply_patch even if your picture is incomplete - a patch can be "
-                        + "corrected after the next read_diff, but a spent answer cannot. "
-                        + "Never repeat a search that found nothing with reworded terms. "
+                        + "answer spends one whether it searches or edits. Search for code "
+                        + "identifiers in English (class, field, and path names), never for "
+                        + "words of the request's own language - those match nothing. Do not "
+                        + "rerun a search that already answered with a slight variation of "
+                        + "itself, and do not reword a search that found nothing - open the "
+                        + "most likely file instead. Once the files to change are in hand, "
+                        + "stop exploring and edit with apply_patch; a patch can be corrected "
+                        + "after the next read_diff, but a spent answer cannot be recovered. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "

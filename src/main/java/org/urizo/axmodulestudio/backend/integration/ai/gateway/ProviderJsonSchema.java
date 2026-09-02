@@ -32,6 +32,7 @@ final class ProviderJsonSchema {
             Pattern.compile("^[A-Za-z][A-Za-z0-9_]{0,119}$");
     private static final Set<String> OBJECT_FIELDS =
             Set.of("type", "properties", "required", "additionalProperties");
+    private static final Set<String> ARRAY_FIELDS = Set.of("type", "items");
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final ObjectMapper STRICT_JSON = strictMapper();
 
@@ -116,9 +117,29 @@ final class ProviderJsonSchema {
             validateObjectSchema(schema, depth, root, stats);
             return;
         }
+        // A list is only expressible with its element type, and a provider running strict
+        // structured output rejects an array that does not declare one. The root stays an
+        // object because every response format this gateway sends is a named record.
+        if ("array".equals(type) && !root) {
+            validateArraySchema(schema, depth, stats);
+            return;
+        }
         if (!("string".equals(type) || "integer".equals(type)) || schema.size() != 1) {
             throw invalidSchema();
         }
+    }
+
+    private static void validateArraySchema(JsonNode schema, int depth, SchemaStats stats) {
+        schema.fieldNames().forEachRemaining(field -> {
+            if (!ARRAY_FIELDS.contains(field)) {
+                throw invalidSchema();
+            }
+        });
+        JsonNode items = schema.path("items");
+        if (!items.isObject()) {
+            throw invalidSchema();
+        }
+        validateSchemaNode(items, depth + 1, false, stats);
     }
 
     private static void validateObjectSchema(
@@ -181,6 +202,7 @@ final class ProviderJsonSchema {
     private static void validateValue(JsonNode value, JsonNode schema) {
         switch (schema.path("type").asText()) {
             case "object" -> validateObjectValue(value, schema);
+            case "array" -> validateArrayValue(value, schema);
             case "string" -> {
                 if (!value.isTextual()) {
                     throw invalidArguments();
@@ -193,6 +215,14 @@ final class ProviderJsonSchema {
             }
             default -> throw invalidArguments();
         }
+    }
+
+    private static void validateArrayValue(JsonNode value, JsonNode schema) {
+        if (!value.isArray() || value.size() > MAX_ARRAY_ITEMS) {
+            throw invalidArguments();
+        }
+        JsonNode items = schema.path("items");
+        value.forEach(item -> validateValue(item, items));
     }
 
     private static void validateObjectValue(JsonNode value, JsonNode schema) {

@@ -598,6 +598,15 @@ public final class CodingHandlerStageService {
                 authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
     }
 
+    /**
+     * The analyze response format.
+     *
+     * <p>Every object is closed and every field required, because a provider running strict
+     * structured output refuses a schema that leaves either open. An open payload also let the
+     * model answer with an empty object that satisfied "must be an object" while telling the
+     * approver nothing, so the two fields the approval screen reads are named here rather than
+     * asked for in prose alone.
+     */
     private JsonNode outcomeResponseFormat() {
         ObjectNode schema = objectMapper.createObjectNode()
                 .put("type", "object")
@@ -605,7 +614,15 @@ public final class CodingHandlerStageService {
         schema.putArray("required").add("port").add("payload");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("port").put("type", "string");
-        properties.putObject("payload").put("type", "object");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("planSummary").add("acceptanceCriteria");
+        ObjectNode payloadProperties = payload.putObject("properties");
+        payloadProperties.putObject("planSummary").put("type", "string");
+        payloadProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
         return ProviderResponseFormat.jsonSchema(schema).requestContract();
     }
 

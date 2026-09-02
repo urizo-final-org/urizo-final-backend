@@ -298,7 +298,8 @@ class CodingHandlerStageServiceTest {
         });
 
         // A correct answer that merely arrived inside a Markdown fence must survive.
-        String stageResult = "{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}";
+        String stageResult = "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"버튼을 잠급니다.\","
+                + "\"acceptanceCriteria\":[\"이유가 보인다\"]}}";
         when(gateway.chat(any())).thenReturn(
                 assistantText("```json\n" + stageResult + "\n```"));
 
@@ -308,8 +309,10 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
 
         assertThat(response.resultPort()).isEqualTo("feasible");
-        assertThat(response.payload()).isEqualTo(
-                mapper.createObjectNode().put("summary", "ok"));
+        ObjectNode expectedPayload = mapper.createObjectNode()
+                .put("planSummary", "버튼을 잠급니다.");
+        expectedPayload.putArray("acceptanceCriteria").add("이유가 보인다");
+        assertThat(response.payload()).isEqualTo(expectedPayload);
         verify(profileModelBindings).resolve(
                 PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT);
         ArgumentCaptor<CodingModelTurnContract.Request> structuredRequest =

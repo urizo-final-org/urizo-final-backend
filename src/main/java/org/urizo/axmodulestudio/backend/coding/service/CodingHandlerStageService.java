@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -22,6 +23,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
+import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
@@ -57,6 +59,14 @@ public final class CodingHandlerStageService {
             + "numbers, context lines copied verbatim, and no added trailing whitespace.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+    /**
+     * The files that declare a dependency. Lock files are included: a library arrives through
+     * one just as surely as through the manifest that names it.
+     */
+    private static final Set<String> DEPENDENCY_MANIFESTS = Set.of(
+            "pom.xml", "package.json", "package-lock.json",
+            "pnpm-lock.yaml", "yarn.lock");
+
     private static final Set<String> REVIEW_TOOLS = Set.of(
             "read_file", "search_code", "read_diff", "run_check",
             "check_package_allowlist", "scan_changed_files");
@@ -66,6 +76,8 @@ public final class CodingHandlerStageService {
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
     private final ProfileModelBindingService profileModelBindings;
+    private final GuardrailPathSelectionService guardrailSelections;
+    private final GuardrailRuleService guardrailRules;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
@@ -80,6 +92,8 @@ public final class CodingHandlerStageService {
             CodingModelTurnService models,
             CodingRunnerService runner,
             ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
@@ -89,6 +103,10 @@ public final class CodingHandlerStageService {
         this.models = Objects.requireNonNull(models, "models are required");
         this.profileModelBindings = Objects.requireNonNull(
                 profileModelBindings, "profileModelBindings are required");
+        this.guardrailSelections = Objects.requireNonNull(
+                guardrailSelections, "guardrailSelections are required");
+        this.guardrailRules = Objects.requireNonNull(
+                guardrailRules, "guardrailRules are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -296,6 +314,40 @@ public final class CodingHandlerStageService {
                 || !diffDigest.equals(scan.path("diffDigest").asText())) {
             throw conflict("The Coding diff changed during preview validation.");
         }
+        List<String> denied = deniedChangedPaths(diff, scan);
+        if (!denied.isEmpty()) {
+            // No approval path exists past this point. A fixed Denylist that a person can wave
+            // through is not a Denylist.
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_DENIED",
+                    "The Coding candidate changed files the fixed guardrail forbids: "
+                            + String.join(", ", denied),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        // The second layer: the folders the administrator chose when this job was created. The
+        // copy taken then is used, not what the setting says now.
+        List<String> outside = outsideAllowedFolders(
+                guardrailSelections.jobSnapshot(jobId), diff, scan);
+        if (!outside.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_NOT_SELECTED",
+                    "The Coding candidate changed files outside the selected folders: "
+                            + String.join(", ", outside),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        // The third layer: the rules that name no path at all. They cannot be judged before the
+        // model runs, because a request that sounds small can still produce a thousand lines.
+        // Build and test success are not repeated here; the deterministic checks above already
+        // require them.
+        List<String> broken = brokenRules(
+                guardrailRules.jobRules(jobId).orElse(null), diff, scan);
+        if (!broken.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_RULE_DENIED",
+                    "The Coding candidate breaks the guardrail rules: "
+                            + String.join("; ", broken),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         String validationHash = digest(objectMapper.valueToTree(List.of(
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
@@ -324,6 +376,145 @@ public final class CodingHandlerStageService {
         return response(resultId, request.handlerKey(), "ready",
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
                 code.candidateSha(), diffDigest, validationHash, payload);
+    }
+
+    /**
+     * The guardrail verdict, taken from what Git reports rather than from what the model says it
+     * changed. A model that does not know how far it reached and a model that is describing its
+     * work falsely both fail here, so its intent never has to be judged.
+     *
+     * <p>{@code read_diff} and {@code scan_changed_files} each list the changed files. Both are
+     * read so that a disagreement between the two cannot become a gap, even though the digest
+     * check above already requires them to describe the same diff.
+     */
+    static List<String> deniedChangedPaths(JsonNode... toolResults) {
+        return GuardrailPathPolicy.deniedPaths(changedPaths(toolResults));
+    }
+
+    /**
+     * The changed files that fall outside the folders this job was allowed into.
+     *
+     * <p>An empty allow list means the administrator has not chosen any folder yet, and then only
+     * the fixed Denylist applies. Refusing everything instead would stop ordinary work the moment
+     * nobody had filled the screen in, while the paths that actually matter stay closed either way.
+     *
+     * <p>The allow list entries are {@code repository:path}; only the path is compared. The Coding
+     * pipeline works on the Backend checkout today and a job carries no repository name, while the
+     * two repositories' folder shapes do not overlap - Backend selections sit under
+     * {@code src/main/java/...} and Frontend ones under {@code src/features/...}, {@code src/app},
+     * {@code src/shared/...} and {@code src/styles}. When the pipeline gains a second repository,
+     * the repository has to come from the job rather than from the shape of the path.
+     */
+    static List<String> outsideAllowedFolders(
+            List<String> allowedPaths, JsonNode... toolResults) {
+        if (allowedPaths.isEmpty()) {
+            return List.of();
+        }
+        List<String> folders = allowedPaths.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        return changedPaths(toolResults).stream()
+                .filter(path -> folders.stream().noneMatch(
+                        folder -> path.equals(folder) || path.startsWith(folder + "/")))
+                .toList();
+    }
+
+    /**
+     * The guardrail rules that the finished candidate breaks, described for the person reading the
+     * failure rather than as codes.
+     *
+     * <p>{@code rules} is null when the job carries no copy, which happens only for a job created
+     * before the rules existed. Such a job never ran under them, so none are applied - the same
+     * choice the path layer makes for an empty selection.
+     *
+     * <p>Every rule is judged from what Git reports. The model's own account of its work is not an
+     * input here for the same reason it is not one in the path layers.
+     */
+    static List<String> brokenRules(
+            GuardrailRuleContract.Rules rules, JsonNode... toolResults) {
+        if (rules == null) {
+            return List.of();
+        }
+        List<String> broken = new ArrayList<>();
+        List<String> changed = changedPaths(toolResults);
+        if (!rules.allowNewDependency()) {
+            List<String> manifests = changed.stream()
+                    .filter(CodingHandlerStageService::isDependencyManifest)
+                    .toList();
+            if (!manifests.isEmpty()) {
+                broken.add("adding a library is not allowed: " + String.join(", ", manifests));
+            }
+        }
+        if (rules.maxChangedFiles() != null && changed.size() > rules.maxChangedFiles()) {
+            broken.add("changed " + changed.size() + " files, limit is "
+                    + rules.maxChangedFiles());
+        }
+        if (rules.maxChangedLines() != null) {
+            int lines = changedLines(toolResults);
+            if (lines > rules.maxChangedLines()) {
+                broken.add("changed " + lines + " lines, limit is " + rules.maxChangedLines());
+            }
+        }
+        return List.copyOf(broken);
+    }
+
+    /**
+     * Whether a path is a file that declares the project's dependencies.
+     *
+     * <p>Matched on the file name at any depth, so moving the file does not evade the rule. Lock
+     * files count: a dependency arrives through them just as surely as through the manifest that
+     * names it.
+     *
+     * <p>The frontend manifest and lock file are already in the fixed Denylist, so allowing new
+     * libraries opens the Backend {@code pom.xml} only. That is deliberate - a rule an
+     * administrator can switch on must not be able to reopen a fixed one.
+     */
+    private static boolean isDependencyManifest(String path) {
+        String normalized = path.replace('\\', '/');
+        String name = normalized.substring(normalized.lastIndexOf('/') + 1);
+        return DEPENDENCY_MANIFESTS.contains(name);
+    }
+
+    /**
+     * How many lines the diff adds or removes.
+     *
+     * <p>Counted from the unified diff body, so a header line - {@code +++ b/...} or
+     * {@code --- a/...} - is not counted as a change. The tool refuses a diff larger than its cap
+     * outright, so the body being counted is never a truncated one.
+     */
+    private static int changedLines(JsonNode... toolResults) {
+        int lines = 0;
+        for (JsonNode toolResult : toolResults) {
+            JsonNode diff = toolResult.path("diff");
+            if (!diff.isTextual()) {
+                continue;
+            }
+            for (String line : diff.textValue().split("\n", -1)) {
+                if (line.startsWith("+++") || line.startsWith("---")) {
+                    continue;
+                }
+                if (line.startsWith("+") || line.startsWith("-")) {
+                    lines++;
+                }
+            }
+            // Only one tool returns the diff body, and counting a second copy of the same diff
+            // would double every number.
+            break;
+        }
+        return lines;
+    }
+
+    private static List<String> changedPaths(JsonNode... toolResults) {
+        Set<String> changedPaths = new LinkedHashSet<>();
+        for (JsonNode toolResult : toolResults) {
+            for (JsonNode path : toolResult.path("changedPaths")) {
+                if (path.isTextual()) {
+                    changedPaths.add(path.textValue());
+                }
+            }
+        }
+        return List.copyOf(changedPaths);
     }
 
     private CodingHandlerContract.StageExecutionResponse sideEffect(

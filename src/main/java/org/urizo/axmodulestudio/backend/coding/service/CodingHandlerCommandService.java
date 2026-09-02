@@ -55,6 +55,7 @@ public final class CodingHandlerCommandService {
     private final CodingJobLifecycleRepository lifecycle;
     private final CodingJobLifecycleService lifecycleService;
     private final CodingJobLifecycleRequestDigester lifecycleDigester;
+    private final GuardrailJobSnapshotWriter guardrailSnapshots;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -65,6 +66,7 @@ public final class CodingHandlerCommandService {
             CodingJobLifecycleRepository lifecycle,
             CodingJobLifecycleService lifecycleService,
             CodingJobLifecycleRequestDigester lifecycleDigester,
+            GuardrailJobSnapshotWriter guardrailSnapshots,
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = jdbc;
@@ -73,6 +75,7 @@ public final class CodingHandlerCommandService {
         this.lifecycle = lifecycle;
         this.lifecycleService = lifecycleService;
         this.lifecycleDigester = lifecycleDigester;
+        this.guardrailSnapshots = guardrailSnapshots;
         this.objectMapper = objectMapper;
         this.clock = clock;
     }
@@ -112,6 +115,13 @@ public final class CodingHandlerCommandService {
             CodingHandlerContract.InitializeRequest request) {
         Objects.requireNonNull(actor, "actor is required");
         Objects.requireNonNull(jobId, "jobId is required");
+        // Before anything is written or any model is called. A request that was never going to be
+        // allowed should not cost three model conversations to find that out.
+        GuardrailRequestPrecheck.Refusal refusal =
+                GuardrailRequestPrecheck.refusalFor(request.requestText());
+        if (refusal != null) {
+            throw failure(refusal.code(), refusal.message(), HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         byte[] digest = digest("INITIALIZE", jobId, actor.actorId(), request);
         try {
             CodingHandlerContract.JobRequestResponse response = transactions.execute(status -> {
@@ -157,6 +167,9 @@ public final class CodingHandlerCommandService {
                         workIdentity.workSlug(),
                         digest,
                         Timestamp.from(now));
+                // Same transaction as the request row, so a job can never exist without the
+                // guardrail it will be judged against.
+                guardrailSnapshots.capture(jobId);
                 if (inserted != 1) {
                     throw unavailable();
                 }

@@ -115,6 +115,40 @@ public class CodingRunnerService {
         return taskId;
     }
 
+    /**
+     * Reads one queued command back. A caller that queued work has no other way to learn what
+     * happened, because the runner reports to this service rather than to whoever asked.
+     *
+     * <p>A task that is still {@code PENDING} is the normal state while no runner is running; that
+     * is a wait, not a failure.
+     */
+    public TaskOutcome taskOutcome(UUID taskId, String expectedKind) {
+        Objects.requireNonNull(taskId, "taskId is required");
+        List<TaskOutcome> found = jdbc.query(
+                "SELECT status, error_code, result_json::text FROM app.coding_runner_task "
+                        + "WHERE task_id = ? AND kind = ?",
+                (row, index) -> {
+                    // result_json stays null until the runner reports, which is the normal state
+                    // while the command is still queued.
+                    String encoded = row.getString("result_json");
+                    return new TaskOutcome(
+                            row.getString("status"),
+                            row.getString("error_code"),
+                            encoded == null ? null : readJson(encoded));
+                },
+                taskId, expectedKind);
+        if (found.isEmpty()) {
+            throw new CodingWorkerException(
+                    "RUNNER_TASK_NOT_FOUND",
+                    "The runner command was not found.",
+                    HttpStatus.NOT_FOUND);
+        }
+        return found.get(0);
+    }
+
+    /** What the runner reported for one queued command. {@code result} is null until it finishes. */
+    public record TaskOutcome(String status, String errorCode, JsonNode result) { }
+
     public CodingRunnerContract.HeartbeatResponse heartbeat(
             String authorization, CodingRunnerContract.HeartbeatRequest request) {
         return authenticated(authorization, () -> {

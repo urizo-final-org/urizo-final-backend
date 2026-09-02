@@ -216,8 +216,7 @@ class CodingConsoleControllerTest {
         return new CodingConsoleContract.Technical(
                 BASE_SHA, BASE_SHA, "sha256:" + "c".repeat(64),
                 List.of(CHANGED_PATH),
-                "diff --git a/README.md b/README.md" + '
-' + "+데모 확인",
+                "diff --git a/README.md b/README.md +데모 확인",
                 "maven-verify", null, null);
     }
 

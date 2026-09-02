@@ -230,8 +230,7 @@ public class CodingConsoleService {
         }
         return diff.length() <= 60_000
                 ? diff
-                : diff.substring(0, 60_000) + '
-'
+                : diff.substring(0, 60_000) + System.lineSeparator()
                         + "... (이하 생략 · 전체는 변경 지문으로 검증됨)";
     }
 

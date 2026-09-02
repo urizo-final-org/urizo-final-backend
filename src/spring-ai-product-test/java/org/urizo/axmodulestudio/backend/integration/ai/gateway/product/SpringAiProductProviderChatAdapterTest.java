@@ -514,7 +514,8 @@ class SpringAiProductProviderChatAdapterTest {
                 .thenAnswer(ignored -> new ProductChatModelSession(chatModel, () -> { }));
         when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
                 .thenReturn(new ChatResponse(List.of(new Generation(
-                        new AssistantMessage("{\"port\":\"feasible\",\"payload\":{}}"),
+                        new AssistantMessage(
+                                "{\"port\":\"feasible\",\"payload\":{\"summary\":\"ok\"}}"),
                         completedMetadata(provider)))));
         ObjectNode schema = JsonNodeFactory.instance.objectNode()
                 .put("type", "object")
@@ -522,7 +523,11 @@ class SpringAiProductProviderChatAdapterTest {
         schema.putArray("required").add("port").add("payload");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("port").put("type", "string");
-        properties.putObject("payload").put("type", "object");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("summary");
+        payload.putObject("properties").putObject("summary").put("type", "string");
         ProviderResponseFormat format = ProviderResponseFormat.jsonSchema(schema);
         ProviderChatRequest request = new ProviderChatRequest(
                 provider,
@@ -569,6 +574,11 @@ class SpringAiProductProviderChatAdapterTest {
                         nativeRequest.responseFormat().getJsonSchema().getSchema());
                 assertThat(nativeSchema)
                         .isEqualTo(format.outputSchema());
+                assertThat(nativeSchema.path("properties").path("payload")
+                        .path("additionalProperties").asBoolean()).isFalse();
+                assertThat(nativeSchema.path("properties").path("payload").path("required"))
+                        .extracting(JsonNode::asText)
+                        .containsExactly("summary");
                 assertThat(nativeRequest.responseFormat().getJsonSchema().getStrict())
                         .isTrue();
             }

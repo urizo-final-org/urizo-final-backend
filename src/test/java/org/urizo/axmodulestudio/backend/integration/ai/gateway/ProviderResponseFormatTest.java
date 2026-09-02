@@ -61,6 +61,36 @@ class ProviderResponseFormatTest {
                 .hasMessageContaining("digest");
     }
 
+    @Test
+    void rejectsNestedObjectsThatAreOpenOrHaveOptionalFields() {
+        ObjectNode openPayload = schema();
+        ((ObjectNode) openPayload.path("properties").path("payload"))
+                .remove("additionalProperties");
+
+        assertThatThrownBy(() -> ProviderResponseFormat.jsonSchema(openPayload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("close every object");
+
+        ObjectNode optionalSummary = schema();
+        ((ObjectNode) optionalSummary.path("properties").path("payload"))
+                .putArray("required");
+
+        assertThatThrownBy(() -> ProviderResponseFormat.jsonSchema(optionalSummary))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("require every field");
+    }
+
+    @Test
+    void rejectsOptionalFieldsAtTheRootOfAStructuredOutput() {
+        ObjectNode optionalPayload = schema();
+        ((com.fasterxml.jackson.databind.node.ArrayNode) optionalPayload.path("required"))
+                .remove(1);
+
+        assertThatThrownBy(() -> ProviderResponseFormat.jsonSchema(optionalPayload))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("require every field");
+    }
+
     /*
      * The approval screen reads a list of acceptance criteria, so the schema has to be able to
      * say "array of string". Before this the gateway knew only object, string and integer, and a
@@ -116,13 +146,21 @@ class ProviderResponseFormatTest {
     }
 
     private static ProviderResponseFormat format() {
+        return ProviderResponseFormat.jsonSchema(schema());
+    }
+
+    private static ObjectNode schema() {
         ObjectNode schema = JsonNodeFactory.instance.objectNode()
                 .put("type", "object")
                 .put("additionalProperties", false);
         schema.putArray("required").add("port").add("payload");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("port").put("type", "string");
-        properties.putObject("payload").put("type", "object");
-        return ProviderResponseFormat.jsonSchema(schema);
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("summary");
+        payload.putObject("properties").putObject("summary").put("type", "string");
+        return schema;
     }
 }

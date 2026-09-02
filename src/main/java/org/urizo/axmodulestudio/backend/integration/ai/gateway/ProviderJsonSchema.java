@@ -54,6 +54,12 @@ final class ProviderJsonSchema {
         return canonical;
     }
 
+    static JsonNode validateStrictOutputAndCanonicalize(JsonNode inputSchema) {
+        JsonNode canonical = validateAndCanonicalize(inputSchema);
+        validateStrictOutputNode(canonical);
+        return canonical;
+    }
+
     static String providerSchema(JsonNode canonicalSchema) {
         return write(canonicalSchema);
     }
@@ -199,6 +205,28 @@ final class ProviderJsonSchema {
         }
     }
 
+    private static void validateStrictOutputNode(JsonNode schema) {
+        if (!"object".equals(schema.path("type").asText())) {
+            return;
+        }
+        JsonNode properties = schema.path("properties");
+        JsonNode required = schema.path("required");
+        if (!properties.isObject() || !required.isArray()
+                || !schema.path("additionalProperties").isBoolean()
+                || schema.path("additionalProperties").booleanValue()) {
+            throw invalidStrictOutputSchema();
+        }
+
+        Set<String> propertyNames = new HashSet<>();
+        properties.fieldNames().forEachRemaining(propertyNames::add);
+        Set<String> requiredNames = new HashSet<>();
+        required.forEach(name -> requiredNames.add(name.textValue()));
+        if (!requiredNames.equals(propertyNames)) {
+            throw invalidStrictOutputSchema();
+        }
+        properties.forEach(ProviderJsonSchema::validateStrictOutputNode);
+    }
+
     private static void validateValue(JsonNode value, JsonNode schema) {
         switch (schema.path("type").asText()) {
             case "object" -> validateObjectValue(value, schema);
@@ -329,6 +357,11 @@ final class ProviderJsonSchema {
     private static IllegalArgumentException invalidSchema() {
         return new IllegalArgumentException(
                 "Tool input JSON Schema is invalid or exceeds its bounds.");
+    }
+
+    private static IllegalArgumentException invalidStrictOutputSchema() {
+        return new IllegalArgumentException(
+                "Structured output JSON Schema must close every object and require every field.");
     }
 
     private static IllegalArgumentException invalidArguments() {

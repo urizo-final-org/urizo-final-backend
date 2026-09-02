@@ -324,6 +324,20 @@ class CodingHandlerStageServiceTest {
                 .path("outputSchema").path("required"))
                 .extracting(JsonNode::asText)
                 .containsExactly("port", "payload");
+        JsonNode payloadSchema = structuredRequest.getValue().responseFormat()
+                .path("outputSchema").path("properties").path("payload");
+        assertThat(payloadSchema.path("additionalProperties").asBoolean()).isFalse();
+        assertThat(payloadSchema.path("required"))
+                .extracting(JsonNode::asText)
+                .containsExactly("planSummary", "acceptanceCriteria");
+        JsonNode payloadProperties = payloadSchema.path("properties");
+        assertThat(payloadProperties.path("planSummary").path("type").asText())
+                .isEqualTo("string");
+        // The criteria are a list, so the schema has to declare the element type as well.
+        assertThat(payloadProperties.path("acceptanceCriteria").path("type").asText())
+                .isEqualTo("array");
+        assertThat(payloadProperties.path("acceptanceCriteria").path("items").path("type").asText())
+                .isEqualTo("string");
 
         // Prose alone carries no object to recover, so the stage still fails.
         when(gateway.chat(any())).thenReturn(assistantText("I could not decide."));

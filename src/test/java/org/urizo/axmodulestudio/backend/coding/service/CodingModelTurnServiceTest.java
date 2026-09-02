@@ -647,7 +647,11 @@ class CodingModelTurnServiceTest {
         schema.putArray("required").add("port").add("payload");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("port").put("type", "string");
-        properties.putObject("payload").put("type", "object");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("summary");
+        payload.putObject("properties").putObject("summary").put("type", "string");
         ObjectNode format = ProviderResponseFormat.jsonSchema(schema).requestContract();
         return new CodingModelTurnContract.Request(
                 chat.schemaVersion(), chat.turnId(), chat.jobId(), chat.traceId(),

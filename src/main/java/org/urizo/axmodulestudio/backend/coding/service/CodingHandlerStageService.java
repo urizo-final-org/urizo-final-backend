@@ -829,11 +829,15 @@ public final class CodingHandlerStageService {
                     + "to live inside an allowed area. Judge by the area the request names. "
                     + "When it needs a denied area, or an area not listed as allowed, answer "
                     + "port \"infeasible\" and explain in planSummary, in the language of the "
-                    + "request, naming the areas only by the guardrail labels. planSummary is "
-                    + "read by a non-developer: never mention folder paths, file names, or "
-                    + "technical vocabulary, and end by asking the reader to request a "
-                    + "guardrail change from the super administrator if the work is still "
-                    + "wanted. If it is genuinely unclear, proceed as feasible. ";
+                    + "request, naming the areas only by the guardrail labels, and end that "
+                    + "refusal by asking the reader to request a guardrail change from the "
+                    // Live run 2026-09-02: without this clause the refusal ending leaked into
+                    // a feasible plan, which told the reader to escalate work that had just
+                    // been accepted.
+                    + "super administrator if the work is still wanted; a feasible answer "
+                    + "must not mention the super administrator or the guardrail. planSummary "
+                    + "is read by a non-developer: never mention folder paths, file names, or "
+                    + "technical vocabulary. If it is genuinely unclear, proceed as feasible. ";
             case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
                     + "paragraph in the language of the request that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "

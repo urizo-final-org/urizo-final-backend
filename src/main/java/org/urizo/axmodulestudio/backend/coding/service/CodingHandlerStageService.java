@@ -41,11 +41,12 @@ public final class CodingHandlerStageService {
      * A complete code exchange already spends about seven turns - read_diff, read_file,
      * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
      * bound of eight left no room for a single re-asked miss. Twelve then proved too
-     * tight for any request that has to find its files first: a measured run against a
-     * trivial one-line edit still spent fourteen tool calls on the edit-and-verify
-     * cycle alone, and the first real multi-file request died at eleven productive
-     * turns without ever patching. Sixteen leaves that navigation room while keeping
-     * the loop bounded.
+     * tight for a request that has to find its files first. Measured runs: a trivial
+     * one-line edit closed its code stage in six turns, of which the patch-verify-reply
+     * tail is three; the first real multi-file request died at eleven productive turns
+     * with its files found but nothing patched, so its measured floor was fourteen.
+     * Sixteen is that floor plus two spare turns for one rejected patch - not a proven
+     * ceiling, only a bound the recorded runs fit under.
      */
     private static final int MAX_MODEL_TURNS = 16;
     /** Tool refusals the model itself caused and can correct when told why. */

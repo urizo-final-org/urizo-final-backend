@@ -2,8 +2,12 @@ package org.urizo.axmodulestudio.backend.coding.controller;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -14,10 +18,13 @@ import java.util.UUID;
 import javax.crypto.SecretKey;
 
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtEncoder;
@@ -31,7 +38,11 @@ import org.urizo.axmodulestudio.backend.auth.security.JwtTokenProvider;
 import org.urizo.axmodulestudio.backend.auth.security.SecurityConfig;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingConsoleService;
+import org.urizo.axmodulestudio.backend.coding.service.CodingJobIntakeService;
+import org.urizo.axmodulestudio.backend.coding.service.CodingJobLifecycleException;
 
 /**
  * The one promise worth pinning: a general administrator's response carries no code.
@@ -46,6 +57,7 @@ class CodingConsoleControllerTest {
 
     private static final UUID JOB = UUID.fromString("55555555-5555-4555-8555-555555555555");
     private static final UUID ACTOR_ID = UUID.fromString("11111111-1111-4111-8111-111111111111");
+    private static final UUID TRACE = UUID.fromString("66666666-6666-4666-8666-666666666666");
     private static final String ACCESS_TOKEN = "coding-console-test-token";
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String CHANGED_PATH = "src/main/java/org/urizo/Member.java";
@@ -55,6 +67,9 @@ class CodingConsoleControllerTest {
 
     @MockitoBean
     private CodingConsoleService service;
+
+    @MockitoBean
+    private CodingJobIntakeService intake;
 
     @MockitoBean
     private AuthService authService;
@@ -167,5 +182,56 @@ class CodingConsoleControllerTest {
         return new CodingConsoleContract.Technical(
                 BASE_SHA, BASE_SHA, "sha256:" + "c".repeat(64),
                 List.of(CHANGED_PATH), "maven-verify", null, null);
+    }
+
+    @Test
+    void aRequestCarriesOnlyTheRepositoryAndTheKoreanTextTheAdministratorTyped() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        when(intake.create(any(), any(), any(), any())).thenReturn(created());
+
+        mockMvc.perform(post("/api/admin/coding/jobs")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"repository\":\"backend\","
+                                + "\"requestText\":\"회원 목록에 가입일도 보이게 해줘\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(header().string(HttpHeaders.LOCATION,
+                        "/api/admin/coding/jobs/" + JOB));
+
+        ArgumentCaptor<CodingConsoleContract.CreateJobRequest> sent =
+                ArgumentCaptor.forClass(CodingConsoleContract.CreateJobRequest.class);
+        verify(intake).create(any(), any(), any(), sent.capture());
+        assertThat(sent.getValue().repository()).isEqualTo("backend");
+        assertThat(sent.getValue().requestText()).isEqualTo("회원 목록에 가입일도 보이게 해줘");
+    }
+
+    @Test
+    void aStalledRunnerBecomesAnAnswerRatherThanAHang() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        // The runner lives outside Docker and a person has to start it. Saying so is the whole
+        // point of waiting for the sha rather than creating a Job that would never move.
+        when(intake.create(any(), any(), any(), any())).thenThrow(
+                new CodingJobLifecycleException(
+                        "CODING_RUNNER_NOT_RESPONDING",
+                        "실행기가 응답하지 않습니다. 실행기가 켜져 있는지 확인해 주세요.",
+                        HttpStatus.SERVICE_UNAVAILABLE));
+
+        mockMvc.perform(post("/api/admin/coding/jobs")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"repository\":\"backend\",\"requestText\":\"고쳐줘\"}"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error.code").value("CODING_RUNNER_NOT_RESPONDING"));
+    }
+
+    private static CodingHandlerContract.CreateCodingJobResponse created() {
+        CodingJobLifecycleContract.JobResponse job = new CodingJobLifecycleContract.JobResponse(
+                "1.0", JOB, TRACE, ACTOR_ID, ACTOR_ID, ACTOR_ID, ACTOR_ID,
+                "start", CodingJobLifecycleContract.Status.PENDING, 1,
+                "coding-plan-v1", List.of("CHAT"), List.of("start"),
+                Instant.parse("2026-09-02T01:00:00Z"),
+                Instant.parse("2026-09-02T00:00:00Z"), null,
+                Instant.parse("2026-09-02T00:00:00Z"), null, null);
+        return new CodingHandlerContract.CreateCodingJobResponse("1.0", job, null);
     }
 }

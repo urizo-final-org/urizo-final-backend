@@ -63,10 +63,6 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
             try {
                 ProviderChatResponse response = adapter.chat(registration, request);
                 if (!response.finishReason().completed()) {
-                    // TEMPORARY diagnostic - remove before commit.
-                    org.slf4j.LoggerFactory.getLogger(ProviderChatGateway.class).warn(
-                            "[DIAG-TEMP] incomplete finish reason: {} provider={} toolCalls={}",
-                            response.finishReason(), response.provider(), response.toolCalls().size());
                     throw new ProviderGatewayException(
                             ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
                             "Model provider returned an incomplete response.");

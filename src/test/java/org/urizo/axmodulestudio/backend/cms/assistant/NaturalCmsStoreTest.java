@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
@@ -265,6 +266,22 @@ class NaturalCmsStoreTest {
                 feedback,
                 NOW.minusSeconds(60),
                 NOW);
+    }
+
+    @Test
+    void screenReadRequiresACmsAdministratorAndNeverLocksTheJob() {
+        Harness harness = new Harness();
+
+        assertThatThrownBy(() -> harness.store.read(
+                new AuthenticatedActor(ACTOR_ID, "viewer", AdminRole.GENERAL_USER), JOB_ID))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code()).isEqualTo("FORBIDDEN"));
+        assertThatThrownBy(() -> harness.store.read(null, JOB_ID))
+                .isInstanceOf(NaturalCmsException.class);
+        verify(harness.jdbc, never()).query(
+                argThat((String sql) -> sql != null && sql.contains("FOR UPDATE")),
+                any(org.springframework.jdbc.core.RowMapper.class),
+                any(Object[].class));
     }
 
     private static void assertStrictNaturalCmsOutbox(

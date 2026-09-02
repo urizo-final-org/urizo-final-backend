@@ -211,6 +211,18 @@ public final class NaturalCmsStore {
         return stored;
     }
 
+    /**
+     * 화면이 진행 상태와 미리보기를 받아오는 유일한 경로.
+     *
+     * <p>Job은 요청 직후 비어 있고 파이프라인이 채운다. 승인·반려와 같은 역할 기준을 쓴다.
+     */
+    public NaturalCmsContract.JobResponse read(AuthenticatedActor actor, UUID jobId) {
+        if (actor == null || !actor.role().isCmsAdministrator()) {
+            throw forbidden("A CMS administrator is required.");
+        }
+        return requireJob(jobId, false);
+    }
+
     public NaturalCmsContract.JobResponse decide(
             AuthenticatedActor actor,
             UUID jobId,

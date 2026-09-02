@@ -75,9 +75,19 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobList list(int limit) {
         List<CodingConsoleContract.JobSummary> items = jdbc.query("""
                 SELECT cj.job_id, cj.status, cjr.request_text, cj.created_at, cj.finished_at,
-                       cj.graph_step
+                       COALESCE(latest.handler_key, cj.graph_step) AS stage
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
+                -- graph_step stops at the node the Job entered, not the one it reached, so a
+                -- finished pipeline still reports 'analyze'. The newest recorded result is the
+                -- only honest answer to "where is this now".
+                LEFT JOIN LATERAL (
+                    SELECT chr.handler_key
+                    FROM app.coding_handler_result chr
+                    WHERE chr.job_id = cj.job_id
+                    ORDER BY chr.recorded_at DESC, chr.result_id DESC
+                    LIMIT 1
+                ) latest ON TRUE
                 WHERE cj.job_type = 'CODING_AGENT'
                 ORDER BY cj.created_at DESC
                 LIMIT ?
@@ -87,7 +97,7 @@ public class CodingConsoleService {
                         REPOSITORY,
                         rs.getString("request_text"),
                         rs.getString("status"),
-                        stageLabel(rs.getString("graph_step")),
+                        stageLabel(rs.getString("stage")),
                         instant(rs, "created_at"),
                         instant(rs, "finished_at")),
                 limit);
@@ -132,7 +142,7 @@ public class CodingConsoleService {
                 REPOSITORY,
                 job.requestText(),
                 job.status(),
-                stageLabel(job.graphStep()),
+                stageLabel(results.isEmpty() ? job.graphStep() : results.get(0).handlerKey()),
                 attempt,
                 MAX_PIPELINE_ATTEMPTS,
                 plan(analysis),

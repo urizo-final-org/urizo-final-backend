@@ -857,6 +857,16 @@ public final class CodingHandlerStageService {
                     ? "Request one tool call per answer; when an answer carries several, only "
                         + "the first is executed. "
                         + "Use read_diff before any diff-bound tool and again after the final change. "
+                        // Three live runs in one day spent every turn on search_code and never
+                        // reached apply_patch. Searching feels like progress to a model, so the
+                        // budget and the working order have to be said out loud.
+                        + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
+                        + "answer spends one whether it searches or edits. Searching is "
+                        + "preparation, not progress: spend at most three answers on "
+                        + "search_code and read_file combined, then start editing with "
+                        + "apply_patch even if your picture is incomplete - a patch can be "
+                        + "corrected after the next read_diff, but a spent answer cannot. "
+                        + "Never repeat a search that found nothing with reworded terms. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "

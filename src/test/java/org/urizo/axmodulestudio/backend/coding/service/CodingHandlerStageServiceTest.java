@@ -433,6 +433,119 @@ class CodingHandlerStageServiceTest {
                                 .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID));
     }
 
+    /**
+     * The analyst names files it was shown; a model that answers with something else must not
+     * hand that on to the coding stage, which would spend a turn reading a path that is not
+     * there. Dropped rather than refused - analyze is one call with no re-ask, so a refusal
+     * would end the job at planning.
+     */
+    @Test
+    void keepsOnlyTheTargetFilesTheFenceCanAccountFor() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        AnalyzeFixture fixture = analyzeFixture(mapper);
+        when(fixture.gateway().chat(any())).thenReturn(assistantText(
+                "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"고칩니다.\","
+                        + "\"acceptanceCriteria\":[\"보인다\"],\"targetFiles\":["
+                        // Real, but written the way a model often writes it.
+                        + "\"./src/main/java/org/urizo/axmodulestudio/backend/cms/dto/"
+                        + "CmsResponses.java\","
+                        // A file that does not exist anywhere.
+                        + "\"src/main/java/org/urizo/axmodulestudio/backend/cms/"
+                        + "MemberJoinDateView.java\","
+                        // A real file, but outside the fence.
+                        + "\"src/main/java/org/urizo/axmodulestudio/backend/auth/"
+                        + "AuthService.java\"]}}"));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
+
+        assertThat(response.payload().path("targetFiles"))
+                .extracting(JsonNode::asText)
+                .containsExactly(
+                        // Repaired shape kept, invented path dropped, and the new file inside
+                        // the fence kept: the post-check accepts a file the change creates.
+                        "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java",
+                        "src/main/java/org/urizo/axmodulestudio/backend/cms/MemberJoinDateView.java");
+    }
+
+    /** Wiring for the single-call analyze stage; the gateway answer is per-test. */
+    private record AnalyzeFixture(
+            CodingHandlerStageService service,
+            ProviderChatGatewayPort gateway,
+            GuardrailPathSelectionService selections) { }
+
+    /**
+     * The fence a job was created under: one allowed folder, and the two files the scan found
+     * inside it. Enough for the analyst to choose from and for the server to check the choice.
+     */
+    private static AnalyzeFixture analyzeFixture(ObjectMapper mapper) {
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway, mapper, clock, false);
+        ProfileModelBindingService profileModelBindings = mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(any(), any(), any(), any()))
+                .thenReturn(List.of(registration));
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
+        when(selections.jobSnapshot(JOB)).thenReturn(List.of(
+                "backend:src/main/java/org/urizo/axmodulestudio/backend/cms"));
+        when(selections.jobAreas(JOB)).thenReturn(
+                new GuardrailPathSelectionService.JobAreas(List.of("CMS 기능"), List.of()));
+        when(selections.jobFiles(JOB)).thenReturn(List.of(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/repository/CmsRepository.java"));
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), profileModelBindings, selections,
+                mock(GuardrailRuleService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING", "STRUCTURED_OUTPUT"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60),
+                PROFILE);
+        CodingHandlerContract.AttemptAggregateResponse aggregate =
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "회원 목록에 가입일도 보이게 해줘",
+                        List.of(), List.of(), List.of(), NOW, null);
+        when(toolService.stageAuthority(eq("Bearer worker"), eq(JOB), eq(4)))
+                .thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request turnRequest = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    turnRequest.jobId(), turnRequest.idempotencyKey(), UUID.randomUUID());
+        });
+        return new AnalyzeFixture(service, gateway, selections);
+    }
+
     /** A stage with no tools receives the model text verbatim, fence and all. */
     private static ProviderChatResponse assistantText(String content) {
         return new ProviderChatResponse(

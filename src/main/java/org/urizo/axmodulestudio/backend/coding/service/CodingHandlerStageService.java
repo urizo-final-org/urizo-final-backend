@@ -182,8 +182,67 @@ public final class CodingHandlerStageService {
         ModelOutcome outcome = parseOutcome(
                 structured.structuredOutput(),
                 Set.of("feasible", "infeasible"));
+        JsonNode payload = withCheckedTargetFiles(jobId, outcome.payload());
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
-                null, null, null, outcome.payload());
+                null, null, null, payload);
+    }
+
+    /**
+     * Removes target files the analyst did not get from the fence.
+     *
+     * <p>Dropped rather than refused: this stage is a single model call with no re-ask, so
+     * rejecting the answer would end the job at planning - a worse outcome than the searching
+     * this hint exists to save. A wrong path costs the coding stage a failed read; the same
+     * stage still finds its own way when the list comes back empty.
+     */
+    private JsonNode withCheckedTargetFiles(UUID jobId, JsonNode payload) {
+        if (payload == null || !payload.isObject() || !payload.path("targetFiles").isArray()) {
+            return payload;
+        }
+        List<String> allowedPaths = guardrailSelections.jobSnapshot(jobId);
+        List<String> known = guardrailSelections.jobFiles(jobId);
+        // An open system has neither fence nor list, and nothing to judge a path against.
+        if (allowedPaths.isEmpty() && known.isEmpty()) {
+            return payload;
+        }
+        List<String> folders = allowedPaths.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        ObjectNode checked = ((ObjectNode) payload).deepCopy();
+        ArrayNode kept = checked.putArray("targetFiles");
+        for (JsonNode candidate : payload.path("targetFiles")) {
+            if (!candidate.isTextual()) {
+                continue;
+            }
+            String path = normalizedPath(candidate.asText());
+            // A file that exists inside the fence, or a new file the change would create
+            // there. The second case is why the folder test is here: the post-check on the
+            // finished candidate accepts a created file, so refusing to name one would
+            // contradict the rule that actually decides.
+            boolean real = known.contains(path);
+            boolean insideFence = folders.stream().anyMatch(
+                    folder -> path.equals(folder) || path.startsWith(folder + "/"));
+            if (real || insideFence) {
+                kept.add(path);
+            }
+        }
+        return checked;
+    }
+
+    /**
+     * The path as the file list spells it. Only shapes that mean the same file are repaired -
+     * letter case is left alone, because on a case-sensitive checkout it names another file.
+     */
+    private static String normalizedPath(String path) {
+        String normalized = path.trim().replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
     }
 
     private CodingHandlerContract.StageExecutionResponse modelToolStage(

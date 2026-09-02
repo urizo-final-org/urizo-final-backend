@@ -243,6 +243,7 @@ public class CodingConsoleService {
                         jdbc, objectMapper, jobId, job.traceId(), job.stateVersion(), attempt)
                 .map(ready -> new CodingConsoleContract.PendingApproval(
                         ready.approvalId(),
+                        job.traceId(),
                         ready.nodeId(),
                         ready.stage().name(),
                         ready.stageRound(),

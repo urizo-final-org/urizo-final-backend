@@ -129,6 +129,9 @@ class CodingConsoleControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.pendingApproval.approvalId").value(APPROVAL.toString()))
+                // The decision endpoint refuses any traceId but the Job's own, so the read
+                // must hand it down or no approval can ever be submitted.
+                .andExpect(jsonPath("$.pendingApproval.traceId").value(TRACE.toString()))
                 .andExpect(jsonPath("$.pendingApproval.nodeId").value("scope_approval"))
                 .andExpect(jsonPath("$.pendingApproval.stage").value("SCOPE"))
                 .andExpect(jsonPath("$.pendingApproval.stageRound").value(1))
@@ -203,7 +206,7 @@ class CodingConsoleControllerTest {
      */
     private static CodingConsoleContract.PendingApproval pendingApproval() {
         return new CodingConsoleContract.PendingApproval(
-                APPROVAL, "scope_approval", "SCOPE", 1, "GENERAL_ADMIN", 4, 1, null, null);
+                APPROVAL, TRACE, "scope_approval", "SCOPE", 1, "GENERAL_ADMIN", 4, 1, null, null);
     }
 
     private static CodingConsoleContract.Technical technical() {

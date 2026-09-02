@@ -117,6 +117,7 @@ public final class CodingConsoleContract {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PendingApproval(
             UUID approvalId,
+            UUID traceId,
             String nodeId,
             String stage,
             int stageRound,

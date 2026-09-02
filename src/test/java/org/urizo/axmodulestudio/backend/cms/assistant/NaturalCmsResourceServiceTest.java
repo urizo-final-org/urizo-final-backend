@@ -3,6 +3,10 @@ package org.urizo.axmodulestudio.backend.cms.assistant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -234,6 +238,220 @@ class NaturalCmsResourceServiceTest {
     void rejectsResourcesOutsideTheScreenBoundary(String type) {
         assertThatThrownBy(() -> new NaturalCmsContract.ResourceRef(type, "1"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void createsAMenuAtTheEndOfItsSiblingsWhenTheCommandGivesNoPosition() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"name":"자료실","path":"/support/archive",
+                 "parentId":40}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command);
+
+        verify(cms).createMenu("자료실", "/support/archive", 40L, 42, "NONE", null);
+        verify(cms, never()).updateMenu(
+                anyLong(), any(), any(), any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void createsATopMenuAtTheGivenPositionAndRenumbersTheGroupWithItsChildren() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        when(cms.createMenu("회사", "/company", null, 10, "NONE", null))
+                .thenReturn(new MenuView(50, "회사", "/company", null, 10, "NONE", null));
+        when(cms.menu(50)).thenReturn(new MenuView(50, "회사", "/company", null, 10, "NONE", null));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"name":"회사","path":"/company","position":1}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command);
+
+        verify(cms).createMenu("회사", "/company", null, 10, "NONE", null);
+        verify(cms).updateMenu(10, "소개", "/about", null, 20, "NONE", null);
+        verify(cms).updateMenu(11, "회사 소개", "/about/company", 10L, 21, "CONTENT", 3L);
+        verify(cms).updateMenu(12, "비전", "/about/vision", 10L, 22, "CONTENT", 4L);
+        verify(cms).updateMenu(40, "고객지원", "/support", null, 30, "NONE", null);
+        verify(cms).updateMenu(41, "문의하기", "/support/contact", 40L, 31, "CONTENT", 5L);
+    }
+
+    @Test
+    void movesAMenuByItsOrdinalPositionAndRenumbersOnlyItsOwnGroup() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"position":1}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "12"), command);
+
+        verify(cms).updateMenu(12, "비전", "/about/vision", 10L, 11, "CONTENT", 4L);
+        verify(cms).updateMenu(11, "회사 소개", "/about/company", 10L, 12, "CONTENT", 3L);
+        verify(cms, never()).updateMenu(
+                eq(41L), any(), any(), any(), anyInt(), any(), any());
+    }
+
+    @Test
+    void clampsAPositionBeyondTheSiblingCountToTheLastPlace() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"position":9}}
+                """);
+
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "11"), command);
+
+        verify(cms).updateMenu(11, "회사 소개", "/about/company", 10L, 12, "CONTENT", 3L);
+        verify(cms).updateMenu(12, "비전", "/about/vision", 10L, 11, "CONTENT", 4L);
+    }
+
+    @Test
+    void deletesAMenuThroughTheExistingCascadeAndReportsTheRemovedState() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        JsonNode removed = resources.apply(
+                new NaturalCmsContract.ResourceRef("MENU", "10"), command);
+
+        assertThat(removed.path("name").asText()).isEqualTo("소개");
+        verify(cms).deleteMenu(10);
+    }
+
+    @Test
+    void rejectsADeleteCommandThatCarriesFields() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{"name":"소개"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("MENU", "10"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("carries no fields");
+    }
+
+    @Test
+    void refusesADeleteThatWouldRemoveMoreMenusThanOneCommandMay() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        java.util.List<MenuView> menus = new java.util.ArrayList<>();
+        menus.add(new MenuView(10, "소개", "/about", null, 10, "NONE", null));
+        for (int index = 1; index <= 10; index++) {
+            menus.add(new MenuView(
+                    10 + index, "하위 " + index, "/about/" + index, 10L, 10 + index,
+                    "NONE", null));
+        }
+        when(cms.menus()).thenReturn(java.util.List.copyOf(menus));
+        when(cms.menu(10)).thenReturn(menus.get(0));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("MENU", "10"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("removes 11 menus");
+        verify(cms, never()).deleteMenu(anyLong());
+    }
+
+    @Test
+    void keepsCreateAndDeleteClosedForResourcesThatOnlyOpenUpdate() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"title":"새 글","body":"본문"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(RESOURCE, command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("operations only: UPDATE");
+    }
+
+    @Test
+    void snapshotsANewMenuWithoutReadingTheDatabase() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("MENU", "new"));
+
+        assertThat(state.path("id").asText()).isEqualTo("new");
+        assertThat(state.size()).isEqualTo(1);
+        verify(cms, never()).menu(anyLong());
+    }
+
+    @Test
+    void givesTheModelOrdinalsAndLinkTargetsButNeverTheMenuNumbers() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = menuTree();
+        when(cms.contents()).thenReturn(java.util.List.of(content("회사 소개", "본문")));
+        when(cms.boards()).thenReturn(java.util.List.of(new BoardView(
+                1, "공지사항", "안내",
+                Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z"))));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode context = resources.promptContext(
+                new NaturalCmsContract.ResourceRef("MENU", "12"));
+
+        assertThat(context.path("menus")).hasSize(5);
+        assertThat(context.path("menus").get(0).path("position").asInt()).isEqualTo(1);
+        assertThat(context.path("menus").get(2).path("name").asText()).isEqualTo("비전");
+        assertThat(context.path("menus").get(2).path("position").asInt()).isEqualTo(2);
+        assertThat(context.path("menus").get(0).has("displayOrder")).isFalse();
+        assertThat(context.path("contents").get(0).path("id").asLong()).isEqualTo(7);
+        assertThat(context.path("boards").get(0).path("name").asText()).isEqualTo("공지사항");
+    }
+
+    /** 대메뉴 둘과 하위 셋. 번호는 시드 관례대로 대메뉴 10 간격, 하위는 부모 구역 안이다. */
+    private static CmsService menuTree() {
+        CmsService cms = mock(CmsService.class);
+        MenuView about = new MenuView(10, "소개", "/about", null, 10, "NONE", null);
+        MenuView company =
+                new MenuView(11, "회사 소개", "/about/company", 10L, 11, "CONTENT", 3L);
+        MenuView vision = new MenuView(12, "비전", "/about/vision", 10L, 12, "CONTENT", 4L);
+        MenuView support = new MenuView(40, "고객지원", "/support", null, 40, "NONE", null);
+        MenuView contact =
+                new MenuView(41, "문의하기", "/support/contact", 40L, 41, "CONTENT", 5L);
+        when(cms.menus()).thenReturn(
+                java.util.List.of(about, company, vision, support, contact));
+        when(cms.menu(10)).thenReturn(about);
+        when(cms.menu(11)).thenReturn(company);
+        when(cms.menu(12)).thenReturn(vision);
+        when(cms.menu(40)).thenReturn(support);
+        when(cms.menu(41)).thenReturn(contact);
+        when(cms.updateMenu(
+                anyLong(), any(), any(), any(), anyInt(), any(), any()))
+                .thenAnswer(call -> new MenuView(
+                        call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                        call.getArgument(3), call.getArgument(4), call.getArgument(5),
+                        call.getArgument(6)));
+        when(cms.createMenu(any(), any(), any(), anyInt(), any(), any()))
+                .thenAnswer(call -> new MenuView(
+                        99, call.getArgument(0), call.getArgument(1), call.getArgument(2),
+                        call.getArgument(3), call.getArgument(4), call.getArgument(5)));
+        return cms;
     }
 
     private static TemplateView template() {

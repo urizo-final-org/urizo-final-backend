@@ -326,15 +326,40 @@ public final class NaturalCmsStageService {
         if (job.approvalFeedback() != null) {
             context.put("approvalFeedback", job.approvalFeedback());
         }
+        ObjectNode reference = resources.promptContext(job.resource());
+        if (reference != null && !reference.isEmpty()) {
+            context.set("reference", reference);
+        }
         String instruction = commandStage
-                ? "Create one CONTENT UPDATE command. You may call only declared CMS tools. "
-                    + "Finish with only JSON containing operation UPDATE and fields title and body."
+                ? commandInstruction(job.resource().type())
                 : "Decide feasibility. Return only JSON with exactly fields port and payload; "
                     + "port must be feasible or infeasible and payload must be an object.";
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
                         .put("content", encode(context)));
+    }
+
+    /**
+     * 리소스마다 열린 명령이 다르므로 지시문도 갈린다.
+     *
+     * <p>메뉴는 자리를 서수 {@code position}으로만 말하게 한다. 실제 번호는 코드가 계산하고
+     * 모델에게는 보여주지 않는다.
+     */
+    private static String commandInstruction(String resourceType) {
+        if ("MENU".equals(resourceType)) {
+            return "Create one MENU command with operation CREATE, UPDATE or DELETE. "
+                    + "You may call only declared CMS tools. Finish with only JSON containing "
+                    + "operation and fields. Fields are name, path, parentId, position, "
+                    + "targetType and targetId. A path starts with /. parentId is null for a "
+                    + "top menu. position is the 1-based place among menus that share the same "
+                    + "parentId; never send displayOrder and never compute menu numbers. "
+                    + "targetType is NONE, CONTENT or BOARD, and targetId is null unless the "
+                    + "type is CONTENT or BOARD. A DELETE command carries no fields. "
+                    + "Take every id from the reference lists and never invent one.";
+        }
+        return "Create one CONTENT UPDATE command. You may call only declared CMS tools. "
+                + "Finish with only JSON containing operation UPDATE and fields title and body.";
     }
 
     private JsonNode callPreviewTool(

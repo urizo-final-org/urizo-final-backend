@@ -42,6 +42,7 @@ import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionR
 public class CodingJobIntakeService {
 
     private static final String SCAN_KIND = "PREPARE_SCAN_WORKTREE";
+    private static final String WORKTREE_KIND = "CREATE_WORKTREE";
     private static final String PROFILE_KEY = "LLM_OPS";
     private static final String GRAPH_STEP = "start";
     private static final String PROMPT_VERSION = "coding-plan-v1";
@@ -169,7 +170,18 @@ public class CodingJobIntakeService {
                         nodes,
                         now.plus(JOB_LIFETIME),
                         requestText);
-        return commands.create(actor, traceId, idempotencyKey, request);
+        CodingHandlerContract.CreateCodingJobResponse created =
+                commands.create(actor, traceId, idempotencyKey, request);
+        // The code stage's MCP tools operate inside a workspace the host runner prepares,
+        // and nothing else in the product flow asks for one - the 8/31 walkthrough inserted
+        // this task by hand, which is why every Job died at its first tool call with
+        // "workspace not found" once the screen replaced the manual procedure. Queued here,
+        // fire-and-forget: the plan and its approval give the runner minutes of head start.
+        runner.enqueue(WORKTREE_KIND, objectMapper.createObjectNode()
+                .put("repo", repository)
+                .put("baseSha", baseSha.substring("sha1:".length()))
+                .put("workspaceId", created.job().jobId().toString()));
+        return created;
     }
 
     private ProfileVersionRepository.AdminStoredProfileVersion activeProfile() {

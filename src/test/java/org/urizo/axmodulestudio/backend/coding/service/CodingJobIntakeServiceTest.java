@@ -25,6 +25,7 @@ import org.urizo.axmodulestudio.backend.auth.entity.AdminRole;
 import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
 
 /**
@@ -37,6 +38,7 @@ class CodingJobIntakeServiceTest {
     private static final UUID ACTOR = UUID.fromString("11111111-1111-4111-8111-111111111111");
     private static final UUID PROFILE = UUID.fromString("e67efb12-c6cc-47f1-a12a-87c493d16762");
     private static final String DEV_SHA = "0e0b6c478f361f3db3891f549e70c9458db0cada";
+    private static final UUID JOB = UUID.fromString("55555555-5555-4555-8555-555555555555");
 
     private final ObjectMapper mapper = new ObjectMapper();
     private final CodingHandlerCommandService commands = mock(CodingHandlerCommandService.class);
@@ -65,6 +67,24 @@ class CodingJobIntakeServiceTest {
                         PROFILE, "LLM_OPS", 6, "ACTIVE", NOW, snapshot)));
     }
 
+    @Test
+    void aCreatedJobQueuesTheWorkspaceItsCodeStageWillNeed() {
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        when(commands.create(any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", request("backend"));
+
+        // The code stage's MCP tools resolve their workspace by the Job's own id, and the
+        // runner wants the bare commit. The 8/31 walkthrough queued this task by hand; the
+        // product flow forgot it, so every Job died at its first tool call.
+        ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
+        verify(runner).enqueue(eq("CREATE_WORKTREE"), payload.capture());
+        assertThat(payload.getValue().path("repo").asText()).isEqualTo("backend");
+        assertThat(payload.getValue().path("baseSha").asText()).isEqualTo(DEV_SHA);
+        assertThat(payload.getValue().path("workspaceId").asText()).isEqualTo(JOB.toString());
+    }
+
     private void runnerAnswers(String sha) {
         UUID taskId = UUID.fromString("99999999-9999-4999-8999-999999999999");
         when(runner.enqueue(eq("PREPARE_SCAN_WORKTREE"), any(JsonNode.class))).thenReturn(taskId);
@@ -72,6 +92,16 @@ class CodingJobIntakeServiceTest {
                 .put("repo", "backend").put("sha", sha);
         when(runner.taskOutcome(taskId, "PREPARE_SCAN_WORKTREE"))
                 .thenReturn(new CodingRunnerService.TaskOutcome("SUCCEEDED", null, result));
+    }
+
+    /** The intake now queues the code stage's workspace off this response's job id. */
+    private static CodingHandlerContract.CreateCodingJobResponse created() {
+        CodingJobLifecycleContract.JobResponse job = new CodingJobLifecycleContract.JobResponse(
+                "1.0", JOB, TRACE, PROFILE, ACTOR, ACTOR, ACTOR,
+                "start", CodingJobLifecycleContract.Status.PENDING, 1,
+                "coding-plan-v1", List.of("CHAT"), List.of("start"),
+                NOW.plus(Duration.ofHours(1)), NOW, null, NOW, null, null);
+        return new CodingHandlerContract.CreateCodingJobResponse("1.0", job, null);
     }
 
     private static CodingConsoleContract.CreateJobRequest request(String repository) {
@@ -83,7 +113,7 @@ class CodingJobIntakeServiceTest {
     void fillsTheContractFromTheActiveProfileAndTheRunnersRealHead() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any())).thenReturn(null);
+        when(commands.create(any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 

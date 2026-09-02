@@ -235,7 +235,7 @@ public final class CodingHandlerStageService {
                         + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
                 continue;
             }
-            messages.add(assistantToolMessage(modelResponse));
+            messages.add(assistantToolMessage(modelResponse, call));
             messages.add(toolMessage(toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
             if (Set.of("read_diff", "apply_patch",
@@ -811,11 +811,12 @@ public final class CodingHandlerStageService {
                     // finished candidate remains the authority; this only saves the coding
                     // stage's cost when the refusal is obvious from the request alone.
                     + "When the context contains guardrail.allowedFolders, files may only be "
-                    + "changed inside those folders. If the request clearly requires changing "
-                    + "files outside them, or breaking a listed guardrail rule, answer port "
-                    + "\"infeasible\" and explain in planSummary, in the language of the "
-                    + "request, which area is not allowed. If it is unclear, proceed as "
-                    + "feasible. ";
+                    + "changed inside those folders. Judge by the area the request names, and "
+                    + "do not assume the files it needs happen to live inside an allowed "
+                    + "folder: when the request is about an area whose folder is not listed, "
+                    + "it is outside. In that case answer port \"infeasible\" and explain in "
+                    + "planSummary, in the language of the request, which area is not "
+                    + "allowed. If it is genuinely unclear, proceed as feasible. ";
             case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
                     + "paragraph in the language of the request that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "
@@ -829,7 +830,12 @@ public final class CodingHandlerStageService {
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
                 + "synonym or rewording, and payload must be an object. " + payloadFields
                 + ("coding.code".equals(handlerKey)
-                    ? "Use read_diff before any diff-bound tool and again after the final change. "
+                    // One call per answer is the pipeline's contract: the loop runs the first
+                    // call alone and the history records only that one, so a batch of calls
+                    // silently loses all but its head unless the model is told.
+                    ? "Request one tool call per answer; when an answer carries several, only "
+                        + "the first is executed. "
+                        + "Use read_diff before any diff-bound tool and again after the final change. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -939,17 +945,21 @@ public final class CodingHandlerStageService {
                 .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
     }
 
-    private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
+    /**
+     * Replays only the call that actually ran. A model may hand back several tool calls in one
+     * answer, but this loop executes the first alone - replaying the rest would leave the next
+     * turn declaring calls that have no result, which the message contract rightly refuses.
+     * The history must record what the pipeline did, not what the model asked for.
+     */
+    private ObjectNode assistantToolMessage(
+            CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "assistant");
         message.put("content", response.assistant().content());
-        ArrayNode calls = message.putArray("toolCalls");
-        for (CodingModelTurnContract.ToolCall call : response.toolCalls()) {
-            ObjectNode value = calls.addObject();
-            value.put("toolCallId", call.toolCallId().toString());
-            value.put("name", call.name());
-            value.set("arguments", call.arguments());
-        }
+        ObjectNode value = message.putArray("toolCalls").addObject();
+        value.put("toolCallId", executed.toolCallId().toString());
+        value.put("name", executed.name());
+        value.set("arguments", executed.arguments());
         return message;
     }
 

@@ -204,6 +204,49 @@ class CodingHandlerStageServiceTest {
                 .contains("read_diff must establish the current diff digest first.");
     }
 
+    /*
+     * A model may hand back several tool calls in one answer; the loop executes the first
+     * alone. Replaying the whole batch left the next turn declaring calls that had no result,
+     * and the message contract refused the request - the job died as CONTRACT_VALIDATION_FAILED
+     * with no file changed. The history must record what ran, not what was asked.
+     */
+    @Test
+    void aParallelToolBatchReplaysOnlyTheExecutedCall() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submit(eq("Bearer worker"), any()))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "coding-test-model",
+                        "",
+                        List.of(
+                                new ProviderChatMessage.ToolCall(
+                                        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "read_diff", "{}"),
+                                new ProviderChatMessage.ToolCall(
+                                        "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "read_diff", "{}"),
+                                new ProviderChatMessage.ToolCall(
+                                        "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "read_diff", "{}")),
+                        10, 5, Duration.ofMillis(10)),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(routed.capture());
+        List<ProviderChatMessage> replayed = routed.getAllValues().get(1).messages();
+        ProviderChatMessage assistant = replayed.stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.ASSISTANT)
+                .findFirst().orElseThrow();
+        assertThat(assistant.toolCalls()).hasSize(1);
+        assertThat(assistant.toolCalls().get(0).id())
+                .isEqualTo("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+    }
+
     @Test
     void anEmptySnapshotAndStageToolIntersectionExposesNoTools() {
         assertThat(CodingHandlerStageService.allowedTools(

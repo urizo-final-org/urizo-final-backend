@@ -241,9 +241,32 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         }
         AssistantMessage output = response.getResult().getOutput();
-        String content = output.getText() == null ? "" : output.getText();
+        // TEMPORARY exploratory fix - do not commit. Live Anthropic answers arrive split into
+        // several generations (a text block, then the tool_use block); reading only the first
+        // one yielded stop_reason 'tool_use' with zero tool calls and the whole turn was
+        // refused as incomplete. Merge every generation before judging the answer.
+        StringBuilder mergedContent = new StringBuilder();
+        List<AssistantMessage.ToolCall> mergedNativeCalls = new ArrayList<>();
+        for (org.springframework.ai.chat.model.Generation generation : response.getResults()) {
+            if (generation == null || generation.getOutput() == null) {
+                continue;
+            }
+            AssistantMessage part = generation.getOutput();
+            if (part.getText() != null) {
+                mergedContent.append(part.getText());
+            }
+            if (part.getToolCalls() != null) {
+                mergedNativeCalls.addAll(part.getToolCalls());
+            }
+        }
+        if (response.getResults().size() > 1) {
+            org.slf4j.LoggerFactory.getLogger(SpringAiProductProviderChatAdapter.class).warn(
+                    "[DIAG-TEMP] merged {} generations: contentLength={} nativeToolCalls={}",
+                    response.getResults().size(), mergedContent.length(), mergedNativeCalls.size());
+        }
+        String content = mergedContent.toString();
         List<ProviderChatMessage.ToolCall> toolCalls = nativeToolCalls(
-                request, content, output.getToolCalls());
+                request, content, mergedNativeCalls);
         storeThoughtSignatures(request, output, toolCalls);
         String compatibleContent = request.legacyToolEnvelope()
                 ? legacyEnvelope(content, toolCalls) : content;
@@ -255,6 +278,15 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 ? null : response.getResult().getMetadata().getFinishReason();
         ProviderFinishReason finishReason = ProviderFinishReason.normalize(
                 request.provider(), nativeFinishReason, !toolCalls.isEmpty());
+        if (!finishReason.completed()) {
+            // TEMPORARY diagnostic - remove before commit. The raw reason is the whole story;
+            // the normalized enum hides which provider word we failed to map.
+            org.slf4j.LoggerFactory.getLogger(SpringAiProductProviderChatAdapter.class).warn(
+                    "[DIAG-TEMP] raw finish reason: '{}' provider={} springToolCalls={} normalizedToolCalls={} contentLength={}",
+                    nativeFinishReason, request.provider(),
+                    output.getToolCalls() == null ? -1 : output.getToolCalls().size(),
+                    toolCalls.size(), content.length());
+        }
         return new ProviderChatResponse(
                 request.provider(),
                 request.modelId(),

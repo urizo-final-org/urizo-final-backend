@@ -397,6 +397,24 @@ function Get-AiWorktreePath {
     return $path
 }
 
+function Get-ScanFiles {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    # The Coding agents cannot list files themselves: their only ways to find one are a
+    # search that has to guess the word and a read that has to guess the path. Three live
+    # runs burned every turn that way and never reached apply_patch. The tracked file list
+    # is small enough (a few hundred paths) to hand over whole, and the Backend filters it
+    # to the guardrail rather than the runner - the same reason Get-ScanFolders returns raw
+    # folders: one copy of the fence, on the Backend.
+    $listed = @(& git -C $Root ls-files 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        # A missing file list must not fail a scan whose real product is the sha. The agents
+        # then work the old way instead of the Job being refused.
+        return @()
+    }
+    return @($listed | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+}
+
 function Get-ScanFolders {
     param(
         [Parameter(Mandatory = $true)][string]$Repository,
@@ -470,6 +488,7 @@ function Invoke-PrepareScanWorktree {
                     repo = $repository; scanPath = $target; sha = 'unchanged'
                     note = '로컬 변경이 있어 갱신하지 않았습니다.'
                     folders = (Get-ScanFolders -Repository $repository -Root $target)
+                    files = (Get-ScanFiles -Root $target)
                 }
             }
             $current = "$(& git -C $target rev-parse HEAD 2>&1)".Trim()
@@ -482,6 +501,7 @@ function Invoke-PrepareScanWorktree {
             return @{
                 repo = $repository; scanPath = $target; sha = $baseSha; reused = $true
                 folders = (Get-ScanFolders -Repository $repository -Root $target)
+                files = (Get-ScanFiles -Root $target)
             }
         }
 
@@ -496,6 +516,7 @@ function Invoke-PrepareScanWorktree {
     return @{
         repo = $repository; scanPath = $target; sha = $baseSha; reused = $false
         folders = (Get-ScanFolders -Repository $repository -Root $target)
+        files = (Get-ScanFiles -Root $target)
     }
 }
 

@@ -44,10 +44,13 @@ class CodingJobIntakeServiceTest {
     private final CodingHandlerCommandService commands = mock(CodingHandlerCommandService.class);
     private final CodingRunnerService runner = mock(CodingRunnerService.class);
     private final ProfileVersionRepository profiles = mock(ProfileVersionRepository.class);
+    private final GuardrailJobSnapshotWriter guardrailSnapshots =
+            mock(GuardrailJobSnapshotWriter.class);
 
     private CodingJobIntakeService service() {
         return new CodingJobIntakeService(
-                commands, runner, profiles, mapper, Clock.fixed(NOW, ZoneOffset.UTC),
+                commands, runner, guardrailSnapshots, profiles, mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC),
                 // A real wait would make the suite sleep; the polling itself is not what is
                 // under test, only what happens at each outcome.
                 3, Duration.ofMillis(1));

@@ -6,7 +6,9 @@ import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -190,5 +192,46 @@ class GuardrailJobSnapshotWriterTest {
         JsonNode rules = writtenSnapshot().path("rules");
         assertThat(rules.has("maxChangedFiles")).isTrue();
         assertThat(rules.path("maxChangedFiles").isNull()).isTrue();
+    }
+
+    private void snapshotAllows(String... paths) {
+        when(jdbc.queryForList(contains("allowedPaths"), eq(String.class), eq(JOB)))
+                .thenReturn(List.of(paths));
+    }
+
+    @Test
+    @DisplayName("울타리 안의 파일만 힌트로 저장한다")
+    void storesOnlyTheFilesInsideTheFence() {
+        snapshotAllows("backend:src/main/java/org/urizo/axmodulestudio/backend/cms");
+
+        List<String> stored = writer.recordFiles(JOB, List.of(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/AuthService.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/cmsx/Other.java"));
+
+        assertThat(stored).containsExactly(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java");
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).update(contains("jsonb_set"), json.capture(), eq(JOB));
+        assertThat(json.getValue()).contains("CmsResponses.java").doesNotContain("AuthService");
+    }
+
+    @Test
+    @DisplayName("허용 폴더가 없으면 아무것도 쓰지 않는다 — 열린 목록을 만들지 않는다")
+    void writesNothingWhenTheFenceAllowsNoFolder() {
+        snapshotAllows();
+
+        assertThat(writer.recordFiles(JOB, List.of("src/main/java/a/B.java"))).isEmpty();
+
+        verify(jdbc, never()).update(contains("jsonb_set"), any(), any());
+    }
+
+    @Test
+    @DisplayName("실행기가 목록을 주지 못하면 조용히 넘어간다 — Job 은 계속된다")
+    void toleratesAnAbsentFileList() {
+        assertThat(writer.recordFiles(JOB, List.of())).isEmpty();
+        assertThat(writer.recordFiles(JOB, null)).isEmpty();
+
+        verify(jdbc, never()).update(contains("jsonb_set"), any(), any());
     }
 }

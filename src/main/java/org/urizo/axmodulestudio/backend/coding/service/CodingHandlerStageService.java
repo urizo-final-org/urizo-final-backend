@@ -622,10 +622,17 @@ public final class CodingHandlerStageService {
         ObjectNode payload = properties.putObject("payload")
                 .put("type", "object")
                 .put("additionalProperties", false);
-        payload.putArray("required").add("planSummary").add("acceptanceCriteria");
+        // Every property is required and the object is closed: OpenAI's strict structured
+        // output refuses anything else, and the coding stage depends on targetFiles being
+        // present rather than optional.
+        payload.putArray("required")
+                .add("planSummary").add("acceptanceCriteria").add("targetFiles");
         ObjectNode payloadProperties = payload.putObject("properties");
         payloadProperties.putObject("planSummary").put("type", "string");
         payloadProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        payloadProperties.putObject("targetFiles")
                 .put("type", "array")
                 .putObject("items").put("type", "string");
         return ProviderResponseFormat.jsonSchema(schema).requestContract();
@@ -774,6 +781,15 @@ public final class CodingHandlerStageService {
                         .forEach(allowedAreas::add);
                 ArrayNode deniedAreas = guardrail.putArray("deniedAreas");
                 areas.denied().forEach(deniedAreas::add);
+                // The analyst has no tools, so without this it can only guess at file names
+                // and the coding stage pays for the guess in search turns. Paths are safe
+                // here and nowhere else: this context never reaches an approval screen, and
+                // planSummary is separately forbidden from naming them.
+                List<String> files = guardrailSelections.jobFiles(aggregate.jobId());
+                if (!files.isEmpty()) {
+                    ArrayNode fenceFiles = guardrail.putArray("files");
+                    files.forEach(fenceFiles::add);
+                }
                 guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
                     guardrail.put("allowNewDependency", rules.allowNewDependency());
                     guardrail.put("maxChangedFiles", rules.maxChangedFiles());
@@ -821,9 +837,17 @@ public final class CodingHandlerStageService {
         String payloadFields = switch (handlerKey) {
             case "coding.analyze" -> "payload must contain \"planSummary\", one plain-language "
                     + "paragraph in the language of the request that a non-developer can read, "
-                    + "with no file paths, class names, or code, and \"acceptanceCriteria\", an "
+                    + "with no file paths, class names, or code, \"acceptanceCriteria\", an "
                     + "array of short plain-language statements that will each be true once the "
-                    + "request is done. "
+                    + "request is done, and \"targetFiles\", the files the change will edit. "
+                    // The analyst reads the fence's file list and the coding stage inherits
+                    // this answer, which is the whole point: the stage that has tools should
+                    // spend its turns editing, not discovering what the analyst could see.
+                    + "Fill targetFiles by choosing from guardrail.files, copying each path "
+                    + "exactly; never invent a path that is not listed there. Name every file "
+                    + "the change plausibly touches, most likely first, and prefer naming one "
+                    + "file too many over leaving the list empty. When the request is "
+                    + "infeasible, or the context lists no files, answer with an empty array. "
                     // The early block the design asks of the analyst. The post-check on the
                     // finished candidate remains the authority; this only saves the coding
                     // stage's cost when the refusal is obvious from the request alone.
@@ -868,13 +892,18 @@ public final class CodingHandlerStageService {
                         // discipline have to be said out loud - searching feels like
                         // progress to a model.
                         + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
-                        + "answer spends one whether it searches or edits. Search for code "
-                        + "identifiers in English (class, field, and path names), never for "
-                        + "words of the request's own language - those match nothing. Do not "
-                        + "rerun a search that already answered with a slight variation of "
-                        + "itself, and do not reword a search that found nothing - open the "
-                        + "most likely file instead. Once the files to change are in hand, "
-                        + "stop exploring and edit with apply_patch; a patch can be corrected "
+                        + "answer spends one whether it searches or edits. The coding.analyze "
+                        + "payload in priorResults carries targetFiles, the files chosen for "
+                        + "this change from the guardrail's own list: read those with "
+                        + "read_file and start editing. Do not search to confirm what "
+                        + "targetFiles already names. Search only when those files turn out "
+                        + "not to hold the change, and then search for code identifiers in "
+                        + "English (class, field, and path names), never for words of the "
+                        + "request's own language - those match nothing. Do not rerun a "
+                        + "search that already answered with a slight variation of itself, "
+                        + "and do not reword a search that found nothing - open the most "
+                        + "likely file instead. Once the files to change are in hand, stop "
+                        + "exploring and edit with apply_patch; a patch can be corrected "
                         + "after the next read_diff, but a spent answer cannot be recovered. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.

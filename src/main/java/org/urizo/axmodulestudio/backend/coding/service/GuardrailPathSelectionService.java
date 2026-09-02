@@ -117,6 +117,15 @@ public class GuardrailPathSelectionService {
         return new JobAreas(areaLabels(jobId, "allowedAreas"), areaLabels(jobId, "deniedAreas"));
     }
 
+    /**
+     * The files inside the job's fence, as the scan saw them when the job was created. Empty
+     * for a job created before the list existed, or when the runner could not produce one.
+     */
+    public List<String> jobFiles(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        return areaLabels(jobId, "files");
+    }
+
     private List<String> areaLabels(UUID jobId, String field) {
         List<String> stored = jdbc.queryForList(
                 "SELECT jsonb_array_elements_text(snapshot_json -> '" + field + "') "

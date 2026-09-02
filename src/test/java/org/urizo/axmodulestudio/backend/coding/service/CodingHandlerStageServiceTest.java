@@ -311,6 +311,11 @@ class CodingHandlerStageServiceTest {
         when(selections.jobAreas(JOB)).thenReturn(
                 new GuardrailPathSelectionService.JobAreas(
                         List.of("CMS 기능"), List.of("상태 점검", "공통 기반")));
+        // The fence's own file list: the analyst picks targetFiles from it instead of
+        // leaving the coding stage to find the files by searching.
+        when(selections.jobFiles(JOB)).thenReturn(List.of(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/repository/CmsRepository.java"));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), profileModelBindings,
@@ -350,7 +355,9 @@ class CodingHandlerStageServiceTest {
 
         // A correct answer that merely arrived inside a Markdown fence must survive.
         String stageResult = "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"버튼을 잠급니다.\","
-                + "\"acceptanceCriteria\":[\"이유가 보인다\"]}}";
+                + "\"acceptanceCriteria\":[\"이유가 보인다\"],"
+                + "\"targetFiles\":[\"src/main/java/org/urizo/axmodulestudio/backend/cms/"
+                + "dto/CmsResponses.java\"]}}";
         when(gateway.chat(any())).thenReturn(
                 assistantText("```json\n" + stageResult + "\n```"));
 
@@ -363,6 +370,8 @@ class CodingHandlerStageServiceTest {
         ObjectNode expectedPayload = mapper.createObjectNode()
                 .put("planSummary", "버튼을 잠급니다.");
         expectedPayload.putArray("acceptanceCriteria").add("이유가 보인다");
+        expectedPayload.putArray("targetFiles")
+                .add("src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java");
         assertThat(response.payload()).isEqualTo(expectedPayload);
         verify(profileModelBindings).resolve(
                 PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT);
@@ -380,7 +389,7 @@ class CodingHandlerStageServiceTest {
         assertThat(payloadSchema.path("additionalProperties").asBoolean()).isFalse();
         assertThat(payloadSchema.path("required"))
                 .extracting(JsonNode::asText)
-                .containsExactly("planSummary", "acceptanceCriteria");
+                .containsExactly("planSummary", "acceptanceCriteria", "targetFiles");
         JsonNode payloadProperties = payloadSchema.path("properties");
         assertThat(payloadProperties.path("planSummary").path("type").asText())
                 .isEqualTo("string");
@@ -402,6 +411,11 @@ class CodingHandlerStageServiceTest {
         String contextMessage = structuredRequest.getValue().messages().get(1).path("content").asText();
         assertThat(contextMessage).contains("CMS 기능");
         assertThat(contextMessage).contains("상태 점검");
+        // The file list belongs in the analyst's context, and the instruction has to say
+        // where targetFiles comes from or the model invents paths.
+        assertThat(contextMessage).contains("CmsResponses.java");
+        assertThat(systemPrompt).contains("targetFiles");
+        assertThat(systemPrompt).contains("guardrail.files");
         // planSummary is read by a general administrator, so the analyst is never shown a path
         // it could quote back.
         assertThat(contextMessage)

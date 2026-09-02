@@ -78,8 +78,12 @@ public class CodingJobIntakeService {
     private final int maxShaPolls;
     private final Duration shaPollInterval;
 
+    private static final org.slf4j.Logger log =
+            org.slf4j.LoggerFactory.getLogger(CodingJobIntakeService.class);
+
     private final CodingHandlerCommandService commands;
     private final CodingRunnerService runner;
+    private final GuardrailJobSnapshotWriter guardrailSnapshots;
     private final ProfileVersionRepository profileVersions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -93,16 +97,18 @@ public class CodingJobIntakeService {
     CodingJobIntakeService(
             CodingHandlerCommandService commands,
             CodingRunnerService runner,
+            GuardrailJobSnapshotWriter guardrailSnapshots,
             ProfileVersionRepository profileVersions,
             ObjectMapper objectMapper,
             Clock clock) {
-        this(commands, runner, profileVersions, objectMapper, clock,
+        this(commands, runner, guardrailSnapshots, profileVersions, objectMapper, clock,
                 60, Duration.ofMillis(500));
     }
 
     CodingJobIntakeService(
             CodingHandlerCommandService commands,
             CodingRunnerService runner,
+            GuardrailJobSnapshotWriter guardrailSnapshots,
             ProfileVersionRepository profileVersions,
             ObjectMapper objectMapper,
             Clock clock,
@@ -110,6 +116,8 @@ public class CodingJobIntakeService {
             Duration shaPollInterval) {
         this.commands = Objects.requireNonNull(commands, "commands are required");
         this.runner = Objects.requireNonNull(runner, "runner is required");
+        this.guardrailSnapshots = Objects.requireNonNull(
+                guardrailSnapshots, "guardrailSnapshots are required");
         this.profileVersions = Objects.requireNonNull(
                 profileVersions, "profileVersions are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
@@ -152,7 +160,8 @@ public class CodingJobIntakeService {
                     "활성 AI 설정에 시작 노드가 없습니다.", HttpStatus.CONFLICT);
         }
 
-        String baseSha = currentDevSha(repository);
+        ScanResult scan = scan(repository);
+        String baseSha = scan.baseSha();
         Instant now = Instant.now(clock);
 
         CodingHandlerContract.CreateCodingJobRequest request =
@@ -172,6 +181,16 @@ public class CodingJobIntakeService {
                         requestText);
         CodingHandlerContract.CreateCodingJobResponse created =
                 commands.create(actor, traceId, idempotencyKey, request);
+        // Written after creation because the snapshot the files are filtered against is
+        // created inside it. A failure here costs the agents their shortcut, not the Job:
+        // the fence is enforced by allowedPaths and the post-check, never by this list.
+        try {
+            guardrailSnapshots.recordFiles(created.job().jobId(), scan.files());
+        }
+        catch (RuntimeException hintUnavailable) {
+            log.warn("The guardrail file hint was not stored for job {}.",
+                    created.job().jobId(), hintUnavailable);
+        }
         // The code stage's MCP tools operate inside a workspace the host runner prepares,
         // and nothing else in the product flow asks for one - the 8/31 walkthrough inserted
         // this task by hand, which is why every Job died at its first tool call with
@@ -194,6 +213,20 @@ public class CodingJobIntakeService {
                         HttpStatus.CONFLICT));
     }
 
+    /** The runner's file list, or nothing when an older runner did not send one. */
+    private static List<String> paths(JsonNode files) {
+        if (files == null || !files.isArray()) {
+            return List.of();
+        }
+        List<String> paths = new ArrayList<>();
+        for (JsonNode file : files) {
+            if (file.isTextual() && !file.asText().isBlank()) {
+                paths.add(file.asText());
+            }
+        }
+        return List.copyOf(paths);
+    }
+
     private static List<String> nodeIds(JsonNode snapshot) {
         List<String> ids = new ArrayList<>();
         for (JsonNode node : snapshot.path("nodes")) {
@@ -205,11 +238,16 @@ public class CodingJobIntakeService {
         return List.copyOf(ids);
     }
 
+    /** What the scan reports: the commit a Job is pinned to, and the files it may be shown. */
+    private record ScanResult(String baseSha, List<String> files) { }
+
     /**
      * Asks the runner for {@code origin/dev} and waits. The runner resolves a ref it already
      * has rather than fetching, so the wait is its poll interval and not a network round trip.
+     * The same answer carries the repository's tracked files, so the agents can be handed the
+     * files they may change instead of searching for them.
      */
-    private String currentDevSha(String repository) {
+    private ScanResult scan(String repository) {
         UUID taskId = runner.enqueue(
                 SCAN_KIND, objectMapper.createObjectNode().put("repo", repository));
 
@@ -223,7 +261,7 @@ public class CodingJobIntakeService {
             }
             JsonNode result = outcome.result();
             if (result != null) {
-                return prefixed(result.path("sha"));
+                return new ScanResult(prefixed(result.path("sha")), paths(result.path("files")));
             }
             sleep(shaPollInterval);
         }

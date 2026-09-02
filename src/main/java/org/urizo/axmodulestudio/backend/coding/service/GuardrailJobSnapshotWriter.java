@@ -71,6 +71,57 @@ public class GuardrailJobSnapshotWriter {
         return List.copyOf(allowed);
     }
 
+    /**
+     * A file list is worth a prompt, not a repository. Beyond this the list stops being a
+     * shortcut and becomes the wandering it was meant to replace.
+     */
+    private static final int MAX_SNAPSHOT_FILES = 300;
+
+    /**
+     * Adds the files the job may change, taken from the scan the job's baseSha came from.
+     *
+     * <p>Written after {@link #capture}, not inside it: the list comes from the runner, and
+     * waiting on a host process inside the transaction that creates the job would hold a
+     * database transaction open across a network call. That is safe here because the list is
+     * a hint for the agents and never an authority — the enforcement stays {@code allowedPaths}
+     * and the post-check on the files actually changed.
+     *
+     * <p>Filtered against the job's own snapshot rather than the current selection, so a job
+     * is never handed a file outside the fence it was created under.
+     */
+    public List<String> recordFiles(UUID jobId, List<String> repositoryFiles) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        if (repositoryFiles == null || repositoryFiles.isEmpty()) {
+            return List.of();
+        }
+        List<String> allowed = jdbc.queryForList(
+                "SELECT jsonb_array_elements_text(snapshot_json -> 'allowedPaths') "
+                        + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
+                String.class, jobId);
+        List<String> folders = allowed.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        if (folders.isEmpty()) {
+            return List.of();
+        }
+        List<String> selected = repositoryFiles.stream()
+                .filter(file -> folders.stream().anyMatch(folder -> file.startsWith(folder + "/")))
+                .distinct()
+                .limit(MAX_SNAPSHOT_FILES)
+                .toList();
+        if (selected.isEmpty()) {
+            return List.of();
+        }
+        ArrayNode files = objectMapper.createArrayNode();
+        selected.forEach(files::add);
+        jdbc.update("UPDATE app.guardrail_job_snapshot "
+                        + "SET snapshot_json = jsonb_set(snapshot_json, '{files}', ?::jsonb) "
+                        + "WHERE job_id = ?",
+                files.toString(), jobId);
+        return List.copyOf(selected);
+    }
+
     /** One stored guardrail row, as much of it as the snapshot needs. */
     record StoredSelection(String repository, String path, boolean enabled, String label) {
 

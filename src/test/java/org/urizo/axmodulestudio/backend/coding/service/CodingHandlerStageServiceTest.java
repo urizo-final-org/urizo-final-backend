@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -20,6 +21,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -27,6 +29,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
+import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
@@ -88,7 +91,9 @@ class CodingHandlerStageServiceTest {
         when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), anyBindings, mapper, clock);
+                mock(CodingRunnerService.class), anyBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -257,7 +262,9 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -366,7 +373,9 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,
@@ -491,6 +500,443 @@ class CodingHandlerStageServiceTest {
         verify(guard, times(2)).complete(any(), any());
     }
 
+    private static JsonNode changedPaths(String... paths) {
+        ObjectNode result = new ObjectMapper().createObjectNode();
+        ArrayNode changed = result.putArray("changedPaths");
+        for (String path : paths) {
+            changed.add(path);
+        }
+        return result;
+    }
+
+    @Test
+    void allowedProductWorkPassesThePostCheck() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/service/BoardService.java",
+                "src/features/cms/MemberListPage.tsx");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).isEmpty();
+    }
+
+    @Test
+    void aChangedFileInsideTheFixedDenylistIsReported() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/service/BoardService.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).containsExactly(
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+    }
+
+    /**
+     * Guide check 6-8. The model plans member work, edits a login file, and reports only the
+     * member file. The verdict comes from the tool results, so the report changes nothing.
+     */
+    @Test
+    void aTruthfulLookingReportDoesNotSaveADeniedChange() {
+        JsonNode honestLookingDiff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/controller/MemberController.java");
+        JsonNode whatGitActuallySaw = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/controller/MemberController.java",
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(
+                honestLookingDiff, whatGitActuallySaw)).containsExactly(
+                "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java");
+    }
+
+    @Test
+    void aMigrationEditIsReportedEvenWhenItIsTheOnlyChange() {
+        JsonNode diff = changedPaths("src/main/resources/db/migration/V20260901__add_column.sql");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void theSamePathListedByBothToolsIsReportedOnce() {
+        JsonNode diff = changedPaths(
+                "src/main/java/org/urizo/axmodulestudio/backend/coding/service/CodingToolService.java");
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void aToolResultWithoutAChangedPathListIsTreatedAsEmpty() {
+        JsonNode empty = new ObjectMapper().createObjectNode();
+
+        assertThat(CodingHandlerStageService.deniedChangedPaths(empty, empty)).isEmpty();
+    }
+
+    private static final String CMS_BACKEND =
+            "src/main/java/org/urizo/axmodulestudio/backend/cms";
+
+    @Test
+    void anEmptySelectionLeavesOnlyTheFixedDenylistInForce() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(List.of(), diff, diff))
+                .isEmpty();
+    }
+
+    @Test
+    void aChangeInsideASelectedFolderPasses() {
+        JsonNode diff = changedPaths(
+                CMS_BACKEND + "/service/BoardService.java",
+                CMS_BACKEND + "/controller/MemberController.java");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+    }
+
+    @Test
+    void aChangeOutsideEverySelectedFolderIsReported() {
+        String health = "src/main/java/org/urizo/axmodulestudio/backend/health/HealthCheck.java";
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java", health);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(health);
+    }
+
+    @Test
+    void aFolderWhoseNameOnlyStartsTheSameIsNotTreatedAsInside() {
+        String lookalike = CMS_BACKEND + "-archive/Old.java";
+        JsonNode diff = changedPaths(lookalike);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(lookalike);
+    }
+
+    @Test
+    void theRepositoryPrefixIsStrippedBeforeComparing() {
+        JsonNode diff = changedPaths("src/features/cms/MemberListPage.tsx");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("frontend:src/features/cms"), diff, diff)).isEmpty();
+    }
+
+    @Test
+    void theSelectedFolderItselfCountsAsInside() {
+        JsonNode diff = changedPaths(CMS_BACKEND);
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+    }
+
+    private static JsonNode diffBody(String body, String... paths) {
+        ObjectNode result = (ObjectNode) changedPaths(paths);
+        result.put("diff", body);
+        return result;
+    }
+
+    /** Two added lines and one removed line, with the file headers a real diff carries. */
+    private static final String THREE_CHANGED_LINES = String.join("\n",
+            "diff --git a/A.java b/A.java",
+            "--- a/A.java",
+            "+++ b/A.java",
+            "@@ -1,2 +1,3 @@",
+            " unchanged",
+            "-removed",
+            "+added",
+            "+added too");
+
+    private static final GuardrailRuleContract.Rules DEFAULT_RULES =
+            GuardrailRuleContract.Rules.unrestrictedSize();
+
+    @Test
+    void aJobWithNoCopiedRulesIsJudgedByNone() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, "pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(null, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void addingALibraryIsRefusedWhileTheRuleIsOff() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java", "pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff))
+                .singleElement().asString().contains("pom.xml");
+    }
+
+    @Test
+    void addingALibraryPassesOnceTheRuleIsOn() {
+        JsonNode diff = changedPaths("pom.xml");
+        GuardrailRuleContract.Rules allowed =
+                new GuardrailRuleContract.Rules(true, null, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(allowed, diff, diff)).isEmpty();
+    }
+
+    /** Moving the manifest must not turn a refusal into a pass. */
+    @Test
+    void aManifestIsRecognisedAtAnyDepth() {
+        JsonNode diff = changedPaths("modules/report/pom.xml");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).hasSize(1);
+    }
+
+    /** A lock file brings the dependency in just as the manifest naming it does. */
+    @Test
+    void aLockFileCountsAsAddingALibrary() {
+        JsonNode diff = changedPaths("package-lock.json");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).hasSize(1);
+    }
+
+    @Test
+    void ordinaryProductWorkBreaksNoRule() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES,
+                CMS_BACKEND + "/service/BoardService.java");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void anUnsetLimitRefusesNothingHowLargeTheChange() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES,
+                CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java", CMS_BACKEND + "/C.java");
+
+        assertThat(CodingHandlerStageService.brokenRules(DEFAULT_RULES, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void tooManyChangedFilesIsRefused() {
+        JsonNode diff = changedPaths(
+                CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java", CMS_BACKEND + "/C.java");
+        GuardrailRuleContract.Rules twoFiles =
+                new GuardrailRuleContract.Rules(false, 2, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoFiles, diff, diff))
+                .singleElement().asString().contains("3 files");
+    }
+
+    @Test
+    void exactlyTheFileLimitPasses() {
+        JsonNode diff = changedPaths(CMS_BACKEND + "/A.java", CMS_BACKEND + "/B.java");
+        GuardrailRuleContract.Rules twoFiles =
+                new GuardrailRuleContract.Rules(false, 2, null);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoFiles, diff, diff)).isEmpty();
+    }
+
+    /** Only the body counts: the +++ and --- headers are not changed lines. */
+    @Test
+    void diffHeadersAreNotCountedAsChangedLines() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules threeLines =
+                new GuardrailRuleContract.Rules(false, null, 3);
+
+        assertThat(CodingHandlerStageService.brokenRules(threeLines, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void tooManyChangedLinesIsRefused() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules twoLines =
+                new GuardrailRuleContract.Rules(false, null, 2);
+
+        assertThat(CodingHandlerStageService.brokenRules(twoLines, diff, diff))
+                .singleElement().asString().contains("3 lines");
+    }
+
+    /** Both tools describe the same diff, so the body must not be counted twice. */
+    @Test
+    void theSameDiffSeenByBothToolsIsCountedOnce() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules threeLines =
+                new GuardrailRuleContract.Rules(false, null, 3);
+
+        assertThat(CodingHandlerStageService.brokenRules(threeLines, diff, diff)).isEmpty();
+    }
+
+    @Test
+    void everyBrokenRuleIsReportedTogether() {
+        JsonNode diff = diffBody(THREE_CHANGED_LINES, "pom.xml", CMS_BACKEND + "/A.java");
+        GuardrailRuleContract.Rules strict =
+                new GuardrailRuleContract.Rules(false, 1, 2);
+
+        assertThat(CodingHandlerStageService.brokenRules(strict, diff, diff)).hasSize(3);
+    }
+
+    // ---- 6-8: the preview stage itself, not just the verdict helper ----
+    //
+    // The helpers above prove what the verdict is. These prove the preview stage asks for it at
+    // all, and that a denied verdict stops the candidate before anything is queued. A guardrail
+    // that is computed and then ignored looks identical to one that works.
+
+    private static final String DENIED_LOGIN_FILE =
+            "src/main/java/org/urizo/axmodulestudio/backend/auth/security/SecurityConfig.java";
+    private static final String ALLOWED_MEMBER_FILE =
+            "src/main/java/org/urizo/axmodulestudio/backend/cms/controller/MemberController.java";
+
+    /**
+     * Drives {@code coding.preview} with the four deterministic tools stubbed, so the only thing
+     * under test is what preview does with what Git reported.
+     */
+    private CodingHandlerContract.StageExecutionResponse runPreview(
+            CodingRunnerService runner,
+            GuardrailPathSelectionService selections,
+            GuardrailRuleService rules,
+            List<String> gitReportedPaths,
+            String diffBody) {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), runner,
+                mock(ProfileModelBindingService.class), selections, rules, mapper, clock);
+
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"), Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+
+        // The model reported member work only. What Git saw is the argument instead.
+        CodingHandlerContract.HandlerResultResponse code =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.code",
+                        CodingHandlerContract.ResultType.CANDIDATE, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, null,
+                        mapper.createObjectNode().put("summary", "member files only"), NOW);
+        CodingHandlerContract.HandlerResultResponse review =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.review",
+                        CodingHandlerContract.ResultType.CANDIDATE, "passed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, null,
+                        mapper.createObjectNode(), NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Change the member screen only.",
+                        List.of(code, review), List.of(), List.of(), NOW, null));
+
+        AtomicReference<String> pendingTool = new AtomicReference<>();
+        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            JsonNode submitted = invocation.getArgument(1);
+            pendingTool.set(submitted.path("tool").path("name").asText());
+            return new CodingToolContract.Accepted(
+                    "1.0", "TOOL_ACCEPTED",
+                    UUID.fromString(submitted.path("requestId").asText()),
+                    UUID.fromString(submitted.path("toolCallId").asText()),
+                    JOB, TRACE, submitted.path("idempotencyKey").asText(), EXECUTION,
+                    "ACCEPTED", "/internal/coding/tool-executions/" + EXECUTION, 100, NOW);
+        });
+        ArrayNode paths = mapper.createArrayNode();
+        gitReportedPaths.forEach(paths::add);
+        when(toolService.result("Bearer worker", EXECUTION)).thenAnswer(ignored -> {
+            ObjectNode body = mapper.createObjectNode();
+            switch (pendingTool.get()) {
+                case "read_diff" -> {
+                    body.put("digest", DIFF_DIGEST);
+                    body.set("changedPaths", paths.deepCopy());
+                    body.put("diff", diffBody);
+                }
+                case "run_check" -> {
+                    body.put("status", "PASSED");
+                    body.put("profile", "git-diff-check");
+                    body.put("detailsDigest", DIFF_DIGEST);
+                }
+                case "check_package_allowlist" -> {
+                    body.put("passed", true);
+                    body.put("diffDigest", DIFF_DIGEST);
+                }
+                default -> {
+                    body.put("passed", true);
+                    body.put("diffDigest", DIFF_DIGEST);
+                    body.set("changedPaths", paths.deepCopy());
+                }
+            }
+            return new CodingToolContract.ResultContent(
+                    "1.0", UUID.randomUUID(), UUID.randomUUID(), JOB, TRACE,
+                    "stage-tool.result", EXECUTION, "application/json", 120,
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    body.toString());
+        });
+        return service.execute("Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.preview", RESULT));
+    }
+
+    /**
+     * Guide check 6-8, at the stage rather than at the helper. The model's own summary says member
+     * work; Git says a login file changed. Nothing is queued and the preview never becomes READY.
+     */
+    @Test
+    void previewRefusesADeniedPathAndQueuesNothing() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        assertThatThrownBy(() -> runPreview(
+                runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE, DENIED_LOGIN_FILE), null))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining(DENIED_LOGIN_FILE);
+
+        // No BUILD and no PREVIEW_UP. A refused candidate must not reach Docker at all.
+        verify(runner, never()).enqueue(any(), any());
+    }
+
+    @Test
+    void previewBecomesReadyWhenEveryChangedPathIsAllowed() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        CodingHandlerContract.StageExecutionResponse response = runPreview(
+                runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE), null);
+
+        assertThat(response.resultPort()).isEqualTo("ready");
+        assertThat(response.payload().path("status").asText()).isEqualTo("READY");
+        verify(runner).enqueue(eq("BUILD"), any());
+        verify(runner).enqueue(eq("PREVIEW_UP"), any());
+    }
+
+    /** The second layer is asked for too, using the copy taken when the job was created. */
+    @Test
+    void previewRefusesAPathOutsideTheSelectedFolders() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
+        when(selections.jobSnapshot(JOB)).thenReturn(List.of("backend:" + CMS_BACKEND));
+
+        assertThatThrownBy(() -> runPreview(
+                runner, selections, mock(GuardrailRuleService.class),
+                List.of("src/main/java/org/urizo/axmodulestudio/backend/health/HealthCheck.java"),
+                null))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("outside the selected folders");
+
+        verify(runner, never()).enqueue(any(), any());
+    }
+
+    /** The third layer is asked for too, using the rules copied for this job. */
+    @Test
+    void previewRefusesAChangeThatBreaksTheCopiedRules() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        GuardrailRuleService rules = mock(GuardrailRuleService.class);
+        when(rules.jobRules(JOB)).thenReturn(
+                java.util.Optional.of(new GuardrailRuleContract.Rules(false, null, null)));
+
+        assertThatThrownBy(() -> runPreview(
+                runner, mock(GuardrailPathSelectionService.class), rules,
+                List.of(ALLOWED_MEMBER_FILE, "pom.xml"), null))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("adding a library is not allowed");
+
+        verify(runner, never()).enqueue(any(), any());
+    }
+
     @Test
     void reviewIsAskedForAPlainLanguageReportAndIsGivenTheAgreedCriteria() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
@@ -521,7 +967,9 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, mapper, clock);
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE,
                 4,

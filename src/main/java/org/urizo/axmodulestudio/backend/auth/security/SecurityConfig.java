@@ -118,6 +118,9 @@ public class SecurityConfig {
                                 "/api/admin/ai/profile-versions",
                                 "/api/admin/ai/profile-versions/**")
                                 .hasRole("SUPER_ADMIN")
+                        // The guardrail decides what the model may change, so choosing it is not
+                        // ordinary administration.
+                        .requestMatchers("/api/admin/coding/guardrail/**").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/projects").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST,
                                 "/api/projects/*/connectors",

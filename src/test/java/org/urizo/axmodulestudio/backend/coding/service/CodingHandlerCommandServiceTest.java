@@ -157,6 +157,7 @@ class CodingHandlerCommandServiceTest {
                 lifecycle,
                 lifecycleService,
                 lifecycleDigester,
+                mock(GuardrailJobSnapshotWriter.class),
                 mapper,
                 Clock.fixed(now, ZoneOffset.UTC));
         AuthenticatedActor actor =

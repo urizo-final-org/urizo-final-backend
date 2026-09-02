@@ -9,8 +9,15 @@ import org.springframework.ai.retry.TransientAiException;
 
 public final class ProviderErrorNormalizer {
 
+    private static final org.slf4j.Logger DIAG_LOG =
+            org.slf4j.LoggerFactory.getLogger(ProviderErrorNormalizer.class);
+
     public NormalizedProviderError normalize(Throwable failure) {
         Objects.requireNonNull(failure, "failure is required");
+        // TEMPORARY diagnostic - remove before commit. A Spring AI exception message
+        // carries the provider's own error body, which this class then discards.
+        DIAG_LOG.warn("[DIAG-TEMP] provider failure before normalization: {}",
+                failure.toString(), failure);
         if (failure instanceof ProviderFailure providerFailure) {
             return normalize(providerFailure.kind(), providerFailure.retryAfter());
         }

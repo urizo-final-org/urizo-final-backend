@@ -117,7 +117,10 @@ class CodingConsoleControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.technical.baseSha").value(BASE_SHA))
-                .andExpect(jsonPath("$.technical.changedPaths[0]").value(CHANGED_PATH));
+                .andExpect(jsonPath("$.technical.changedPaths[0]").value(CHANGED_PATH))
+                // The diff body is the evidence the merge approval is actually judged on.
+                .andExpect(jsonPath("$.technical.diff").value(
+                        org.hamcrest.Matchers.containsString("데모 확인")));
     }
 
     @Test
@@ -212,7 +215,10 @@ class CodingConsoleControllerTest {
     private static CodingConsoleContract.Technical technical() {
         return new CodingConsoleContract.Technical(
                 BASE_SHA, BASE_SHA, "sha256:" + "c".repeat(64),
-                List.of(CHANGED_PATH), "maven-verify", null, null);
+                List.of(CHANGED_PATH),
+                "diff --git a/README.md b/README.md
++데모 확인",
+                "maven-verify", null, null);
     }
 
     @Test

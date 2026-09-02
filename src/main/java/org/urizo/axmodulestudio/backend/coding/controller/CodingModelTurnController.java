@@ -110,9 +110,15 @@ public class CodingModelTurnController {
         }
     }
 
+    // TEMPORARY diagnostic logger - remove before commit.
+    private static final org.slf4j.Logger DIAG_LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingModelTurnController.class);
+
     private static ResponseEntity<CodingModelTurnContract.JobScopedErrorEnvelope> gatewayFailure(
             CodingModelTurnContract.Request request,
             ProviderGatewayException failure) {
+        DIAG_LOG.warn("[DIAG-TEMP] model turn failed: {} {}",
+                failure.code(), failure.getMessage(), failure);
         HttpStatus status = status(failure.code());
         boolean retryable = retryable(failure.code());
         CodingModelTurnContract.ErrorDetail error = new CodingModelTurnContract.ErrorDetail(

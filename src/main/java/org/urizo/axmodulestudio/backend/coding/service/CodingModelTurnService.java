@@ -38,6 +38,10 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefin
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public class CodingModelTurnService {
 
+    // TEMPORARY diagnostic logger - remove before commit.
+    private static final org.slf4j.Logger DIAG_LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingModelTurnService.class);
+
     private static final Set<String> CHAT_ONLY = Set.of("CHAT");
     private static final Set<String> CHAT_WITH_TOOLS = Set.of("CHAT", "TOOL_CALLING");
     private static final String LOCAL_TOOL_NAME = "read_file";
@@ -180,6 +184,11 @@ public class CodingModelTurnService {
                 || !providerResponse.modelId().equals(selected.modelId())
                 || providerResponse.content().length() > 200_000
                 || providerResponse.inputTokens() > Integer.MAX_VALUE - providerResponse.outputTokens()) {
+            // TEMPORARY diagnostic - remove before commit.
+            DIAG_LOG.warn("[DIAG-TEMP] identity check rejected: provider={}/{} model={}/{} contentLength={}",
+                    providerResponse.provider(), selected.provider(),
+                    providerResponse.modelId(), selected.modelId(),
+                    providerResponse.content().length());
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
                     "Model provider returned an invalid normalized response.");
@@ -460,9 +469,20 @@ public class CodingModelTurnService {
             for (ProviderChatMessage.ToolCall call : response.toolCalls()) {
                 ProviderToolDefinition definition = declared.get(call.name());
                 if (definition == null) {
+                    // TEMPORARY diagnostic - remove before commit. Argument content is code,
+                    // so only the name is logged.
+                    DIAG_LOG.warn("[DIAG-TEMP] undeclared tool call from model: {}", call.name());
                     throw new IllegalArgumentException();
                 }
-                String arguments = definition.normalizeArguments(call.arguments());
+                String arguments;
+                try {
+                    arguments = definition.normalizeArguments(call.arguments());
+                }
+                catch (IllegalArgumentException rejected) {
+                    DIAG_LOG.warn("[DIAG-TEMP] tool call arguments rejected for {}: length={}",
+                            call.name(), call.arguments() == null ? -1 : call.arguments().length());
+                    throw rejected;
+                }
                 JsonNode decoded = objectMapper.readTree(arguments);
                 normalized.add(new CodingModelTurnContract.ToolCall(
                         UUID.fromString(call.id()), call.name(), decoded));

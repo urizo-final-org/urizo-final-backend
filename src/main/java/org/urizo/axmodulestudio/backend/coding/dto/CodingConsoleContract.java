@@ -152,6 +152,7 @@ public final class CodingConsoleContract {
             String candidateSha,
             String diffDigest,
             List<String> changedPaths,
+            String diff,
             String checkProfile,
             String pullRequestUrl,
             BaseShaFreshness baseShaFreshness) {

@@ -200,9 +200,38 @@ public class CodingConsoleService {
                 candidate == null ? null : candidate.candidateSha(),
                 candidate == null ? null : candidate.diffDigest(),
                 preview == null ? List.of() : strings(preview.path("changedPaths")),
+                diff(jobId),
                 preview == null ? null : text(preview, "checkProfile"),
                 null,
                 null);
+    }
+
+    /**
+     * The one thing a super administrator can actually judge. A digest proves the bytes did
+     * not change after review; only the diff itself says what they are, and asking someone to
+     * approve code they cannot read is not an approval. The body already sits in the newest
+     * read_diff execution the code stage ran, so the console reads it back rather than asking
+     * the workspace again.
+     */
+    private String diff(UUID jobId) {
+        List<String> rows = jdbc.query("""
+                SELECT result_content
+                FROM app.coding_tool_execution
+                WHERE job_id = ? AND tool_name = 'read_diff' AND status = 'SUCCEEDED'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """, (rs, row) -> rs.getString("result_content"), jobId);
+        if (rows.isEmpty() || rows.get(0) == null) {
+            return null;
+        }
+        String diff = readTree(rows.get(0)).path("diff").asText(null);
+        if (diff == null || diff.isBlank()) {
+            return null;
+        }
+        return diff.length() <= 60_000
+                ? diff
+                : diff.substring(0, 60_000) + "
+... (이하 생략 · 전체는 변경 지문으로 검증됨)";
     }
 
     private List<CodingConsoleContract.DecisionRecord> decisions(UUID jobId) {

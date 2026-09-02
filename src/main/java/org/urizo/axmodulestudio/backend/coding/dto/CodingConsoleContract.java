@@ -49,6 +49,17 @@ public final class CodingConsoleContract {
     }
 
     /**
+     * Whether the runner is answering. {@code lastSeenAt} is null when the server has not
+     * heard from it since starting — the screen must warn on that too, because "no signal
+     * yet" and "off" look the same to the person whose request would silently wait.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RunnerStatus(
+            String schemaVersion,
+            boolean alive,
+            Instant lastSeenAt) { }
+
+    /**
      * One request, opened. {@code plan} feeds approval 1, {@code report} feeds approval 2,
      * and {@code technical} feeds approval 3 and is null for a general administrator.
      */

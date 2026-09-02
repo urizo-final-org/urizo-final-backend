@@ -32,6 +32,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingConsoleService;
 import org.urizo.axmodulestudio.backend.coding.service.CodingJobIntakeService;
 import org.urizo.axmodulestudio.backend.coding.service.CodingJobLifecycleException;
+import org.urizo.axmodulestudio.backend.coding.service.CodingRunnerService;
 import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
 
 /**
@@ -55,14 +56,17 @@ public class CodingConsoleController {
 
     private final CodingConsoleService service;
     private final CodingJobIntakeService intake;
+    private final CodingRunnerService runner;
     private final AuthService authService;
 
     public CodingConsoleController(
             CodingConsoleService service,
             CodingJobIntakeService intake,
+            CodingRunnerService runner,
             AuthService authService) {
         this.service = service;
         this.intake = intake;
+        this.runner = runner;
         this.authService = authService;
     }
 
@@ -91,6 +95,17 @@ public class CodingConsoleController {
     CodingConsoleContract.JobList list(
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int limit) {
         return service.list(limit);
+    }
+
+    /**
+     * The execution-history screen's runner warning. A literal path, so Spring matches it
+     * before the {@code /{jobId}} template below and the word never reaches the UUID parser.
+     */
+    @GetMapping("/runner-status")
+    CodingConsoleContract.RunnerStatus runnerStatus() {
+        CodingRunnerService.Liveness liveness = runner.liveness();
+        return new CodingConsoleContract.RunnerStatus(
+                "1.0", liveness.alive(), liveness.lastSeenAt());
     }
 
     @GetMapping("/{jobId}")

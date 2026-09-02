@@ -43,6 +43,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingConsoleService;
 import org.urizo.axmodulestudio.backend.coding.service.CodingJobIntakeService;
 import org.urizo.axmodulestudio.backend.coding.service.CodingJobLifecycleException;
+import org.urizo.axmodulestudio.backend.coding.service.CodingRunnerService;
 
 /**
  * The one promise worth pinning: a general administrator's response carries no code.
@@ -73,6 +74,9 @@ class CodingConsoleControllerTest {
     private CodingJobIntakeService intake;
 
     @MockitoBean
+    private CodingRunnerService runner;
+
+    @MockitoBean
     private AuthService authService;
 
     @MockitoBean(name = "authJwtSigningKey")
@@ -92,6 +96,31 @@ class CodingConsoleControllerTest {
 
     @MockitoBean
     private JwtProperties jwtProperties;
+
+    @Test
+    void tellsTheScreenWhenTheRunnerHasGoneQuiet() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        when(runner.liveness()).thenReturn(new CodingRunnerService.Liveness(null, false));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/runner-status")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.alive").value(false))
+                .andExpect(jsonPath("$.lastSeenAt").doesNotExist());
+    }
+
+    @Test
+    void tellsTheScreenTheRunnerIsOnAndWhenItLastCalled() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        Instant seen = Instant.parse("2026-09-02T13:00:00Z");
+        when(runner.liveness()).thenReturn(new CodingRunnerService.Liveness(seen, true));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/runner-status")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.alive").value(true))
+                .andExpect(jsonPath("$.lastSeenAt").value("2026-09-02T13:00:00Z"));
+    }
 
     @Test
     void aGeneralAdministratorReadsThePlanAndTheReportButNeverTheCode() throws Exception {

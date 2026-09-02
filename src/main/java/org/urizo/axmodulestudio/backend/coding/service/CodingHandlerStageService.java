@@ -755,8 +755,20 @@ public final class CodingHandlerStageService {
             List<String> allowed = guardrailSelections.jobSnapshot(aggregate.jobId());
             if (allowed != null && !allowed.isEmpty()) {
                 ObjectNode guardrail = context.putObject("guardrail");
-                ArrayNode folders = guardrail.putArray("allowedFolders");
-                allowed.forEach(folders::add);
+                // The fence is shown as labels, not paths. planSummary is read by a general
+                // administrator, so a refusal must be worded in the administrator's own labels,
+                // and a model does not quote what it was never shown. The denied side is the
+                // fact that stops optimism: shown only the allowed folders, the analyst twice
+                // waved through requests by hoping their files lived inside one of them.
+                GuardrailPathSelectionService.JobAreas areas =
+                        guardrailSelections.jobAreas(aggregate.jobId());
+                ArrayNode allowedAreas = guardrail.putArray("allowedAreas");
+                // A snapshot taken before labels existed has none; the paths are then the only
+                // truthful names, and injecting nothing would read as "everything is refused".
+                (areas.allowed().isEmpty() ? allowed : areas.allowed())
+                        .forEach(allowedAreas::add);
+                ArrayNode deniedAreas = guardrail.putArray("deniedAreas");
+                areas.denied().forEach(deniedAreas::add);
                 guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
                     guardrail.put("allowNewDependency", rules.allowNewDependency());
                     guardrail.put("maxChangedFiles", rules.maxChangedFiles());
@@ -810,13 +822,18 @@ public final class CodingHandlerStageService {
                     // The early block the design asks of the analyst. The post-check on the
                     // finished candidate remains the authority; this only saves the coding
                     // stage's cost when the refusal is obvious from the request alone.
-                    + "When the context contains guardrail.allowedFolders, files may only be "
-                    + "changed inside those folders. Judge by the area the request names, and "
-                    + "do not assume the files it needs happen to live inside an allowed "
-                    + "folder: when the request is about an area whose folder is not listed, "
-                    + "it is outside. In that case answer port \"infeasible\" and explain in "
-                    + "planSummary, in the language of the request, which area is not "
-                    + "allowed. If it is genuinely unclear, proceed as feasible. ";
+                    + "When the context contains guardrail.allowedAreas, the request may only "
+                    + "change the work areas named there, and every area named in "
+                    + "guardrail.deniedAreas is recorded as not allowed. That record is a "
+                    + "fact, not a guess: do not assume the files such a request needs happen "
+                    + "to live inside an allowed area. Judge by the area the request names. "
+                    + "When it needs a denied area, or an area not listed as allowed, answer "
+                    + "port \"infeasible\" and explain in planSummary, in the language of the "
+                    + "request, naming the areas only by the guardrail labels. planSummary is "
+                    + "read by a non-developer: never mention folder paths, file names, or "
+                    + "technical vocabulary, and end by asking the reader to request a "
+                    + "guardrail change from the super administrator if the work is still "
+                    + "wanted. If it is genuinely unclear, proceed as feasible. ";
             case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
                     + "paragraph in the language of the request that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "

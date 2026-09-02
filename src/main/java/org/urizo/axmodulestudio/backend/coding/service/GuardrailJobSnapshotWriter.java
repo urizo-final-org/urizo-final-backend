@@ -39,24 +39,56 @@ public class GuardrailJobSnapshotWriter {
     /**
      * Writes the snapshot and returns the allowed paths it recorded.
      *
-     * <p>Only enabled paths are copied. A row stored as off and a path never stored mean the same
-     * thing, and keeping both shapes would invite them to be treated differently later.
+     * <p>As paths, only enabled rows are copied: a row stored as off and a path never stored mean
+     * the same thing to the file check, and keeping both shapes would invite them to be treated
+     * differently later. The labels are a different matter. The analyst refuses a request in the
+     * administrator's words, and a label on a row turned off is a recorded "not allowed" — the one
+     * fact that stops the analyst from hoping the files it needs happen to live inside an allowed
+     * folder. So both sides' labels are copied, while the off rows still contribute no path.
      */
     public List<String> capture(UUID jobId) {
         Objects.requireNonNull(jobId, "jobId is required");
-        List<String> allowed = jdbc.queryForList(
-                "SELECT repository || ':' || path FROM app.guardrail_path_selection "
-                        + "WHERE enabled ORDER BY repository, path",
-                String.class);
+        List<StoredSelection> stored = jdbc.query(
+                "SELECT repository, path, enabled, label FROM app.guardrail_path_selection "
+                        + "ORDER BY repository, path",
+                (row, index) -> new StoredSelection(
+                        row.getString("repository"), row.getString("path"),
+                        row.getBoolean("enabled"), row.getString("label")));
+        List<String> allowed = stored.stream()
+                .filter(StoredSelection::enabled)
+                .map(selection -> selection.repository() + ":" + selection.path())
+                .toList();
         ObjectNode snapshot = objectMapper.createObjectNode();
         ArrayNode allowedPaths = snapshot.putArray("allowedPaths");
         allowed.forEach(allowedPaths::add);
+        areas(snapshot, "allowedAreas", stored, true);
+        areas(snapshot, "deniedAreas", stored, false);
         snapshot.set("rules", rules());
         // The job request is replayable, so a repeated initialize must not rewrite the copy.
         jdbc.update("INSERT INTO app.guardrail_job_snapshot (job_id, snapshot_json) "
                         + "VALUES (?, ?::jsonb) ON CONFLICT (job_id) DO NOTHING",
                 jobId, snapshot.toString());
         return List.copyOf(allowed);
+    }
+
+    /** One stored guardrail row, as much of it as the snapshot needs. */
+    record StoredSelection(String repository, String path, boolean enabled, String label) {
+
+        /** The human name of the folder; the path is the only truthful fallback. */
+        String area() {
+            return label == null || label.isBlank() ? path : label;
+        }
+    }
+
+    /** The same label on several rows is one area, not a list that repeats itself. */
+    private static void areas(
+            ObjectNode snapshot, String field, List<StoredSelection> stored, boolean enabled) {
+        ArrayNode areas = snapshot.putArray(field);
+        stored.stream()
+                .filter(selection -> selection.enabled() == enabled)
+                .map(StoredSelection::area)
+                .distinct()
+                .forEach(areas::add);
     }
 
     /**

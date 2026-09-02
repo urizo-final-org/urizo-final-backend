@@ -4,12 +4,15 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -34,6 +37,34 @@ class GuardrailPathSelectionServiceTest {
 
     private static GuardrailSelectionContract.Selection on(String path) {
         return new GuardrailSelectionContract.Selection(path, true, null);
+    }
+
+    @Test
+    @DisplayName("스냅샷의 허용·거부 라벨을 그대로 읽어온다")
+    void readsBothAreaSidesFromTheSnapshot() {
+        UUID job = UUID.fromString("31313131-3131-4131-8131-313131313131");
+        when(jdbc.queryForList(contains("allowedAreas"), eq(String.class), eq(job)))
+                .thenReturn(List.of("CMS 기능"));
+        when(jdbc.queryForList(contains("deniedAreas"), eq(String.class), eq(job)))
+                .thenReturn(List.of("상태 점검", "외부 연동"));
+
+        GuardrailPathSelectionService.JobAreas areas = service.jobAreas(job);
+
+        assertThat(areas.allowed()).containsExactly("CMS 기능");
+        assertThat(areas.denied()).containsExactly("상태 점검", "외부 연동");
+    }
+
+    @Test
+    @DisplayName("라벨이 생기기 전의 스냅샷은 빈 목록이다. 전부 거부로 읽히면 안 된다")
+    void returnsEmptyAreasForASnapshotThatPredatesLabels() {
+        UUID job = UUID.fromString("32323232-3232-4232-8232-323232323232");
+        when(jdbc.queryForList(anyString(), eq(String.class), eq(job)))
+                .thenReturn(List.of());
+
+        GuardrailPathSelectionService.JobAreas areas = service.jobAreas(job);
+
+        assertThat(areas.allowed()).isEmpty();
+        assertThat(areas.denied()).isEmpty();
     }
 
     @Test

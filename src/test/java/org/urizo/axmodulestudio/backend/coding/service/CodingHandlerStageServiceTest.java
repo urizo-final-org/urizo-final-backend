@@ -308,6 +308,9 @@ class CodingHandlerStageServiceTest {
         GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
         when(selections.jobSnapshot(JOB)).thenReturn(List.of(
                 "backend:src/main/java/org/urizo/axmodulestudio/backend/cms"));
+        when(selections.jobAreas(JOB)).thenReturn(
+                new GuardrailPathSelectionService.JobAreas(
+                        List.of("CMS 기능"), List.of("상태 점검", "공통 기반")));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), profileModelBindings,
@@ -387,16 +390,22 @@ class CodingHandlerStageServiceTest {
         assertThat(payloadProperties.path("acceptanceCriteria").path("items").path("type").asText())
                 .isEqualTo("string");
 
-        // The design's early block: the analyst sees the fence and is told to answer
-        // infeasible when the request clearly needs work outside it. The post-check on the
-        // finished candidate stays the authority either way.
+        // The design's early block: the analyst sees the fence as labels and is told to answer
+        // infeasible when the request clearly needs work outside it. The denied side is shown
+        // too — without it the analyst hoped out-of-fence files lived inside an allowed folder.
+        // The post-check on the finished candidate stays the authority either way.
         String systemPrompt = structuredRequest.getValue().messages().get(0).path("content").asText();
-        assertThat(systemPrompt).contains("guardrail.allowedFolders");
+        assertThat(systemPrompt).contains("guardrail.allowedAreas");
+        assertThat(systemPrompt).contains("guardrail.deniedAreas");
         assertThat(systemPrompt).contains("\"infeasible\"");
+        assertThat(systemPrompt).contains("super administrator");
         String contextMessage = structuredRequest.getValue().messages().get(1).path("content").asText();
-        assertThat(contextMessage).contains("allowedFolders");
+        assertThat(contextMessage).contains("CMS 기능");
+        assertThat(contextMessage).contains("상태 점검");
+        // planSummary is read by a general administrator, so the analyst is never shown a path
+        // it could quote back.
         assertThat(contextMessage)
-                .contains("backend:src/main/java/org/urizo/axmodulestudio/backend/cms");
+                .doesNotContain("backend:src/main/java/org/urizo/axmodulestudio/backend/cms");
 
         // Prose alone carries no object to recover, so the stage still fails.
         when(gateway.chat(any())).thenReturn(assistantText("I could not decide."));

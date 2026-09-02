@@ -105,6 +105,27 @@ public class GuardrailPathSelectionService {
     }
 
     /**
+     * The labels of both sides of the job's fence, in the administrator's words.
+     *
+     * <p>Both lists are empty when the snapshot predates the labels, which the caller must not
+     * read as "everything is refused".
+     */
+    public record JobAreas(List<String> allowed, List<String> denied) { }
+
+    public JobAreas jobAreas(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        return new JobAreas(areaLabels(jobId, "allowedAreas"), areaLabels(jobId, "deniedAreas"));
+    }
+
+    private List<String> areaLabels(UUID jobId, String field) {
+        List<String> stored = jdbc.queryForList(
+                "SELECT jsonb_array_elements_text(snapshot_json -> '" + field + "') "
+                        + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
+                String.class, jobId);
+        return List.copyOf(stored);
+    }
+
+    /**
      * Rejects the whole save when any entry is unusable, rather than storing the part that passed.
      * A half-applied guardrail is worse than a refused one: nobody would know which half.
      */

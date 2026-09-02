@@ -42,6 +42,14 @@ public class CodingConsoleService {
     /** Fixed by compose.preview.yaml. Spring has no view of the host's published ports. */
     private static final String PREVIEW_URL = "http://127.0.0.1:18081/";
 
+    /**
+     * Fixed by the schema: ck_coding_pipeline_attempt_number allows 1..3, and
+     * CodingHandlerCommandService only opens a new attempt while the current one is below 3.
+     * {@code worker_max_attempts} counts something else entirely - how often a worker may retry
+     * a lease - and merely happens to default to the same number.
+     */
+    private static final int MAX_PIPELINE_ATTEMPTS = 3;
+
     private static final Map<String, String> STAGE_LABELS = Map.of(
             "coding.analyze", "요구사항 분석",
             "coding.code", "코드 작성",
@@ -90,7 +98,7 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobDetail detail(UUID jobId, AdminRole role) {
         List<JobRow> jobs = jdbc.query("""
                 SELECT cj.job_id, cj.trace_id, cj.status, cj.state_version, cj.graph_step,
-                       cj.base_sha, cj.worker_attempt, cj.worker_max_attempts,
+                       cj.base_sha,
                        cj.created_at, cj.finished_at, cjr.request_text
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
@@ -102,7 +110,6 @@ public class CodingConsoleService {
                         rs.getInt("state_version"),
                         rs.getString("graph_step"),
                         rs.getString("base_sha"),
-                        rs.getInt("worker_max_attempts"),
                         rs.getString("request_text"),
                         instant(rs, "created_at"),
                         instant(rs, "finished_at")),
@@ -127,7 +134,7 @@ public class CodingConsoleService {
                 job.status(),
                 stageLabel(job.graphStep()),
                 attempt,
-                job.maxAttempts(),
+                MAX_PIPELINE_ATTEMPTS,
                 plan(analysis),
                 report(review),
                 pendingApproval(job, jobId, attempt),
@@ -317,7 +324,6 @@ public class CodingConsoleService {
             int stateVersion,
             String graphStep,
             String baseSha,
-            int maxAttempts,
             String requestText,
             Instant createdAt,
             Instant finishedAt) { }

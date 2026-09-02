@@ -152,7 +152,7 @@ public class CodingConsoleService {
                 new CodingConsoleContract.PreviewLink(preview != null, preview == null ? null : PREVIEW_URL),
                 // Everything a general administrator must not read lives in this one object,
                 // and for them it is simply absent from the response.
-                role == AdminRole.SUPER_ADMIN ? technical(job, results, preview) : null,
+                role == AdminRole.SUPER_ADMIN ? technical(job, jobId, results, preview) : null,
                 job.createdAt(),
                 job.finishedAt());
     }
@@ -187,7 +187,7 @@ public class CodingConsoleService {
     }
 
     private CodingConsoleContract.Technical technical(
-            JobRow job, List<ResultRow> results, JsonNode preview) {
+            JobRow job, UUID jobId, List<ResultRow> results, JsonNode preview) {
         ResultRow candidate = results.stream()
                 .filter(row -> "coding.preview".equals(row.handlerKey()))
                 .findFirst()

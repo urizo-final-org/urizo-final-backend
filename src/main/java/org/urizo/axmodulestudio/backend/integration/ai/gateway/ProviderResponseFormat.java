@@ -27,7 +27,7 @@ public record ProviderResponseFormat(
             }
         }
         else {
-            JsonNode canonical = ProviderJsonSchema.validateAndCanonicalize(
+            JsonNode canonical = ProviderJsonSchema.validateStrictOutputAndCanonicalize(
                     Objects.requireNonNull(outputSchema, "outputSchema is required"));
             if (schemaDigest == null
                     || !ProviderJsonSchema.matchesDigest(canonical, schemaDigest)) {
@@ -43,7 +43,7 @@ public record ProviderResponseFormat(
     }
 
     public static ProviderResponseFormat jsonSchema(JsonNode outputSchema) {
-        JsonNode canonical = ProviderJsonSchema.validateAndCanonicalize(outputSchema);
+        JsonNode canonical = ProviderJsonSchema.validateStrictOutputAndCanonicalize(outputSchema);
         return new ProviderResponseFormat(
                 Type.JSON_SCHEMA, ProviderJsonSchema.digest(canonical), canonical);
     }

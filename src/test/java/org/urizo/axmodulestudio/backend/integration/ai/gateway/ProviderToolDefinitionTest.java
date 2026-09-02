@@ -65,6 +65,23 @@ class ProviderToolDefinitionTest {
     }
 
     @Test
+    void keepsOptionalToolInputFieldsIndependentFromStrictResponseFormats() {
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("query");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("query").put("type", "string");
+        properties.putObject("scope").put("type", "string");
+
+        ProviderToolDefinition definition = new ProviderToolDefinition(
+                "search_code", "Search approved source roots.", schema);
+
+        assertThat(definition.normalizeArguments("{\"query\":\"payload\"}"))
+                .isEqualTo("{\"query\":\"payload\"}");
+    }
+
+    @Test
     void normalizesArgumentsDeterministicallyAndRejectsMalformedOrUnknownFields() {
         ObjectNode schema = JsonNodeFactory.instance.objectNode();
         schema.put("type", "object").put("additionalProperties", false);

@@ -605,7 +605,11 @@ public final class CodingHandlerStageService {
         schema.putArray("required").add("port").add("payload");
         ObjectNode properties = schema.putObject("properties");
         properties.putObject("port").put("type", "string");
-        properties.putObject("payload").put("type", "object");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("summary");
+        payload.putObject("properties").putObject("summary").put("type", "string");
         return ProviderResponseFormat.jsonSchema(schema).requestContract();
     }
 
@@ -759,6 +763,10 @@ public final class CodingHandlerStageService {
                 + "and approved tools. When finished, return only JSON with exactly fields port "
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
                 + "synonym or rewording, and payload must be an object. "
+                + ("coding.analyze".equals(handlerKey)
+                    ? "For this analyze stage, payload must contain exactly the string field "
+                        + "summary. "
+                    : "")
                 + ("coding.code".equals(handlerKey)
                     ? "Use read_diff before any diff-bound tool and again after the final change. "
                     // Without the second sentence the model reads "no apply_patch here"

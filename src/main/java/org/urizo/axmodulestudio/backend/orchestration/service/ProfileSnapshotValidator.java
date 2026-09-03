@@ -24,12 +24,19 @@ final class ProfileSnapshotValidator {
     private static final Set<String> EXECUTION_FIELDS = Set.of(
             "jobId", "pipelineAttempt", "executionAttempt", "stateVersion",
             "workspaceId", "toolCallId", "traceId");
+    private static final Set<String> LEGACY_AUTHORING_FIELDS = Set.of(
+            "nodes", "edges", "config", "modelBindings", "toolPolicy",
+            "guardrailProfileKey");
     private static final Set<String> AUTHORING_FIELDS = Set.of(
+            "nodes", "edges", "config", "modelBindings", "toolBindings", "toolPolicy",
+            "guardrailProfileKey");
+    private static final Set<String> LEGACY_SNAPSHOT_FIELDS = Set.of(
+            "contractVersion", "profileVersionId", "profileKey", "profileVersion",
             "nodes", "edges", "config", "modelBindings", "toolPolicy",
             "guardrailProfileKey");
     private static final Set<String> SNAPSHOT_FIELDS = Set.of(
             "contractVersion", "profileVersionId", "profileKey", "profileVersion",
-            "nodes", "edges", "config", "modelBindings", "toolPolicy",
+            "nodes", "edges", "config", "modelBindings", "toolBindings", "toolPolicy",
             "guardrailProfileKey");
     private static final Pattern NODE_ID = Pattern.compile("^[a-z][a-z0-9_-]{0,63}$");
     private static final Pattern HANDLER_KEY = Pattern.compile(
@@ -85,34 +92,56 @@ final class ProfileSnapshotValidator {
     private ProfileSnapshotValidator() { }
 
     static void validateAuthoring(String profileKey, JsonNode authoringSnapshot) {
+        validateAuthoring(profileKey, authoringSnapshot, true);
+    }
+
+    static void validateLegacyDefault(String profileKey, JsonNode authoringSnapshot) {
+        validateAuthoring(profileKey, authoringSnapshot, false);
+    }
+
+    private static void validateAuthoring(
+            String profileKey, JsonNode authoringSnapshot, boolean requireToolBindings) {
         requireProfileKey(profileKey);
         ObjectNode authoring = object(authoringSnapshot, "snapshot");
-        exactFields(authoring, AUTHORING_FIELDS, "snapshot");
+        exactFields(authoring,
+                requireToolBindings || authoring.has("toolBindings")
+                        ? AUTHORING_FIELDS : LEGACY_AUTHORING_FIELDS,
+                "snapshot");
 
         ObjectNode full = JsonNodeFactory.instance.objectNode();
         full.put("contractVersion", "1.0");
         full.put("profileVersionId", "11111111-1111-4111-8111-111111111111");
         full.put("profileKey", profileKey);
         full.put("profileVersion", 1);
-        for (String field : AUTHORING_FIELDS) {
+        for (String field : fields(authoring)) {
             full.set(field, authoring.get(field).deepCopy());
         }
-        validate(full, UUID.fromString(full.path("profileVersionId").asText()), profileKey, 1);
+        validate(full, UUID.fromString(full.path("profileVersionId").asText()), profileKey, 1,
+                requireToolBindings);
     }
 
     static void validateStored(
             UUID profileVersionId, String profileKey, int profileVersion, JsonNode snapshot) {
-        validate(snapshot, profileVersionId, profileKey, profileVersion);
+        validate(snapshot, profileVersionId, profileKey, profileVersion, false);
+    }
+
+    static void validateForActivation(
+            UUID profileVersionId, String profileKey, int profileVersion, JsonNode snapshot) {
+        validate(snapshot, profileVersionId, profileKey, profileVersion, true);
     }
 
     private static void validate(
             JsonNode raw,
             UUID expectedProfileVersionId,
             String expectedProfileKey,
-            int expectedProfileVersion) {
+            int expectedProfileVersion,
+            boolean requireToolBindings) {
         requireProfileKey(expectedProfileKey);
         ObjectNode snapshot = object(raw, "snapshot");
-        exactFields(snapshot, SNAPSHOT_FIELDS, "snapshot");
+        exactFields(snapshot,
+                requireToolBindings || snapshot.has("toolBindings")
+                        ? SNAPSHOT_FIELDS : LEGACY_SNAPSHOT_FIELDS,
+                "snapshot");
         if (!"1.0".equals(text(snapshot.get("contractVersion"), "snapshot.contractVersion"))) {
             invalid("snapshot.contractVersion is unsupported");
         }
@@ -142,7 +171,26 @@ final class ProfileSnapshotValidator {
                 "snapshot.guardrailProfileKey"))) {
             invalid("snapshot.guardrailProfileKey is not supported by this runtime");
         }
+        ProfileToolBindingPolicy toolBindings = decodeToolBindings(snapshot, expectedProfileKey);
+        if (requireToolBindings && toolBindings.legacy()) {
+            invalid("snapshot.toolBindings is required for new or activated Profile Versions");
+        }
         validateGraph(nodes, edges, config, modelBindings);
+        if (!toolBindings.legacy()) {
+            validateToolBindings(nodes, toolBindings, expectedProfileKey);
+            validateSemanticTopology(nodes, edges, expectedProfileKey);
+        }
+    }
+
+    private static ProfileToolBindingPolicy decodeToolBindings(
+            JsonNode snapshot, String profileKey) {
+        try {
+            return ProfileToolBindingPolicy.decode(snapshot, TOOLS.get(profileKey));
+        }
+        catch (IllegalArgumentException failure) {
+            invalid("snapshot.toolBindings is invalid");
+            throw failure;
+        }
     }
 
     private static void validateModelBindings(ObjectNode bindings, String profileKey) {
@@ -189,6 +237,216 @@ final class ProfileSnapshotValidator {
         if (!TOOLS.get(profileKey).containsAll(allowed)) {
             invalid("snapshot.toolPolicy contains an unregistered Tool");
         }
+    }
+
+    private static void validateToolBindings(
+            List<Node> nodes,
+            ProfileToolBindingPolicy policy,
+            String profileKey) {
+        Map<String, Map<String, ProfileToolBindingPolicy.Mode>> expected = new HashMap<>();
+        if ("LLM_OPS".equals(profileKey)) {
+            Node code = requiredNode(nodes, "coding.code", null);
+            Node review = requiredNode(nodes, "coding.review", null);
+            Node preview = requiredNode(nodes, "coding.preview", null);
+            expected.put(code.id(), modes(
+                    ProfileToolBindingPolicy.Mode.MODEL_OPTIONAL,
+                    "read_file", "search_code", "read_diff", "apply_patch", "run_check",
+                    "check_package_allowlist", "scan_changed_files"));
+            expected.put(review.id(), modes(
+                    ProfileToolBindingPolicy.Mode.MODEL_OPTIONAL,
+                    "read_file", "search_code", "read_diff", "run_check",
+                    "check_package_allowlist", "scan_changed_files"));
+            expected.put(preview.id(), modes(
+                    ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED,
+                    "read_diff", "run_check", "check_package_allowlist",
+                    "scan_changed_files"));
+        }
+        else {
+            Node preview = requiredNode(nodes, "cms.preview", null);
+            Node discard = requiredNode(nodes, "cms.discard", null);
+            Node apply = requiredNode(nodes, "cms.apply", null);
+            expected.put(preview.id(), Map.of(
+                    "validate_cms_command", ProfileToolBindingPolicy.Mode.MODEL_REQUIRED,
+                    "resolve_cms_target", ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED,
+                    "create_cms_preview", ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED));
+            expected.put(discard.id(), Map.of(
+                    "discard_cms_preview", ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED));
+            expected.put(apply.id(), Map.of(
+                    "revalidate_cms_preview", ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED,
+                    "apply_cms_preview", ProfileToolBindingPolicy.Mode.SYSTEM_REQUIRED));
+        }
+        if ("LLM_OPS".equals(profileKey)) {
+            if (!expected.keySet().containsAll(policy.bindings().keySet())) {
+                invalid("snapshot.toolBindings contains an unsupported node binding");
+            }
+            policy.bindings().forEach((nodeId, bindings) -> {
+                if (!expected.get(nodeId).entrySet().containsAll(bindings.entrySet())) {
+                    invalid("snapshot.toolBindings contains an unsupported Coding Tool binding");
+                }
+            });
+            Node preview = requiredNode(nodes, "coding.preview", null);
+            if (!expected.get(preview.id()).equals(
+                    policy.bindings().getOrDefault(preview.id(), Map.of()))) {
+                invalid("snapshot.toolBindings is missing a required Coding system Tool");
+            }
+        }
+        else if (!policy.bindings().equals(expected)) {
+            invalid("snapshot.toolBindings does not match the required Profile Tool bindings");
+        }
+    }
+
+    private static Map<String, ProfileToolBindingPolicy.Mode> modes(
+            ProfileToolBindingPolicy.Mode mode, String... tools) {
+        Map<String, ProfileToolBindingPolicy.Mode> result = new HashMap<>();
+        for (String tool : tools) result.put(tool, mode);
+        return Map.copyOf(result);
+    }
+
+    private static void validateSemanticTopology(
+            List<Node> nodes, List<Edge> edges, String profileKey) {
+        Map<String, Node> byId = new HashMap<>();
+        nodes.forEach(node -> byId.put(node.id(), node));
+        Node start = nodes.stream().filter(node -> "start".equals(node.type()))
+                .findFirst().orElseThrow();
+        Map<String, Set<String>> adjacency = emptyAdjacency(byId.keySet());
+        for (Edge edge : edges) adjacency.get(edge.from()).add(edge.to());
+
+        if ("LLM_OPS".equals(profileKey)) {
+            Node analyze = requiredNode(nodes, "coding.analyze", null);
+            Node scopeApproval = requiredNode(nodes, "coding.approval", "SCOPE");
+            Node code = requiredNode(nodes, "coding.code", null);
+            Node review = requiredNode(nodes, "coding.review", null);
+            Node preview = requiredNode(nodes, "coding.preview", null);
+            Node changeApproval = requiredNode(nodes, "coding.preview_approval", "CANDIDATE");
+            Node prRequest = requiredNode(nodes, "coding.pr_request", null);
+            Node githubApproval = requiredNode(nodes, "coding.approval", "GITHUB");
+            Node prComplete = requiredNode(nodes, "coding.pr_complete", null);
+            Node deployRequest = requiredNode(nodes, "coding.deploy_request", null);
+            Node deployApproval = requiredNode(nodes, "coding.approval", "DEPLOY");
+            Node mergeCheck = requiredNode(nodes, "coding.dev_merge_check", null);
+            Node deploy = requiredNode(nodes, "coding.deploy", null);
+            if (nodes.stream().filter(node -> "coding.approval".equals(node.handlerKey())).count()
+                    != 3) {
+                invalid("LLM_OPS contains a duplicate or unsupported approval stage");
+            }
+            requirePrecedence(start, adjacency, List.of(
+                    analyze, scopeApproval, code, review, preview, changeApproval,
+                    prRequest, githubApproval, prComplete, deployRequest,
+                    deployApproval, mergeCheck, deploy));
+            requirePortLeadsTo(scopeApproval, "approved", code, byId, edges);
+            requirePortLeadsTo(changeApproval, "approved", prRequest, byId, edges);
+            requirePortCannotBypass(changeApproval, "rejected", prRequest, byId, edges);
+            requirePortLeadsTo(githubApproval, "approved", prComplete, byId, edges);
+            requirePortLeadsTo(deployApproval, "approved", mergeCheck, byId, edges);
+        }
+        else {
+            Node analyze = requiredNode(nodes, "cms.analyze", null);
+            Node preview = requiredNode(nodes, "cms.preview", null);
+            Node approval = requiredNode(nodes, "cms.approval", "PREVIEW");
+            Node apply = requiredNode(nodes, "cms.apply", null);
+            Node discard = requiredNode(nodes, "cms.discard", null);
+            requirePrecedence(start, adjacency, List.of(analyze, preview, approval));
+            requireDominates(start, approval, apply, adjacency);
+            requireDominates(start, approval, discard, adjacency);
+            requirePortLeadsTo(approval, "approved", apply, byId, edges);
+            requirePortCannotBypass(approval, "approved", discard, byId, edges);
+            requirePortLeadsTo(approval, "rejected", discard, byId, edges);
+            requirePortCannotBypass(approval, "rejected", apply, byId, edges);
+        }
+    }
+
+    private static Node requiredNode(
+            List<Node> nodes, String handlerKey, String approvalStage) {
+        List<Node> matches = nodes.stream()
+                .filter(node -> handlerKey.equals(node.handlerKey()))
+                .filter(node -> approvalStage == null
+                        || approvalStage.equals(node.config().path("stage").asText()))
+                .toList();
+        if (matches.size() != 1) {
+            invalid("snapshot requires exactly one " + handlerKey
+                    + (approvalStage == null ? "" : " stage " + approvalStage));
+        }
+        return matches.get(0);
+    }
+
+    private static void requirePrecedence(
+            Node start, Map<String, Set<String>> adjacency, List<Node> stages) {
+        for (int index = 1; index < stages.size(); index++) {
+            requireDominates(start, stages.get(index - 1), stages.get(index), adjacency);
+        }
+    }
+
+    private static void requireDominates(
+            Node start,
+            Node required,
+            Node protectedNode,
+            Map<String, Set<String>> adjacency) {
+        Map<String, Set<String>> withoutRequired = withoutNode(adjacency, required.id());
+        if (reachable(start.id(), withoutRequired).contains(protectedNode.id())) {
+            invalid(required.handlerKey() + " must precede " + protectedNode.handlerKey()
+                    + " on every path");
+        }
+    }
+
+    private static void requirePortLeadsTo(
+            Node source,
+            String resultPort,
+            Node requiredTarget,
+            Map<String, Node> byId,
+            List<Edge> edges) {
+        String target = routeTarget(source, resultPort, edges);
+        Map<String, Set<String>> adjacency = adjacencyWithoutNode(byId.keySet(), edges, source.id());
+        if (!reachable(target, adjacency).contains(requiredTarget.id())) {
+            invalid(source.handlerKey() + "." + resultPort
+                    + " must lead to " + requiredTarget.handlerKey());
+        }
+    }
+
+    private static void requirePortCannotBypass(
+            Node source,
+            String resultPort,
+            Node protectedNode,
+            Map<String, Node> byId,
+            List<Edge> edges) {
+        String target = routeTarget(source, resultPort, edges);
+        Map<String, Set<String>> adjacency = adjacencyWithoutNode(byId.keySet(), edges, source.id());
+        if (reachable(target, adjacency).contains(protectedNode.id())) {
+            invalid(source.handlerKey() + "." + resultPort
+                    + " bypasses its approval decision");
+        }
+    }
+
+    private static String routeTarget(Node source, String resultPort, List<Edge> edges) {
+        return edges.stream()
+                .filter(edge -> source.id().equals(edge.from())
+                        && resultPort.equals(edge.resultPort()))
+                .map(Edge::to)
+                .findFirst()
+                .orElseThrow(() -> new IllegalStateException("validated result route is missing"));
+    }
+
+    private static Map<String, Set<String>> adjacencyWithoutNode(
+            Set<String> nodeIds, List<Edge> edges, String excludedNode) {
+        Map<String, Set<String>> adjacency = emptyAdjacency(nodeIds);
+        for (Edge edge : edges) {
+            if (!excludedNode.equals(edge.from()) && !excludedNode.equals(edge.to())) {
+                adjacency.get(edge.from()).add(edge.to());
+            }
+        }
+        return adjacency;
+    }
+
+    private static Map<String, Set<String>> withoutNode(
+            Map<String, Set<String>> adjacency, String excludedNode) {
+        Map<String, Set<String>> result = emptyAdjacency(adjacency.keySet());
+        adjacency.forEach((source, targets) -> {
+            if (!excludedNode.equals(source)) {
+                for (String target : targets) {
+                    if (!excludedNode.equals(target)) result.get(source).add(target);
+                }
+            }
+        });
+        return result;
     }
 
     private static List<Node> nodes(JsonNode raw, String profileKey) {

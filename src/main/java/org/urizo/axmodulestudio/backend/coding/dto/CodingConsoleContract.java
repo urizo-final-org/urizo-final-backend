@@ -42,7 +42,13 @@ public final class CodingConsoleContract {
              * ends normally, so the job status is COMPLETED - which reads as "done" to the
              * person who was actually turned down. The screen needs this to say otherwise.
              */
-            boolean refused) { }
+            boolean refused,
+            /**
+             * The model used up its rework rounds and the request was handed to a person. That
+             * also ends the pipeline normally and also reads as "done", for the same reason and
+             * with the same consequence: nobody picks up work they were told had finished.
+             */
+            boolean handedOver) { }
 
     /** The list endpoint's envelope. */
     public record JobList(

@@ -70,14 +70,20 @@ public class CodingConsoleService {
                 SELECT cj.job_id, cj.status, cjr.request_text, cj.created_at, cj.finished_at,
                        cj.failure_code, cj.repository_id,
                        COALESCE(latest.handler_key, cj.graph_step) AS stage,
-                       COALESCE(refusal.refused, FALSE) AS refused
+                       COALESCE(refusal.refused, FALSE) AS refused,
+                       -- A review that asks for rework is always followed by another coding
+                       -- round, unless there were none left. So a finished Job whose newest
+                       -- word is "changes requested" is one the model gave up on.
+                       (cj.finished_at IS NOT NULL
+                            AND latest.handler_key = 'coding.review'
+                            AND latest.result_port = 'changes_requested') AS handed_over
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
                 -- graph_step stops at the node the Job entered, not the one it reached, so a
                 -- finished pipeline still reports 'analyze'. The newest recorded result is the
                 -- only honest answer to "where is this now".
                 LEFT JOIN LATERAL (
-                    SELECT chr.handler_key
+                    SELECT chr.handler_key, chr.result_port
                     FROM app.coding_handler_result chr
                     WHERE chr.job_id = cj.job_id
                     ORDER BY chr.recorded_at DESC, chr.result_id DESC
@@ -105,7 +111,8 @@ public class CodingConsoleService {
                         instant(rs, "created_at"),
                         instant(rs, "finished_at"),
                         rs.getString("failure_code"),
-                        rs.getBoolean("refused")),
+                        rs.getBoolean("refused"),
+                        rs.getBoolean("handed_over")),
                 limit);
         return new CodingConsoleContract.JobList("1.0", items);
     }

@@ -38,6 +38,9 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefin
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public class CodingModelTurnService {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingModelTurnService.class);
+
     private static final Set<String> CHAT_ONLY = Set.of("CHAT");
     private static final Set<String> CHAT_WITH_TOOLS = Set.of("CHAT", "TOOL_CALLING");
     private static final String LOCAL_TOOL_NAME = "read_file";
@@ -109,6 +112,11 @@ public class CodingModelTurnService {
                 return executeSelected(request, toolMode, selected);
             }
             catch (ProviderGatewayException failure) {
+                // The only place this reason survives. The stored turn keeps the code alone,
+                // and the code is shared by every way a provider answer can be refused, so
+                // without this line a failed run cannot be diagnosed at all.
+                LOG.warn("Coding model turn refused: model={} code={} reason={}",
+                        selected.modelId(), failure.code(), failure.getMessage());
                 lastFailure = failure;
                 if (!fallbackEligible(failure.code())) {
                     throw failure;
@@ -176,17 +184,31 @@ public class CodingModelTurnService {
                 providerTools,
                 responseFormat,
                 request.deadlineAt()));
+        // Which of the four it was. They share one failure code, and the stored turn keeps
+        // only that code, so a run that dies here leaves nothing to read. Measured
+        // 2026-09-03: three providers failed on this code and none of them could be told
+        // apart from the record.
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
                 || providerResponse.content().length() > 200_000
                 || providerResponse.inputTokens() > Integer.MAX_VALUE - providerResponse.outputTokens()) {
             throw new ProviderGatewayException(
                     ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
-                    "Model provider returned an invalid normalized response.");
+                    "Model provider returned an invalid normalized response: "
+                            + "provider=" + providerResponse.provider()
+                            + " expected=" + selected.provider()
+                            + " modelId=" + providerResponse.modelId()
+                            + " expectedModelId=" + selected.modelId()
+                            + " contentLength=" + providerResponse.content().length()
+                            + " inputTokens=" + providerResponse.inputTokens()
+                            + " outputTokens=" + providerResponse.outputTokens());
         }
         int totalTokens = providerResponse.inputTokens() + providerResponse.outputTokens();
         if (toolMode != ToolMode.PROVIDER && !providerResponse.toolCalls().isEmpty()) {
-            throw invalidProviderResponse();
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                    "Model provider returned tool calls in " + toolMode + " tool mode: "
+                            + providerResponse.toolCalls().size());
         }
         List<CodingModelTurnContract.ToolCall> nativeCalls = toolMode == ToolMode.PROVIDER
                 ? nativeToolCalls(providerResponse, providerTools)

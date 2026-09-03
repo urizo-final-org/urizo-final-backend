@@ -79,19 +79,19 @@ public class CodingConsoleController {
      * server-minted key still protects the single submission it is sent with.
      */
     @PostMapping
-    ResponseEntity<CodingHandlerContract.CreateCodingJobResponse> create(
+    ResponseEntity<CodingConsoleContract.CreateJobOutcome> create(
             @RequestBody CodingConsoleContract.CreateJobRequest body,
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             Authentication authentication,
             HttpServletRequest request) {
         String key = idempotencyKey == null || idempotencyKey.isBlank()
                 ? UUID.randomUUID().toString() : idempotencyKey;
-        CodingHandlerContract.CreateCodingJobResponse response = intake.create(
+        CodingConsoleContract.CreateJobOutcome outcome = intake.create(
                 actor(authentication), traceId(request), key, body);
         return ResponseEntity.status(HttpStatus.CREATED)
                 .header(HttpHeaders.LOCATION,
-                        "/api/admin/coding/jobs/" + response.job().jobId())
-                .body(response);
+                        "/api/admin/coding/jobs/" + outcome.created().job().jobId())
+                .body(outcome);
     }
 
     @GetMapping

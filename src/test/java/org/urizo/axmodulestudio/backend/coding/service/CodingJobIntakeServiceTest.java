@@ -21,10 +21,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.beans.factory.ObjectProvider;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminRole;
 import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
 
@@ -46,10 +48,15 @@ class CodingJobIntakeServiceTest {
     private final ProfileVersionRepository profiles = mock(ProfileVersionRepository.class);
     private final GuardrailPathSelectionService guardrail =
             mock(GuardrailPathSelectionService.class);
+    private final CodingModelTurnService turns = mock(CodingModelTurnService.class);
+    @SuppressWarnings("unchecked")
+    private final ObjectProvider<CodingModelTurnService> turnProvider =
+            mock(ObjectProvider.class);
 
     private CodingJobIntakeService service() {
         return new CodingJobIntakeService(
-                commands, runner, profiles, guardrail, mapper, Clock.fixed(NOW, ZoneOffset.UTC),
+                commands, runner, profiles, guardrail, turnProvider, mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC),
                 // A real wait would make the suite sleep; the polling itself is not what is
                 // under test, only what happens at each outcome.
                 3, Duration.ofMillis(1));
@@ -195,6 +202,93 @@ class CodingJobIntakeServiceTest {
      * repository the file list it is handed is empty, and the label list alone did not stop it -
      * so the whole pipeline ran to reach a verdict that was already decided at the request.
      */
+    /** A structured classifier answer, as the turn service would hand it back. */
+    private void classifierAnswers(String target, String firstText, String secondText) {
+        when(turnProvider.getIfAvailable()).thenReturn(turns);
+        ObjectNode verdict = mapper.createObjectNode()
+                .put("target", target)
+                .put("firstText", firstText)
+                .put("secondText", secondText);
+        when(turns.executeNaturalCms(any())).thenReturn(new CodingModelTurnContract.Response(
+                "1.0", JOB, JOB, TRACE, "coding-intake.test-key",
+                new CodingModelTurnContract.Assistant("assistant", ""),
+                List.of(),
+                new CodingModelTurnContract.JsonSchemaResponseFormat(
+                        "JSON_SCHEMA", "sha256:" + "a".repeat(64), verdict),
+                new CodingModelTurnContract.SelectedModel("OPENAI", "test-model"),
+                new CodingModelTurnContract.TokenUsage(1, 1, 2),
+                10L, "STOP", NOW));
+    }
+
+    /**
+     * The screen stopped asking which side the sentence is about, because the writer cannot
+     * know. An empty repository is the server's cue to read the sentence itself.
+     */
+    @Test
+    void classifiesABlankRepositoryAndRunsTheJobOnTheAnsweredSide() {
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        classifierAnswers("screen", "", "");
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        CodingConsoleContract.CreateJobOutcome outcome =
+                service().create(actor(), TRACE, "key-1", request(null));
+
+        assertThat(outcome.split()).isNull();
+        ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
+                ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
+        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        assertThat(sent.getValue().repositoryId())
+                .isEqualTo(CodingRepositories.identifierOf("frontend"));
+    }
+
+    /**
+     * A both-sides sentence starts its data half at once rather than asking the requester to
+     * confirm a split they cannot judge. The split rides back so the screen can say - in the
+     * classifier's phrasing of the requester's own words - what runs now and what follows.
+     */
+    @Test
+    void aBothSidesSentenceStartsTheDataHalfAndReturnsBothParts() {
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        classifierAnswers("both", "회원 목록에 가입일 정보가 담기게 해줘", "목록 화면에 가입일 칸을 보이게 해줘");
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        CodingConsoleContract.CreateJobOutcome outcome =
+                service().create(actor(), TRACE, "key-1", request(null));
+
+        assertThat(outcome.split()).isNotNull();
+        assertThat(outcome.split().firstText()).contains("담기게");
+        assertThat(outcome.split().secondText()).contains("보이게");
+        ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
+                ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
+        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        assertThat(sent.getValue().repositoryId())
+                .isEqualTo(CodingRepositories.identifierOf("backend"));
+        assertThat(sent.getValue().requestText()).isEqualTo("회원 목록에 가입일 정보가 담기게 해줘");
+    }
+
+    /** Guessing a side would burn a whole run discovering the guess; failing is honest. */
+    @Test
+    void anUnavailableClassifierFailsTheSubmissionInsteadOfGuessing() {
+        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request(null)))
+                .isInstanceOf(CodingJobLifecycleException.class)
+                .hasMessageContaining("AI 통로");
+        verify(runner, never()).enqueue(any(), any());
+    }
+
+    /** The second leg of a split arrives with the repository decided; no model is asked. */
+    @Test
+    void anExplicitRepositoryNeverAsksTheClassifier() {
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", request("backend"));
+
+        verify(turns, never()).executeNaturalCms(any());
+    }
+
     @Test
     void refusesARequestIntoARepositoryTheFenceLeavesClosed() {
         when(guardrail.closedTo("frontend")).thenReturn(true);

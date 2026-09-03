@@ -282,8 +282,40 @@ public final class CodingConsoleContract {
             boolean stale,
             String currentDevSha) { }
 
-    /** The request a general administrator actually types. Everything else the server fills in. */
+    /**
+     * The request a general administrator actually types. Everything else the server fills in.
+     *
+     * <p>{@code repository} is no longer asked of the person - a sentence like "가입일도 보이게
+     * 해줘" has no answer they could know, since it needs both sides. Left empty, the server
+     * classifies. The field stays because the screen itself sends it on the second leg of a
+     * split, where the answer is already decided.
+     */
     public record CreateJobRequest(
             String repository,
             String requestText) { }
+
+    /**
+     * What submitting a request comes back with. {@code created} is always the Job that was
+     * started; {@code split} is present only when the sentence needed both sides.
+     *
+     * <p>A both-sides request is not refused and not confirmed - the person cannot judge the
+     * split, so asking them to would be one more unanswerable question. The data half simply
+     * starts, and {@code split} tells the screen what is happening in the requester's own
+     * words: which part is running now, and which part follows when it is done. The plan
+     * approval stays the place where a person says no.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record CreateJobOutcome(
+            String schemaVersion,
+            CodingHandlerContract.CreateCodingJobResponse created,
+            SplitPlan split) { }
+
+    /**
+     * The two parts of a both-sides request, phrased by the classifier from the requester's
+     * own sentence - never in system words. The data part runs first: a screen drawing a value
+     * the server does not send yet reads as a failure to the person previewing it.
+     */
+    public record SplitPlan(
+            String firstText,
+            String secondText) { }
 }

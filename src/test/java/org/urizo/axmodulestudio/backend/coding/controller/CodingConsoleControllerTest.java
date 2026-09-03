@@ -307,7 +307,8 @@ class CodingConsoleControllerTest {
     @Test
     void aRequestCarriesOnlyTheRepositoryAndTheKoreanTextTheAdministratorTyped() throws Exception {
         authenticate(AdminRole.GENERAL_ADMIN);
-        when(intake.create(any(), any(), any(), any())).thenReturn(created());
+        when(intake.create(any(), any(), any(), any())).thenReturn(
+                new CodingConsoleContract.CreateJobOutcome("1.0", created(), null));
 
         mockMvc.perform(post("/api/admin/coding/jobs")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN)

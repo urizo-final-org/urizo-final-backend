@@ -14,6 +14,8 @@ import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
@@ -21,6 +23,9 @@ import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
 
 /**
@@ -48,6 +53,15 @@ public class CodingJobIntakeService {
     private static final String PROMPT_VERSION = "coding-plan-v1";
     private static final Duration JOB_LIFETIME = Duration.ofHours(1);
     private static final int MAX_REQUEST_CHARACTERS = 10_000;
+    private static final Duration CLASSIFY_DEADLINE = Duration.ofSeconds(30);
+
+    /**
+     * The classifier's whole instruction. firstText/secondText are shown to the requester and
+     * become the two Jobs' request sentences, so they are written in the requester's register -
+     * a wrong word here surfaces on the screen verbatim.
+     */
+    private static final String CLASSIFY_PROMPT = """
+            당신은 CMS 개발 요청의 접수 분류기입니다. 요청 문장을 읽고 다음 중 하나로만             판정합니다. server: 저장되는 값, 목록·조회 응답에 담기는 내용, 계산·검증 규칙 등             눈에 보이지 않는 동작을 바꾸는 요청. screen: 화면에 보이는 칸·순서·제목·문구·배치 등             이미 내려오는 내용을 보여주는 방식만 바꾸는 요청. both: 화면에 새로 보여야 하는 값이             있는데 그 값을 내려주는 동작도 함께 만들어야 하는 요청. 확신이 없으면 both 가 아니라             더 그럴듯한 한쪽을 고릅니다. both 일 때만 firstText 에 값을 준비하는 일을,             secondText 에 화면에 보여주는 일을 각각 요청자가 쓴 말투 그대로 한 문장씩 씁니다.             개발 용어, 파일명, 저장소 이름을 절대 쓰지 않습니다. both 가 아니면 firstText 와             secondText 는 빈 문자열로 둡니다.""";
 
     /**
      * All three, including STRUCTURED_OUTPUT. A Job that omits it is accepted and then refused
@@ -75,6 +89,9 @@ public class CodingJobIntakeService {
      * seconds and cannot depend on time appearing to pass.
      */
     private final GuardrailPathSelectionService guardrailSelections;
+    // A provider rather than the service itself: the model-turn bridge rides its own switch
+    // (ax.coding.model-turn-bridge), and an app booted without it must still boot.
+    private final ObjectProvider<CodingModelTurnService> modelTurns;
     private final int maxShaPolls;
     private final Duration shaPollInterval;
 
@@ -95,10 +112,11 @@ public class CodingJobIntakeService {
             CodingRunnerService runner,
             ProfileVersionRepository profileVersions,
             GuardrailPathSelectionService guardrailSelections,
+            ObjectProvider<CodingModelTurnService> modelTurns,
             ObjectMapper objectMapper,
             Clock clock) {
-        this(commands, runner, profileVersions, guardrailSelections, objectMapper, clock,
-                60, Duration.ofMillis(500));
+        this(commands, runner, profileVersions, guardrailSelections, modelTurns, objectMapper,
+                clock, 60, Duration.ofMillis(500));
     }
 
     CodingJobIntakeService(
@@ -106,6 +124,7 @@ public class CodingJobIntakeService {
             CodingRunnerService runner,
             ProfileVersionRepository profileVersions,
             GuardrailPathSelectionService guardrailSelections,
+            ObjectProvider<CodingModelTurnService> modelTurns,
             ObjectMapper objectMapper,
             Clock clock,
             int maxShaPolls,
@@ -116,13 +135,14 @@ public class CodingJobIntakeService {
                 profileVersions, "profileVersions are required");
         this.guardrailSelections = Objects.requireNonNull(
                 guardrailSelections, "guardrailSelections are required");
+        this.modelTurns = Objects.requireNonNull(modelTurns, "modelTurns are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.maxShaPolls = maxShaPolls;
         this.shaPollInterval = shaPollInterval;
     }
 
-    public CodingHandlerContract.CreateCodingJobResponse create(
+    public CodingConsoleContract.CreateJobOutcome create(
             AuthenticatedActor actor,
             UUID traceId,
             String idempotencyKey,
@@ -130,7 +150,32 @@ public class CodingJobIntakeService {
         String repository = body == null ? null : body.repository();
         String requestText = body == null || body.requestText() == null
                 ? null : body.requestText().strip();
+        if (requestText == null || requestText.isEmpty()) {
+            throw failure("CODING_REQUEST_TEXT_REQUIRED",
+                    "요청 내용을 입력해 주세요.", HttpStatus.BAD_REQUEST);
+        }
+        if (requestText.length() > MAX_REQUEST_CHARACTERS) {
+            throw failure("CODING_REQUEST_TEXT_TOO_LONG",
+                    "요청 내용이 너무 깁니다.", HttpStatus.BAD_REQUEST);
+        }
 
+        // The screen no longer asks which side the sentence is about - "가입일도 보이게 해줘"
+        // has no answer the writer could know, since it needs both. An empty repository means
+        // "read the sentence". The field still arrives filled on the second leg of a split,
+        // where the answer was decided by the classifier on the first.
+        CodingConsoleContract.SplitPlan split = null;
+        if (repository == null || repository.isBlank()) {
+            Classification verdict = classify(traceId, idempotencyKey, requestText);
+            repository = verdict.repository();
+            if (verdict.split() != null) {
+                // Not confirmed with the requester: they cannot judge the split, and the plan
+                // approval remains the place to say no. The data part simply starts, and the
+                // screen is told - in the classifier's phrasing of the requester's own words -
+                // what runs now and what follows.
+                split = verdict.split();
+                requestText = split.firstText();
+            }
+        }
         if (!CodingRepositories.isKnown(repository)) {
             // The name decides which checkout the runner prepares and which services the build
             // stage names, so an unknown one has to stop here: every later stage would ask for
@@ -150,15 +195,6 @@ public class CodingJobIntakeService {
                             + "최고관리자에게 울타리 설정을 요청해 주세요.",
                     HttpStatus.CONFLICT);
         }
-        if (requestText == null || requestText.isEmpty()) {
-            throw failure("CODING_REQUEST_TEXT_REQUIRED",
-                    "요청 내용을 입력해 주세요.", HttpStatus.BAD_REQUEST);
-        }
-        if (requestText.length() > MAX_REQUEST_CHARACTERS) {
-            throw failure("CODING_REQUEST_TEXT_TOO_LONG",
-                    "요청 내용이 너무 깁니다.", HttpStatus.BAD_REQUEST);
-        }
-
         ProfileVersionRepository.AdminStoredProfileVersion profile = activeProfile();
         List<String> nodes = nodeIds(profile.snapshot());
         if (!nodes.contains(GRAPH_STEP)) {
@@ -200,7 +236,108 @@ public class CodingJobIntakeService {
                 .put("repo", repository)
                 .put("baseSha", baseSha.substring("sha1:".length()))
                 .put("workspaceId", created.job().jobId().toString()));
-        return created;
+        return new CodingConsoleContract.CreateJobOutcome("1.0", created, split);
+    }
+
+    /** What the classifier decided: the one repository, or a split whose first leg is it. */
+    private record Classification(String repository, CodingConsoleContract.SplitPlan split) { }
+
+    /**
+     * Reads the sentence and answers which side it is about - the question the screen used to
+     * ask the requester, who could not know the answer.
+     *
+     * <p>One structured model turn, no tools, strict schema. The model is picked from the
+     * capability registry rather than the profile: the profile binds models to graph nodes and
+     * this call happens before any Job or graph exists. When the request needs both sides, the
+     * classifier also writes the two part-sentences, in the requester's own register - those
+     * are what the screen shows, so they must never contain system words.
+     *
+     * <p>A classification that cannot be obtained fails the submission honestly. Guessing a
+     * side instead would send the model into a checkout without the files it needs, and the
+     * requester would learn about it only after a whole run burned down.
+     */
+    private Classification classify(UUID traceId, String idempotencyKey, String requestText) {
+        CodingModelTurnService turns = modelTurns.getIfAvailable();
+        if (turns == null) {
+            throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                    "요청을 접수할 AI 통로가 꺼져 있습니다. 시스템 담당자에게 알려 주세요.",
+                    HttpStatus.SERVICE_UNAVAILABLE);
+        }
+        UUID turnId = UUID.nameUUIDFromBytes(
+                ("coding-intake-classify:" + idempotencyKey).getBytes(StandardCharsets.UTF_8));
+        CodingModelTurnContract.Response response;
+        try {
+            response = turns.executeNaturalCms(new CodingModelTurnContract.Request(
+                    CodingModelTurnContract.SCHEMA_VERSION,
+                    turnId,
+                    // No Job exists yet; the turn ledger keeps this row under the same
+                    // deterministic identifier, and nothing joins turn rows to Jobs.
+                    turnId,
+                    traceId,
+                    digest("classify-key", idempotencyKey, requestText),
+                    1,
+                    1,
+                    "intake_classify",
+                    "coding-intake-classify-v1",
+                    digest("classify", requestText, ""),
+                    List.of("CHAT", "STRUCTURED_OUTPUT"),
+                    List.of(
+                            objectMapper.createObjectNode()
+                                    .put("role", "system").put("content", CLASSIFY_PROMPT),
+                            objectMapper.createObjectNode()
+                                    .put("role", "user").put("content", requestText)),
+                    List.of(),
+                    ProviderResponseFormat.jsonSchema(classifySchema()).requestContract(),
+                    Instant.now(clock).plus(CLASSIFY_DEADLINE)));
+        }
+        catch (ProviderGatewayException gatewayFailure) {
+            throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                    "요청 내용을 읽는 데 실패했습니다. 잠시 후 다시 시도해 주세요.",
+                    HttpStatus.SERVICE_UNAVAILABLE);
+        }
+        if (!(response.responseFormat()
+                instanceof CodingModelTurnContract.JsonSchemaResponseFormat structured)) {
+            throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                    "요청 내용을 읽는 데 실패했습니다. 잠시 후 다시 시도해 주세요.",
+                    HttpStatus.SERVICE_UNAVAILABLE);
+        }
+        JsonNode verdict = structured.structuredOutput();
+        String target = verdict.path("target").asText("");
+        String firstText = verdict.path("firstText").asText("").strip();
+        String secondText = verdict.path("secondText").asText("").strip();
+        return switch (target) {
+            case "server" -> new Classification(CodingRepositories.BACKEND, null);
+            case "screen" -> new Classification(CodingRepositories.FRONTEND, null);
+            case "both" -> {
+                if (firstText.isEmpty() || secondText.isEmpty()) {
+                    // The schema requires the fields but cannot require them to say anything.
+                    // Without both sentences there is nothing truthful to show or to run.
+                    throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                            "요청 내용을 읽는 데 실패했습니다. 잠시 후 다시 시도해 주세요.",
+                            HttpStatus.SERVICE_UNAVAILABLE);
+                }
+                yield new Classification(CodingRepositories.BACKEND,
+                        new CodingConsoleContract.SplitPlan(firstText, secondText));
+            }
+            default -> throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                    "요청 내용을 읽는 데 실패했습니다. 잠시 후 다시 시도해 주세요.",
+                    HttpStatus.SERVICE_UNAVAILABLE);
+        };
+    }
+
+    private JsonNode classifySchema() {
+        ObjectNode schema = objectMapper.createObjectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("target").add("firstText").add("secondText");
+        ObjectNode properties = schema.putObject("properties");
+        // No enum: the schema validator admits only type/properties/required/additionalProperties.
+        // The three allowed words live in the prompt, and an answer outside them is refused by
+        // the switch that reads the verdict.
+        properties.putObject("target").put("type", "string");
+        properties.putObject("firstText").put("type", "string");
+        properties.putObject("secondText").put("type", "string");
+        return schema;
     }
 
     private ProfileVersionRepository.AdminStoredProfileVersion activeProfile() {

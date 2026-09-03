@@ -532,11 +532,17 @@ function Get-PreviewArguments {
 }
 
 function Set-PreviewEnvironment {
+    # Which screen the preview shows. A frontend Job passes its own exported workspace: the
+    # whole point of the preview is the screen the model just changed, and the shared
+    # ai-frontend checkout is not that. Without a source given, that checkout is still the
+    # right answer - a backend Job's preview keeps showing the screen it always showed.
+    param([string]$FrontendSource)
+
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
-    $frontend = Join-Path $WorkRoot 'ai-frontend'
+    $frontend = if ($FrontendSource) { $FrontendSource } else { Join-Path $WorkRoot 'ai-frontend' }
     if (Test-Path -LiteralPath $frontend -PathType Container) {
         $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontend
     }
@@ -611,17 +617,27 @@ function Copy-SourceDatabase {
 function Invoke-PreviewUp {
     param($Payload)
 
-    # BUILD already exported this workspace and produced the images from it, so
-    # the same directory is used here for the Compose files.
+    # BUILD already exported this workspace and produced the images from it, so the same
+    # export is reused here rather than taken again.
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
+    if (-not $repository) { $repository = 'backend' }
     $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    $exported = ''
     if ($workspaceId) {
-        $backendWorktree = Get-WorkspaceHostPath -WorkspaceId $workspaceId
-        if (-not (Test-Path -LiteralPath $backendWorktree -PathType Container)) {
-            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $backendWorktree"
+        $exported = Get-WorkspaceHostPath -WorkspaceId $workspaceId
+        if (-not (Test-Path -LiteralPath $exported -PathType Container)) {
+            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $exported"
         }
     }
-    else {
+    # Same split as BUILD: the Compose files are Backend files, so the project directory is a
+    # Backend checkout even when the Job worked in the frontend.
+    if ($repository -eq 'frontend') {
         $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        $frontendSource = $exported
+    }
+    else {
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendSource = ''
     }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
@@ -630,7 +646,7 @@ function Invoke-PreviewUp {
     $dumpBytes = 0
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    Set-PreviewEnvironment
+    Set-PreviewEnvironment -FrontendSource $frontendSource
     try {
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
@@ -685,13 +701,23 @@ function Invoke-ComposeBuild {
     # exported here first. Without one this stays the host worktree the command
     # already used, so the existing path is untouched.
     $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
-    if ($workspaceId) {
-        $backendWorktree = Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    $exported = if ($workspaceId) {
+        Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    }
+    else { '' }
+    if ($repository -eq 'frontend') {
+        # The Compose files live in the Backend repository, so the project directory stays a
+        # Backend checkout no matter which repository is being built. A frontend workspace holds
+        # no compose.dev.yaml and naming it here fails before the build starts.
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The image is built from the model's own work when there is any. Falling back to the
+        # shared checkout would build a screen nobody changed and call it the candidate.
+        $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }
     }
     else {
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendWorktree = ''
     }
-    $frontendWorktree = if ($repository -eq 'frontend') { Get-AiWorktreePath -Repository 'frontend' } else { '' }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }

@@ -556,6 +556,133 @@ class CodingHandlerStageServiceTest {
     }
 
     /**
+     * Job f2b48a5e measured this: the model applied the patch and passed every check, then
+     * closed with a prose summary instead of the declared {"port","payload"} object, and the
+     * whole Job died on that one formality. A format miss the model caused is handed back
+     * once as feedback - the same discipline as a refused tool call - and the model then
+     * repeats its final message in the contract shape.
+     */
+    @Test
+    void reasksOnceWhenTerminalMessageIsProse() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway,
+                mapper,
+                clock,
+                false);
+        ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(
+                PROFILE, "code", "coding.code", ModelUseCase.TOOL_CALL))
+                .thenReturn(List.of(registration));
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE,
+                4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding",
+                BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60),
+                PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Implement the approved change.",
+                        List.of(), List.of(), List.of(), NOW, null));
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request request = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    request.jobId(), request.idempotencyKey(), UUID.randomUUID());
+        });
+        when(gateway.chat(any())).thenReturn(
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "coding-test-model",
+                        "",
+                        List.of(new ProviderChatMessage.ToolCall(
+                                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                                "read_diff",
+                                "{}")),
+                        10, 5, Duration.ofMillis(10)),
+                // The measured miss: a human-facing summary instead of the contract.
+                assistantText("완벽합니다! 모든 검증이 통과했습니다. 요청하신 작업이 완료되었습니다."),
+                assistantText("{\"port\":\"completed\","
+                        + "\"payload\":{\"summary\":\"done\"}}"));
+        AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
+        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            JsonNode request = invocation.getArgument(1);
+            submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
+            return new CodingToolContract.Accepted(
+                    "1.0", "TOOL_ACCEPTED",
+                    UUID.fromString(request.path("requestId").asText()),
+                    UUID.fromString(request.path("toolCallId").asText()),
+                    JOB, TRACE, request.path("idempotencyKey").asText(), EXECUTION,
+                    "ACCEPTED", "/internal/coding/tool-executions/" + EXECUTION,
+                    100, NOW);
+        });
+        when(toolService.result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent(
+                        "1.0",
+                        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        submittedToolCall.get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION,
+                        "application/json", 120,
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "{\"workspaceId\":\"" + WORKSPACE + "\","
+                                + "\"baseSha\":\"" + BASE_SHA + "\","
+                                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                                + "\"digest\":\"" + DIFF_DIGEST + "\","
+                                + "\"changedPaths\":[\"src/App.java\"]}"));
+
+        CodingHandlerContract.StageExecutionResponse response = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.code", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(response.diffDigest()).isEqualTo(DIFF_DIGEST);
+        ArgumentCaptor<ProviderChatRequest> modelRequests =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway, times(3)).chat(modelRequests.capture());
+        // The third call carries the correction: the prose answer replayed, then the
+        // instruction naming the exact shape the final message must take.
+        assertThat(modelRequests.getAllValues().get(2).messages().stream()
+                .map(ProviderChatMessage::content).toList().toString())
+                .contains("stage result")
+                .contains("exactly one JSON object");
+    }
+
+    /**
      * Job 7e600583 measured the hole this closes: every apply_patch was refused, so the diff
      * stayed empty, yet read_diff and the deterministic checks all passed because each of
      * them inspected that empty diff, and the Job reached approval carrying no change.

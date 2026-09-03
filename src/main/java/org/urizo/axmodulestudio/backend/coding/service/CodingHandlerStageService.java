@@ -279,6 +279,7 @@ public final class CodingHandlerStageService {
         List<JsonNode> messages = new ArrayList<>(
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
+        ModelOutcome terminalOutcome = null;
         CodingModelTurnContract.Response modelResponse = null;
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(authority, request, schemas.isEmpty()
@@ -290,7 +291,28 @@ public final class CodingHandlerStageService {
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
             if (modelResponse.toolCalls().isEmpty()) {
-                break;
+                try {
+                    terminalOutcome = parseOutcome(
+                            request.handlerKey(), modelResponse.assistant().content(), ports);
+                    break;
+                }
+                catch (CodingWorkerException failure) {
+                    // Measured on Job f2b48a5e: the model finished the work - patch
+                    // applied, checks green - then closed with a prose summary instead
+                    // of the declared stage result, and the whole Job died on that one
+                    // formality. A format miss the model caused is handed back once as
+                    // feedback, exactly like a refused tool call.
+                    if (turn == MAX_MODEL_TURNS) {
+                        throw failure;
+                    }
+                    messages.add(plainAssistantMessage(modelResponse));
+                    messages.add(userMessage("Your reply was not the stage result "
+                            + "contract. The work you already completed stays; only this "
+                            + "final message was rejected. Reply again with exactly one "
+                            + "JSON object and nothing else - no prose, no code fence: "
+                            + "{\"port\":\"<one of " + ports + ">\",\"payload\":{...}}."));
+                    continue;
+                }
             }
             CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
             if (!allowedTools.contains(call.name())) {
@@ -330,11 +352,10 @@ public final class CodingHandlerStageService {
                         "Coding Model exceeded the bounded tool loop.");
             }
         }
-        if (modelResponse == null || !modelResponse.toolCalls().isEmpty()) {
+        if (terminalOutcome == null) {
             throw contract("The Coding Model did not produce a terminal stage result.");
         }
-        ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), modelResponse.assistant().content(), ports);
+        ModelOutcome outcome = terminalOutcome;
         String candidateSha;
         String diffDigest;
         if ("coding.code".equals(request.handlerKey())) {

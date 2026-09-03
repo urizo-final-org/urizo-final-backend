@@ -238,6 +238,72 @@ class NaturalCmsStageServiceTest {
         verify(harness.resources, never()).apply(RESOURCE, command);
     }
 
+    /**
+     * 판정 지시문이 화면 범위를 알려주는지 본다.
+     *
+     * <p>범위를 주지 않았을 때 메뉴 화면에서 게시글 등록 요청이 feasible로 통과해
+     * 명령 단계에서 계약 밖 형식으로 멈췄다. 거부 안내가 화면에 뜨지 않은 원인이다.
+     */
+    @Test
+    void feasibilityPromptNamesWhatTheScreenCanAndCannotChange() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("title and body only")
+                .contains("Anything else is infeasible")
+                .contains("payload.reason");
+    }
+
+    /**
+     * 명령 지시문이 바뀌는 필드만 보내라고 하는지 본다.
+     *
+     * <p>전체 필드를 채워 보내던 탓에 연결 요청이 이름까지 바꾸고 이름 변경이 연결을 지웠다.
+     */
+    @Test
+    void commandPromptAsksForChangedFieldsOnly() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.resources.validateCommand(eq(RESOURCE), any()))
+                .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"operation\":\"UPDATE\",\"fields\":{\"title\":\"New\"}}", List.of()));
+        when(harness.mcp.callTool(eq("resolve_cms_target"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode().put("resolved", true)));
+        when(harness.mcp.callTool(eq("validate_cms_command"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode().put("valid", true)));
+        when(harness.mcp.callTool(eq("create_cms_preview"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode()
+                        .put("previewId", PREVIEW.toString())
+                        .put("previewHash", PREVIEW_HASH)));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.preview", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue())).contains("Send only the field the request changes.");
+    }
+
+    private static String system(CodingModelTurnContract.Request request) {
+        return request.messages().stream()
+                .filter(message -> "system".equals(message.path("role").asText()))
+                .map(message -> message.path("content").asText())
+                .findFirst()
+                .orElse("");
+    }
+
     private static NaturalCmsContract.JobResponse activeJob() throws Exception {
         return job("ACTIVE", null, null, null, false);
     }

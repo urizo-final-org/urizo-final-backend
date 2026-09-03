@@ -332,8 +332,7 @@ public final class NaturalCmsStageService {
         }
         String instruction = commandStage
                 ? commandInstruction(job.resource().type())
-                : "Decide feasibility. Return only JSON with exactly fields port and payload; "
-                    + "port must be feasible or infeasible and payload must be an object.";
+                : feasibilityInstruction(job.resource().type());
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
@@ -350,16 +349,45 @@ public final class NaturalCmsStageService {
         if ("MENU".equals(resourceType)) {
             return "Create one MENU command with operation CREATE, UPDATE or DELETE. "
                     + "You may call only declared CMS tools. Finish with only JSON containing "
-                    + "operation and fields. Fields are name, path, parentId, position, "
+                    + "operation and fields, for example "
+                    + "{\"operation\":\"UPDATE\",\"fields\":{\"position\":3}}. "
+                    + "Send only the fields the request changes. Every field you send is written "
+                    + "and a field you leave out keeps its current value, so never repeat a value "
+                    + "that is already correct. Renaming sends name alone. Linking sends "
+                    + "targetType and targetId alone and never changes the name. "
+                    + "Fields are name, path, parentId, position, "
                     + "targetType and targetId. A path starts with /. parentId is null for a "
                     + "top menu. position is the 1-based place among menus that share the same "
                     + "parentId; never send displayOrder and never compute menu numbers. "
                     + "targetType is NONE, CONTENT or BOARD, and targetId is null unless the "
-                    + "type is CONTENT or BOARD. A DELETE command carries no fields. "
+                    + "type is CONTENT or BOARD. CREATE sends at least name, path and parentId. "
+                    + "DELETE carries no fields: {\"operation\":\"DELETE\",\"fields\":{}}. "
                     + "Take every id from the reference lists and never invent one.";
         }
         return "Create one CONTENT UPDATE command. You may call only declared CMS tools. "
-                + "Finish with only JSON containing operation UPDATE and fields title and body.";
+                + "Finish with only JSON containing operation UPDATE and fields title and body. "
+                + "Send only the field the request changes.";
+    }
+
+    /**
+     * 화면이 다루는 범위를 알려주지 않으면 범위 밖 요청도 feasible로 판정한다.
+     *
+     * <p>실제로 메뉴 화면에서 게시글 등록 요청이 통과해 명령 단계에서 계약 밖 형식으로 멈췄다.
+     * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
+     */
+    private static String feasibilityInstruction(String resourceType) {
+        String scope = "MENU".equals(resourceType)
+                ? "menus only: a menu's name, path, parent, order among siblings, and which "
+                    + "content or board it links to. Creating and deleting a menu is included"
+                : "the selected content's title and body only";
+        return "Decide whether this request can be done on this screen. Return only JSON with "
+                + "exactly fields port and payload; port must be feasible or infeasible and "
+                + "payload must be an object. This screen changes " + scope + ". "
+                + "Anything else is infeasible even when it sounds related, including writing "
+                + "posts, editing article bodies, templates and members. When the port is "
+                + "infeasible put a short Korean sentence in payload.reason saying what this "
+                + "screen cannot do. A request this screen can do stays feasible even when it "
+                + "needs several fields or a confirmation.";
     }
 
     private JsonNode callPreviewTool(

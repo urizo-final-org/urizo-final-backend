@@ -40,6 +40,27 @@ class ProfileSnapshotValidatorTest {
     }
 
     @Test
+    void acceptsTheV4LlmOpsPrToDeployTail() throws Exception {
+        ObjectNode snapshot = fullSnapshot();
+
+        assertAll(
+                () -> assertThat(snapshot.path("profileVersion").intValue()).isEqualTo(4),
+                () -> assertThat(snapshot.withArray("nodes").size()).isEqualTo(17),
+                () -> assertThat(hasNode(snapshot, "cms_approval")).isFalse(),
+                () -> assertThat(node(snapshot, "pr_complete").path("handlerKey").textValue())
+                        .isEqualTo("coding.pr_complete"),
+                () -> assertThat(node(snapshot, "dev_merge_check").path("resultPorts").toString())
+                        .isEqualTo("[\"merged\",\"not_merged\",\"blocked\"]"),
+                () -> assertThat(edge(snapshot, "github_approval", "approved").path("to").textValue())
+                        .isEqualTo("pr_complete"),
+                () -> assertThat(edge(snapshot, "dev_merge_check", "not_merged").path("to").textValue())
+                        .isEqualTo("deploy_request"),
+                () -> assertThatCode(() -> ProfileSnapshotValidator.validateStored(
+                        UUID.fromString(snapshot.path("profileVersionId").textValue()),
+                        "LLM_OPS", 4, snapshot)).doesNotThrowAnyException());
+    }
+
+    @Test
     void rejectsUnlockedOrRemovedGuardrails() throws Exception {
         ObjectNode unlocked = (ObjectNode) authoringSnapshot();
         unlocked.withArray("nodes").get(1).withObject("config").put("locked", false);
@@ -330,6 +351,15 @@ class ProfileSnapshotValidatorTest {
             }
         }
         throw new AssertionError("missing node " + id);
+    }
+
+    private static boolean hasNode(ObjectNode snapshot, String id) {
+        for (JsonNode candidate : snapshot.withArray("nodes")) {
+            if (id.equals(candidate.path("id").textValue())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static ObjectNode edge(ObjectNode snapshot, String from, String resultPort) {

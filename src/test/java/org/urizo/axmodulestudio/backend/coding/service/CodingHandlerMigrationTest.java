@@ -10,6 +10,25 @@ import org.springframework.core.io.ClassPathResource;
 class CodingHandlerMigrationTest {
 
     @Test
+    void extendsOnlyThePrMergeDeployContractsAndRunnerAllowlist() throws Exception {
+        String sql = new ClassPathResource(
+                "db/migration/V20260903065222608__extend_pr_deploy_handler_contracts.sql")
+                .getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(sql)
+                .contains("'coding.pr_complete'")
+                .contains("'coding.dev_merge_check'")
+                .contains("'coding.deploy'")
+                .contains("'DEV_MERGE'")
+                .contains("'DEPLOYMENT'")
+                .contains("'CHECK_DEV_MERGE'")
+                .contains("'DEPLOY_LOCAL_COMPOSE'")
+                .contains("payload ->> 'mergeSha'")
+                .doesNotContain("CREATE TABLE")
+                .doesNotContain("DROP TABLE");
+    }
+
+    @Test
     void exposesSnapshotSelectedApprovalNodesAndRoundsWithoutAStageMap()
             throws Exception {
         String sql = new ClassPathResource(

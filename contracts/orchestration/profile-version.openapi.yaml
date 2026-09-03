@@ -130,7 +130,8 @@
           "common.start", "common.guardrail", "common.check", "common.end",
           "coding.analyze", "coding.code", "coding.review", "coding.preview",
           "coding.approval", "coding.preview_approval", "coding.pr_request",
-          "coding.deploy_request", "coding.rework_gate", "cms.analyze",
+          "coding.pr_complete", "coding.dev_merge_check", "coding.deploy_request",
+          "coding.deploy", "coding.rework_gate", "cms.analyze",
           "cms.preview", "cms.discard", "cms.apply", "cms.approval"
         ]
       },

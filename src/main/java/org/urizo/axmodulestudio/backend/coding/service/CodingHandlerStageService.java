@@ -422,12 +422,18 @@ public final class CodingHandlerStageService {
         // --no-build and the runner claims one PENDING row at a time in order.
         String workspaceId = aggregate.workspaceId() == null
                 ? null : aggregate.workspaceId().toString();
-        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", "backend");
+        // Which repository this Job works in is recorded on the Job itself. It used to be
+        // written here as "backend" because there was nothing else it could be; naming the
+        // wrong one now would build one repository's services from another one's checkout.
+        String repository = results.jobRepository(jobId);
+        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", repository);
         if (workspaceId != null) {
             runnerPayload.put("workspaceId", workspaceId);
         }
         runner.enqueue("BUILD", runnerPayload);
-        ObjectNode previewPayload = objectMapper.createObjectNode();
+        // The preview needs the repository too: a frontend Job's changed screen only reaches
+        // 18081 if the preview is pointed at that Job's checkout rather than a stale one.
+        ObjectNode previewPayload = objectMapper.createObjectNode().put("repo", repository);
         if (workspaceId != null) {
             previewPayload.put("workspaceId", workspaceId);
         }

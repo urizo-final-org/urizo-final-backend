@@ -57,14 +57,13 @@ public class CodingJobIntakeService {
             List.of("CHAT", "TOOL_CALLING", "STRUCTURED_OUTPUT");
 
     /**
-     * Placeholders. Nothing joins on them today and no project or repository row exists to
-     * point at; they are stable so two Jobs of the same repository group together if a real
-     * registry ever arrives.
+     * A placeholder. Nothing joins on it today and no project row exists to point at; it is
+     * stable so two Jobs group together if a real registry ever arrives. The repository is no
+     * longer one of these: it decides which checkout the build stage asks for, so it is read
+     * back rather than assumed. See {@link CodingRepositories}.
      */
     private static final UUID PROJECT_ID =
             UUID.fromString("bc3a6b45-d6a8-4bf1-8932-bcd6989de304");
-    private static final UUID REPOSITORY_ID =
-            UUID.fromString("11111111-1111-4111-8111-111111111111");
 
     /** The runner reports a bare 40-character sha; the Job contract wants it prefixed. */
     private static final Pattern BARE_SHA1 = Pattern.compile("^[0-9a-f]{40}$");
@@ -127,12 +126,12 @@ public class CodingJobIntakeService {
         String requestText = body == null || body.requestText() == null
                 ? null : body.requestText().strip();
 
-        if (!CodingConsoleService.REPOSITORY.equals(repository)) {
-            // runner.ps1 knows how to check out and preview the frontend but its TEST command
-            // for it is unimplemented, so a frontend Job stops before the preview a human is
-            // supposed to approve. Refusing here is kinder than failing three stages in.
+        if (!CodingRepositories.isKnown(repository)) {
+            // The name decides which checkout the runner prepares and which services the build
+            // stage names, so an unknown one has to stop here: every later stage would ask for
+            // a work folder that was never created.
             throw failure("CODING_REPOSITORY_NOT_SUPPORTED",
-                    "지금은 backend 저장소만 요청할 수 있습니다.", HttpStatus.BAD_REQUEST);
+                    "요청할 수 있는 저장소가 아닙니다.", HttpStatus.BAD_REQUEST);
         }
         if (requestText == null || requestText.isEmpty()) {
             throw failure("CODING_REQUEST_TEXT_REQUIRED",
@@ -161,7 +160,7 @@ public class CodingJobIntakeService {
                         "1.0",
                         profile.profileVersionId(),
                         PROJECT_ID,
-                        REPOSITORY_ID,
+                        CodingRepositories.identifierOf(repository),
                         GRAPH_STEP,
                         baseSha,
                         digest("context", requestText, baseSha),

@@ -989,9 +989,13 @@ class CodingHandlerStageServiceTest {
             GuardrailPathSelectionService selections,
             GuardrailRuleService rules,
             List<String> gitReportedPaths,
-            String diffBody) {
+            String diffBody,
+            String jobRepository) {
         ObjectMapper mapper = new ObjectMapper();
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        // The queued build names a repository, and it reads that from the Job rather than
+        // assuming one. Left unstubbed the payload would carry null and say nothing.
+        when(resultService.jobRepository(JOB)).thenReturn(jobRepository);
         CodingToolService toolService = mock(CodingToolService.class);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         CodingHandlerStageService service = new CodingHandlerStageService(
@@ -1092,7 +1096,7 @@ class CodingHandlerStageServiceTest {
         assertThatThrownBy(() -> runPreview(
                 runner, mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class),
-                List.of(ALLOWED_MEMBER_FILE, DENIED_LOGIN_FILE), null))
+                List.of(ALLOWED_MEMBER_FILE, DENIED_LOGIN_FILE), null, "backend"))
                 .isInstanceOf(CodingWorkerException.class)
                 .hasMessageContaining(DENIED_LOGIN_FILE);
 
@@ -1107,12 +1111,37 @@ class CodingHandlerStageServiceTest {
         CodingHandlerContract.StageExecutionResponse response = runPreview(
                 runner, mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class),
-                List.of(ALLOWED_MEMBER_FILE), null);
+                List.of(ALLOWED_MEMBER_FILE), null, "backend");
 
         assertThat(response.resultPort()).isEqualTo("ready");
         assertThat(response.payload().path("status").asText()).isEqualTo("READY");
-        verify(runner).enqueue(eq("BUILD"), any());
-        verify(runner).enqueue(eq("PREVIEW_UP"), any());
+        assertThat(queuedRepository(runner, "BUILD")).isEqualTo("backend");
+        assertThat(queuedRepository(runner, "PREVIEW_UP")).isEqualTo("backend");
+    }
+
+    /**
+     * The repository used to be written into the queued commands as the literal "backend",
+     * because it was the only one a Job could be in. A frontend Job must reach the runner as
+     * a frontend Job: naming the wrong one builds one repository from another's checkout.
+     */
+    @Test
+    void previewQueuesTheJobsOwnRepositoryRatherThanAFixedOne() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        runPreview(runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE), null, "frontend");
+
+        assertThat(queuedRepository(runner, "BUILD")).isEqualTo("frontend");
+        assertThat(queuedRepository(runner, "PREVIEW_UP")).isEqualTo("frontend");
+    }
+
+    /** The "repo" the runner is told to work in, for one queued command kind. */
+    private static String queuedRepository(CodingRunnerService runner, String kind) {
+        ArgumentCaptor<com.fasterxml.jackson.databind.JsonNode> payload =
+                ArgumentCaptor.forClass(com.fasterxml.jackson.databind.JsonNode.class);
+        verify(runner).enqueue(eq(kind), payload.capture());
+        return payload.getValue().path("repo").asText();
     }
 
     /** The second layer is asked for too, using the copy taken when the job was created. */
@@ -1125,7 +1154,7 @@ class CodingHandlerStageServiceTest {
         assertThatThrownBy(() -> runPreview(
                 runner, selections, mock(GuardrailRuleService.class),
                 List.of("src/main/java/org/urizo/axmodulestudio/backend/health/HealthCheck.java"),
-                null))
+                null, "backend"))
                 .isInstanceOf(CodingWorkerException.class)
                 .hasMessageContaining("outside the selected folders");
 
@@ -1142,7 +1171,7 @@ class CodingHandlerStageServiceTest {
 
         assertThatThrownBy(() -> runPreview(
                 runner, mock(GuardrailPathSelectionService.class), rules,
-                List.of(ALLOWED_MEMBER_FILE, "pom.xml"), null))
+                List.of(ALLOWED_MEMBER_FILE, "pom.xml"), null, "backend"))
                 .isInstanceOf(CodingWorkerException.class)
                 .hasMessageContaining("adding a library is not allowed");
 

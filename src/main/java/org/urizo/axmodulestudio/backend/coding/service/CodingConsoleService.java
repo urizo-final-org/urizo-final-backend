@@ -32,13 +32,6 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
 @ConditionalOnProperty(prefix = "ax.coding.job-lifecycle", name = "enabled", havingValue = "true")
 public class CodingConsoleService {
 
-    /**
-     * The pipeline currently addresses one repository. runner.ps1 knows how to check out and
-     * preview the frontend, but its TEST command for the frontend is unimplemented, so a
-     * frontend Job would stop before the preview a human is supposed to approve.
-     */
-    static final String REPOSITORY = "backend";
-
     /** Fixed by compose.preview.yaml. Spring has no view of the host's published ports. */
     private static final String PREVIEW_URL = "http://127.0.0.1:18081/";
 
@@ -75,7 +68,7 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobList list(int limit) {
         List<CodingConsoleContract.JobSummary> items = jdbc.query("""
                 SELECT cj.job_id, cj.status, cjr.request_text, cj.created_at, cj.finished_at,
-                       cj.failure_code,
+                       cj.failure_code, cj.repository_id,
                        COALESCE(latest.handler_key, cj.graph_step) AS stage,
                        COALESCE(refusal.refused, FALSE) AS refused
                 FROM app.coding_job cj
@@ -105,7 +98,7 @@ public class CodingConsoleService {
                 """,
                 (rs, row) -> new CodingConsoleContract.JobSummary(
                         rs.getObject("job_id", UUID.class),
-                        REPOSITORY,
+                        CodingRepositories.nameOf(rs.getObject("repository_id", UUID.class)),
                         rs.getString("request_text"),
                         rs.getString("status"),
                         stageLabel(rs.getString("stage")),
@@ -199,7 +192,7 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobDetail detail(UUID jobId, AdminRole role) {
         List<JobRow> jobs = jdbc.query("""
                 SELECT cj.job_id, cj.trace_id, cj.status, cj.state_version, cj.graph_step,
-                       cj.base_sha,
+                       cj.base_sha, cj.repository_id,
                        cj.created_at, cj.finished_at, cjr.request_text
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
@@ -211,6 +204,7 @@ public class CodingConsoleService {
                         rs.getInt("state_version"),
                         rs.getString("graph_step"),
                         rs.getString("base_sha"),
+                        CodingRepositories.nameOf(rs.getObject("repository_id", UUID.class)),
                         rs.getString("request_text"),
                         instant(rs, "created_at"),
                         instant(rs, "finished_at")),
@@ -230,7 +224,7 @@ public class CodingConsoleService {
         return new CodingConsoleContract.JobDetail(
                 "1.0",
                 jobId,
-                REPOSITORY,
+                job.repository(),
                 job.requestText(),
                 job.status(),
                 stageLabel(results.isEmpty() ? job.graphStep() : results.get(0).handlerKey()),
@@ -471,6 +465,7 @@ public class CodingConsoleService {
             int stateVersion,
             String graphStep,
             String baseSha,
+            String repository,
             String requestText,
             Instant createdAt,
             Instant finishedAt) { }

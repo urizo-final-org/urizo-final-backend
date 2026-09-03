@@ -167,12 +167,34 @@ class CodingJobIntakeServiceTest {
     }
 
     @Test
-    void refusesTheFrontendBeforeSpendingAnythingOnIt() {
-        // runner.ps1 can check out and preview the frontend but its TEST command for it is
-        // unimplemented, so the Job would stop before the preview a human must approve.
-        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("frontend")))
+    void acceptsAFrontendRequestAndRecordsItAsAFrontendJob() {
+        // The frontend was refused here while the runner had no way to test it. It has one now,
+        // and the Job has to carry which repository it is in: the stage that queues the build
+        // reads that back rather than assuming the only repository there used to be.
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", request("frontend"));
+
+        ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
+                ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
+        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        assertThat(sent.getValue().repositoryId())
+                .isEqualTo(CodingRepositories.identifierOf("frontend"));
+
+        ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
+        verify(runner).enqueue(eq("CREATE_WORKTREE"), payload.capture());
+        assertThat(payload.getValue().path("repo").asText()).isEqualTo("frontend");
+    }
+
+    @Test
+    void refusesARepositoryTheRunnerCannotCheckOut() {
+        // The name decides which checkout the runner prepares, so an unknown one stops before
+        // the runner is asked for anything at all.
+        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("docs")))
                 .isInstanceOf(CodingJobLifecycleException.class)
-                .hasMessageContaining("backend");
+                .hasMessageContaining("저장소");
         verify(runner, never()).enqueue(any(), any());
     }
 

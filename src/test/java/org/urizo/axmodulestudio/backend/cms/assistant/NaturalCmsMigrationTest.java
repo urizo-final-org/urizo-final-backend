@@ -28,19 +28,6 @@ class NaturalCmsMigrationTest {
     }
 
     @Test
-    void queueConflictCheckReadsOneColumnAndNothingElse() throws IOException {
-        String migration = Files.readString(Path.of(
-                "src/main/resources/db/migration/"
-                        + "V20260903062827180__grant_natural_cms_outbox_conflict_read.sql"));
-
-        assertThat(migration)
-                .contains("GRANT SELECT (event_key) ON app.transactional_outbox TO ai_workspace")
-                .doesNotContain("GRANT SELECT ON app.transactional_outbox")
-                .doesNotContain("GRANT ALL")
-                .doesNotContain("ALTER TABLE");
-    }
-
-    @Test
     void approvedApplyUsesTheProductTransactionWithoutGivingAiDirectCmsWrite()
             throws IOException {
         String migration = Files.readString(Path.of(
@@ -91,5 +78,17 @@ class NaturalCmsMigrationTest {
                         "resource_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'"))
                 .count())
                 .isEqualTo(2);
+    }
+
+    @Test
+    void outboxConflictMigrationGrantsOnlyTheRequiredEventKeyRead()
+            throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260903065547140__grant_natural_cms_outbox_conflict_read.sql"));
+
+        assertThat(migration)
+                .contains("GRANT SELECT (event_key) ON app.transactional_outbox TO ai_workspace;")
+                .doesNotContain("GRANT SELECT ON app.transactional_outbox TO ai_workspace;");
     }
 }

@@ -23,7 +23,8 @@ public final class CodingHandlerContract {
 
     private static final Set<String> RESULT_PORTS = Set.of(
             "feasible", "infeasible", "completed", "passed",
-            "changes_requested", "ready", "requested", "recorded");
+            "changes_requested", "ready", "requested", "recorded",
+            "merged", "not_merged", "blocked");
 
     private CodingHandlerContract() { }
 
@@ -33,7 +34,9 @@ public final class CodingHandlerContract {
         DIFF,
         REVIEW,
         PULL_REQUEST,
-        DEPLOY_REQUEST
+        DEV_MERGE,
+        DEPLOY_REQUEST,
+        DEPLOYMENT
     }
 
     private static final Map<String, ResultType> HANDLER_RESULTS = Map.of(
@@ -42,7 +45,10 @@ public final class CodingHandlerContract {
             "coding.review", ResultType.REVIEW,
             "coding.preview", ResultType.DIFF,
             "coding.pr_request", ResultType.PULL_REQUEST,
-            "coding.deploy_request", ResultType.DEPLOY_REQUEST);
+            "coding.pr_complete", ResultType.PULL_REQUEST,
+            "coding.dev_merge_check", ResultType.DEV_MERGE,
+            "coding.deploy_request", ResultType.DEPLOY_REQUEST,
+            "coding.deploy", ResultType.DEPLOYMENT);
 
     public enum AttemptStatus {
         ACTIVE,
@@ -181,7 +187,9 @@ public final class CodingHandlerContract {
                         "diffDigest and validationHash are required for a DIFF result.");
             }
             if ((resultType == ResultType.PULL_REQUEST
-                    || resultType == ResultType.DEPLOY_REQUEST)
+                    || resultType == ResultType.DEV_MERGE
+                    || resultType == ResultType.DEPLOY_REQUEST
+                    || resultType == ResultType.DEPLOYMENT)
                     && validationHash == null) {
                 throw new IllegalArgumentException(
                         "validationHash is required for this side-effect result.");
@@ -347,7 +355,9 @@ public final class CodingHandlerContract {
                 throw new IllegalArgumentException("DIFF stage binding is incomplete.");
             }
             if ((resultType == ResultType.PULL_REQUEST
-                    || resultType == ResultType.DEPLOY_REQUEST)
+                    || resultType == ResultType.DEV_MERGE
+                    || resultType == ResultType.DEPLOY_REQUEST
+                    || resultType == ResultType.DEPLOYMENT)
                     && validationHash == null) {
                 throw new IllegalArgumentException(
                         "Side-effect stage validationHash is required.");
@@ -433,8 +443,14 @@ public final class CodingHandlerContract {
                     && "ready".equals(resultPort);
             case "coding.pr_request" -> resultType == ResultType.PULL_REQUEST
                     && "requested".equals(resultPort);
+            case "coding.pr_complete" -> resultType == ResultType.PULL_REQUEST
+                    && "completed".equals(resultPort);
+            case "coding.dev_merge_check" -> resultType == ResultType.DEV_MERGE
+                    && Set.of("merged", "not_merged", "blocked").contains(resultPort);
             case "coding.deploy_request" -> resultType == ResultType.DEPLOY_REQUEST
                     && "recorded".equals(resultPort);
+            case "coding.deploy" -> resultType == ResultType.DEPLOYMENT
+                    && Set.of("completed", "blocked").contains(resultPort);
             default -> false;
         };
         if (!registered) {

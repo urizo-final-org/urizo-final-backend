@@ -43,7 +43,7 @@ final class ProfileSnapshotValidator {
     private static final Set<String> EMPTY_CONFIG_HANDLERS = Set.of(
             "common.start", "common.check", "common.end",
             "coding.analyze", "coding.code", "coding.review", "coding.preview",
-            "coding.pr_request",
+            "coding.pr_request", "coding.pr_complete", "coding.dev_merge_check", "coding.deploy",
             "cms.analyze", "cms.preview", "cms.discard", "cms.apply");
     private static final Set<String> CODING_APPROVAL_STAGES =
             Set.of("SCOPE", "CANDIDATE", "GITHUB", "CMS", "DEPLOY");
@@ -71,7 +71,10 @@ final class ProfileSnapshotValidator {
             handler("coding.approval", "approval", "approved"),
             handler("coding.preview_approval", "approval", "approved", "rejected"),
             handler("coding.pr_request", "tool", "requested"),
+            handler("coding.pr_complete", "tool", "completed"),
+            handler("coding.dev_merge_check", "check", "merged", "not_merged", "blocked"),
             handler("coding.deploy_request", "tool", "recorded"),
+            handler("coding.deploy", "tool", "completed", "blocked"),
             handler("coding.rework_gate", "check", "retry", "handover"),
             handler("cms.analyze", "agent", "feasible", "infeasible"),
             handler("cms.preview", "agent", "ready"),

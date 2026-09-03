@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -37,6 +38,7 @@ class CodingRunnerEnqueueTest {
 
     @Test
     void addsOnePendingRowCarryingTheRequestedCommandAndPayload() {
+        when(jdbc.update(any(String.class), any(), any(), any())).thenReturn(1);
         UUID taskId = service.enqueue("PREVIEW_UP",
                 JsonNodeFactory.instance.objectNode().put("workspaceId", "job-1"));
 
@@ -46,6 +48,18 @@ class CodingRunnerEnqueueTest {
         assertThat(arguments.getAllValues().get(0)).isEqualTo(taskId);
         assertThat(arguments.getAllValues().get(1)).isEqualTo("PREVIEW_UP");
         assertThat((String) arguments.getAllValues().get(2)).contains("job-1");
+    }
+
+    @Test
+    void preservesACallerDerivedTaskIdForReplaySafeExternalWork() {
+        UUID taskId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        when(jdbc.update(any(String.class), any(), any(), any())).thenReturn(1);
+
+        UUID queued = service.enqueue(taskId, "CHECK_DEV_MERGE",
+                JsonNodeFactory.instance.objectNode().put("prNumber", 42));
+
+        assertThat(queued).isEqualTo(taskId);
+        verify(jdbc).update(any(String.class), eq(taskId), eq("CHECK_DEV_MERGE"), any());
     }
 
     @Test

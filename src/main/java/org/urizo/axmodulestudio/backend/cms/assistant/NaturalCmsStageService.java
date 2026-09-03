@@ -4,7 +4,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -36,8 +35,9 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
         prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class NaturalCmsStageService {
 
-    private static final int MAX_MODEL_TURNS = 8;
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
+    private static final Set<String> RESOURCE_METADATA_FIELDS =
+            Set.of("id", "updatedAt", "active");
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
     private final NaturalCmsStore store;
@@ -147,37 +147,19 @@ public final class NaturalCmsStageService {
             Set<String> allowedTools) {
         requireStatus(job, "ACTIVE");
         ObjectNode currentState = resources.snapshot(job.resource());
-        Set<String> modelTools = allowedTools(
-                allowedTools, NaturalCmsToolContract.PREVIEW_TOOLS);
-        List<JsonNode> schemas = toolSchemas(modelTools);
-        List<JsonNode> messages = new ArrayList<>(initialMessages(job, currentState, true));
+        requirePreviewTools(allowedTools);
+        List<JsonNode> schemas = previewToolSchemas();
         List<ProviderModelRegistration> modelBindings =
-                modelBindings(job, stage, schemas.isEmpty()
-                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
-        CodingModelTurnContract.Response terminal = null;
-        for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            terminal = modelTurn(
-                    job, stage, resultId, turn, schemas, messages, modelBindings);
-            if (terminal.toolCalls().isEmpty()) {
-                break;
-            }
-            CodingModelTurnContract.ToolCall call = terminal.toolCalls().get(0);
-            if (!modelTools.contains(call.name())) {
-                throw contract("Model selected a Tool outside the Natural CMS allowlist.");
-            }
-            JsonNode result = callPreviewTool(
-                    job.resource(), currentState, call, allowedTools);
-            messages.add(assistantToolMessage(terminal));
-            messages.add(toolMessage(resultId, turn, call, result));
-            if (turn == MAX_MODEL_TURNS) {
-                throw contract("Natural CMS Model exceeded the bounded Tool loop.");
-            }
+                modelBindings(job, stage, ModelUseCase.TOOL_CALL);
+        CodingModelTurnContract.Response response = modelTurn(
+                job, stage, resultId, 1, schemas,
+                initialMessages(job, currentState, true), modelBindings);
+        if (response.toolCalls().size() != 1
+                || !"validate_cms_command".equals(response.toolCalls().get(0).name())) {
+            throw contract("Natural CMS Model must return one validate_cms_command Tool Call.");
         }
-        if (terminal == null || !terminal.toolCalls().isEmpty()) {
-            throw contract("Natural CMS Model did not produce a terminal command.");
-        }
-        JsonNode command = parseCommand(terminal.assistant().content());
-        resources.validateCommand(job.resource(), command);
+        JsonNode command = resources.validateCommand(
+                job.resource(), response.toolCalls().get(0).arguments().path("command"));
 
         ObjectNode targetArguments = baseArguments(job.resource(), currentState);
         callTool("resolve_cms_target", targetArguments, allowedTools);
@@ -323,6 +305,14 @@ public final class NaturalCmsStageService {
         context.put("request", job.requestText());
         context.set("resource", objectMapper.valueToTree(job.resource()));
         context.set("currentState", currentState.deepCopy());
+        if (commandStage) {
+            ArrayNode editableFields = context.putArray("editableFields");
+            currentState.fieldNames().forEachRemaining(name -> {
+                if (!RESOURCE_METADATA_FIELDS.contains(name)) {
+                    editableFields.add(name);
+                }
+            });
+        }
         if (job.approvalFeedback() != null) {
             context.put("approvalFeedback", job.approvalFeedback());
         }
@@ -340,33 +330,37 @@ public final class NaturalCmsStageService {
     }
 
     /**
-     * 리소스마다 열린 명령이 다르므로 지시문도 갈린다.
+     * 리소스마다 열린 operation이 다르므로 지시문도 갈린다.
      *
-     * <p>메뉴는 자리를 서수 {@code position}으로만 말하게 한다. 실제 번호는 코드가 계산하고
-     * 모델에게는 보여주지 않는다.
+     * <p>메뉴만 {@code CREATE}·{@code DELETE}까지 열려 있어(`AI05-006`·`AI05-007`) 첫 문장이 다르다.
+     * 나머지 셋은 `AI05-013`이 정한 {@code UPDATE} 문구를 그대로 쓰고 공통 규칙만 덧붙인다.
+     *
+     * <p>Tool Call 한 번으로 명령을 받는 구조는 `AI05-013`을 그대로 따른다. Tool Schema의
+     * {@code operation}은 자유 문자열이라 이 지시문만으로 세 operation을 모두 표현할 수 있다.
      */
     private static String commandInstruction(String resourceType) {
-        if ("MENU".equals(resourceType)) {
-            return "Create one MENU command with operation CREATE, UPDATE or DELETE. "
-                    + "You may call only declared CMS tools. Finish with only JSON containing "
-                    + "operation and fields, for example "
-                    + "{\"operation\":\"UPDATE\",\"fields\":{\"position\":3}}. "
-                    + "Send only the fields the request changes. Every field you send is written "
-                    + "and a field you leave out keeps its current value, so never repeat a value "
-                    + "that is already correct. Renaming sends name alone. Linking sends "
-                    + "targetType and targetId alone and never changes the name. "
-                    + "Fields are name, path, parentId, position, "
-                    + "targetType and targetId. A path starts with /. parentId is null for a "
-                    + "top menu. position is the 1-based place among menus that share the same "
-                    + "parentId; never send displayOrder and never compute menu numbers. "
-                    + "targetType is NONE, CONTENT or BOARD, and targetId is null unless the "
-                    + "type is CONTENT or BOARD. CREATE sends at least name, path and parentId. "
-                    + "DELETE carries no fields: {\"operation\":\"DELETE\",\"fields\":{}}. "
-                    + "Take every id from the reference lists and never invent one.";
+        String changedFieldsOnly = " Send only the fields the request changes. Every field you"
+                + " send is written and a field you leave out keeps its current value, so never"
+                + " repeat a value that is already correct.";
+        if (!"MENU".equals(resourceType)) {
+            return "Create one " + resourceType + " UPDATE command. "
+                    + "Call validate_cms_command exactly once with the UPDATE command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly;
         }
-        return "Create one CONTENT UPDATE command. You may call only declared CMS tools. "
-                + "Finish with only JSON containing operation UPDATE and fields title and body. "
-                + "Send only the field the request changes.";
+        return "Create one MENU command with operation CREATE, UPDATE or DELETE. "
+                + "Call validate_cms_command exactly once with that command. "
+                + "fields may use only names from editableFields."
+                + changedFieldsOnly
+                + " Renaming sends name alone. Linking sends targetType and targetId alone and"
+                + " never changes the name. A path starts with /. parentId is null for a top menu."
+                + " position is the 1-based place among menus that share the same parentId; never"
+                + " send displayOrder and never compute menu numbers."
+                + " targetType is NONE, CONTENT or BOARD, and targetId is null unless the type is"
+                + " CONTENT or BOARD."
+                + " CREATE sends at least name, path and parentId."
+                + " DELETE carries no fields and its fields object stays empty."
+                + " Take every id from the reference lists and never invent one.";
     }
 
     /**
@@ -388,20 +382,6 @@ public final class NaturalCmsStageService {
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation.";
-    }
-
-    private JsonNode callPreviewTool(
-            NaturalCmsContract.ResourceRef resource,
-            JsonNode currentState,
-            CodingModelTurnContract.ToolCall call,
-            Set<String> allowedTools) {
-        ObjectNode arguments = baseArguments(resource, currentState);
-        if (!"resolve_cms_target".equals(call.name())) {
-            JsonNode command = call.arguments().path("command");
-            resources.validateCommand(resource, command);
-            arguments.set("command", command.deepCopy());
-        }
-        return callTool(call.name(), arguments, allowedTools);
     }
 
     private JsonNode callTool(
@@ -445,26 +425,25 @@ public final class NaturalCmsStageService {
         return arguments;
     }
 
-    private List<JsonNode> toolSchemas(Set<String> names) {
-        List<JsonNode> schemas = new ArrayList<>();
-        for (String name : names.stream().sorted().toList()) {
-            ObjectNode schema = objectMapper.createObjectNode();
-            schema.put("name", name);
-            schema.put("description", "Approved AX Module Studio Natural CMS Tool " + name + ".");
-            schema.put("schemaDigest",
-                    NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS.get(name));
-            ObjectNode input = schema.putObject("inputSchema");
-            input.put("type", "object");
-            input.put("additionalProperties", false);
-            ObjectNode properties = input.putObject("properties");
-            ArrayNode required = input.putArray("required");
-            if (!"resolve_cms_target".equals(name)) {
-                properties.putObject("command").put("type", "object");
-                required.add("command");
-            }
-            schemas.add(schema);
-        }
-        return List.copyOf(schemas);
+    private List<JsonNode> previewToolSchemas() {
+        ObjectNode schema = objectMapper.createObjectNode();
+        schema.put("name", "validate_cms_command");
+        schema.put("description", "Submit one Natural CMS UPDATE command.");
+        schema.put("schemaDigest", NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS
+                .get("validate_cms_command"));
+        ObjectNode input = schema.putObject("inputSchema");
+        input.put("type", "object");
+        input.put("additionalProperties", false);
+        ObjectNode command = input.putObject("properties")
+                .putObject("command");
+        command.put("type", "object");
+        command.put("additionalProperties", false);
+        ObjectNode commandProperties = command.putObject("properties");
+        commandProperties.putObject("operation").put("type", "string");
+        commandProperties.putObject("fields").put("type", "object");
+        command.putArray("required").add("operation").add("fields");
+        input.putArray("required").add("command");
+        return List.of(schema);
     }
 
     static Set<String> allowedTools(Set<String> profileTools, Set<String> stageTools) {
@@ -473,40 +452,13 @@ public final class NaturalCmsStageService {
         return Set.copyOf(allowed);
     }
 
-    private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
-        ObjectNode message = objectMapper.createObjectNode();
-        message.put("role", "assistant");
-        message.put("content", response.assistant().content());
-        ArrayNode calls = message.putArray("toolCalls");
-        for (CodingModelTurnContract.ToolCall call : response.toolCalls()) {
-            ObjectNode value = calls.addObject();
-            value.put("toolCallId", call.toolCallId().toString());
-            value.put("name", call.name());
-            value.set("arguments", call.arguments());
+    private static void requirePreviewTools(Set<String> allowedTools) {
+        if (!allowedTools.containsAll(NaturalCmsToolContract.PREVIEW_TOOLS)) {
+            throw new NaturalCmsException(
+                    "TOOL_NOT_ALLOWED",
+                    "Natural CMS runtime policy rejected the Tool.",
+                    HttpStatus.FORBIDDEN);
         }
-        return message;
-    }
-
-    private ObjectNode toolMessage(
-            UUID resultId,
-            int turn,
-            CodingModelTurnContract.ToolCall call,
-            JsonNode result) {
-        String content = encode(result);
-        UUID executionId = UUID.nameUUIDFromBytes(
-                (resultId + ":tool:" + turn + ":" + call.toolCallId())
-                        .getBytes(StandardCharsets.UTF_8));
-        ObjectNode message = objectMapper.createObjectNode();
-        message.put("role", "tool");
-        message.put("toolCallId", call.toolCallId().toString());
-        message.put("executionId", executionId.toString());
-        message.putObject("result")
-                .put("mediaType", "application/json")
-                .put("resultRef", "/internal/natural-cms/tool-results/" + executionId)
-                .put("sizeBytes", content.getBytes(StandardCharsets.UTF_8).length)
-                .put("digest", hash(content));
-        message.put("content", content);
-        return message;
     }
 
     private ModelOutcome parseAnalyze(String value) {
@@ -527,24 +479,6 @@ public final class NaturalCmsStageService {
         return parsed;
     }
 
-    private JsonNode parseCommand(String value) {
-        StructuredOutputGuard.ValidatedOutput<String> validated;
-        try {
-            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
-                    value,
-                    candidate -> readCommand(candidate) != null,
-                    StructuredOutputGuard::extractOutermostJsonObject);
-        }
-        catch (ProviderGatewayException failure) {
-            throw contract("Natural CMS structured command is invalid.");
-        }
-        JsonNode command = readCommand(validated.value());
-        if (command == null) {
-            throw contract("Natural CMS structured command is invalid.");
-        }
-        return command;
-    }
-
     private ModelOutcome readAnalyze(String value) {
         if (value == null) {
             return null;
@@ -559,13 +493,6 @@ public final class NaturalCmsStageService {
         }
         return new ModelOutcome(
                 parsed.path("port").asText(), parsed.path("payload").deepCopy());
-    }
-
-    private JsonNode readCommand(String value) {
-        if (value == null) {
-            return null;
-        }
-        return StructuredOutputGuard.readSingleJsonObject(objectMapper, value);
     }
 
     private static void requireStatus(

@@ -307,21 +307,47 @@ public final class NaturalCmsResourceService {
                     "targetId", FieldType.NUMBER_OR_NULL);
         }
 
+        /**
+         * 명령 단계는 이 Snapshot의 필드 이름으로 쓸 수 있는 필드를 정한다(`AI05-013`).
+         *
+         * <p>그래서 등록 대상도 빈 자리를 갖춘 틀을 주고, 자리는 {@code position}으로 담는다.
+         * {@code id}만 주면 쓸 수 있는 필드가 없어 등록이 막히고, {@code position}이 없으면
+         * 순서 변경이 막힌다.
+         */
         @Override
         public ObjectNode snapshot(String id) {
+            ObjectNode state = objectMapper.createObjectNode();
             if (NEW_ID.equals(id)) {
-                return objectMapper.createObjectNode().put("id", NEW_ID);
+                state.put("id", NEW_ID);
+                state.putNull("name");
+                state.putNull("path");
+                state.putNull("parentId");
+                state.putNull("position");
+                state.put("targetType", "NONE");
+                state.putNull("targetId");
+                return state;
             }
             MenuView view = cmsService.menu(numericId(id, "MENU"));
-            ObjectNode state = objectMapper.createObjectNode();
             state.put("id", view.id());
             state.put("name", view.name());
             state.put("path", view.path());
             state.put("parentId", view.parentId());
             state.put("displayOrder", view.displayOrder());
+            state.put("position", ordinalOf(view));
             state.put("targetType", view.targetType());
             state.put("targetId", view.targetId());
             return state;
+        }
+
+        /** 형제 안에서 몇 번째인지. 모델은 이 서수로만 자리를 말한다. */
+        private int ordinalOf(MenuView view) {
+            List<MenuView> group = siblings(view.parentId());
+            for (int index = 0; index < group.size(); index++) {
+                if (group.get(index).id() == view.id()) {
+                    return index + 1;
+                }
+            }
+            return group.size() + 1;
         }
 
         /**

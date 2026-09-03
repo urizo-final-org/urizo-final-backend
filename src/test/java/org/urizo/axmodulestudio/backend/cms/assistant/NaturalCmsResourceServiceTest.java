@@ -396,8 +396,13 @@ class NaturalCmsResourceServiceTest {
 
         JsonNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("MENU", "new"));
 
+        // 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 빈 자리를 갖춘 틀을 준다.
         assertThat(state.path("id").asText()).isEqualTo("new");
-        assertThat(state.size()).isEqualTo(1);
+        assertThat(state.fieldNames()).toIterable().containsExactlyInAnyOrder(
+                "id", "name", "path", "parentId", "position", "targetType", "targetId");
+        assertThat(state.path("targetType").asText()).isEqualTo("NONE");
+        assertThat(state.path("name").isNull()).isTrue();
+        assertThat(state.has("displayOrder")).isFalse();
         verify(cms, never()).menu(anyLong());
     }
 

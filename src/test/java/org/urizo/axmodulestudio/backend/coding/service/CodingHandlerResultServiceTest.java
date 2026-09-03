@@ -240,6 +240,34 @@ class CodingHandlerResultServiceTest {
     }
 
     @Test
+    void persistenceBoundaryRequiresTheExactLatestApprovalSubject() {
+        String candidate = "sha1:1111111111111111111111111111111111111111";
+        String validation =
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        CodingHandlerResultService.ResultSubject subject =
+                new CodingHandlerResultService.ResultSubject(candidate, validation);
+
+        CodingHandlerResultService.requireApprovedSubject(
+                subject,
+                new CodingHandlerResultService.ApprovalSubject(
+                        CodingHandlerContract.Decision.APPROVED, candidate, validation));
+
+        assertThatThrownBy(() -> CodingHandlerResultService.requireApprovedSubject(
+                subject,
+                new CodingHandlerResultService.ApprovalSubject(
+                        CodingHandlerContract.Decision.APPROVED,
+                        candidate,
+                        "sha256:3333333333333333333333333333333333333333333333333333333333333333")))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("latest authorized candidate");
+        assertThatThrownBy(() -> CodingHandlerResultService.requireApprovedSubject(
+                subject,
+                new CodingHandlerResultService.ApprovalSubject(
+                        CodingHandlerContract.Decision.REJECTED, candidate, validation)))
+                .isInstanceOf(CodingWorkerException.class);
+    }
+
+    @Test
     void reviewAndPreviewRejectCandidateDrift() {
         String codeCandidate = "sha1:1111111111111111111111111111111111111111";
         String driftedCandidate = "sha1:3333333333333333333333333333333333333333";

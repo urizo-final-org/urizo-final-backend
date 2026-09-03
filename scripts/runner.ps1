@@ -370,8 +370,16 @@ function Export-McpWorkspaceToHost {
     if ($LASTEXITCODE -ne 0) {
         throw "RUNNER_WORKSPACE_EXPORT_FAILED|작업 폴더를 꺼내지 못했습니다: $(($output | Select-Object -Last 3) -join ' ')"
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $target 'compose.dev.yaml') -PathType Leaf)) {
-        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 compose.dev.yaml 이 없습니다: $target"
+    # A marker the repository is known to carry, so a half-copied export is caught here
+    # rather than as an unreadable Compose error later. It is per repository: the Compose
+    # files are Backend files, and a frontend checkout has never held one.
+    $marker = switch ($Repository) {
+        'backend' { 'compose.dev.yaml' }
+        'frontend' { 'package.json' }
+        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $Repository" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $target $marker) -PathType Leaf)) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 $marker 이 없습니다: $target"
     }
 
     # The clone was made on Linux, so its config keeps core.filemode true. Windows

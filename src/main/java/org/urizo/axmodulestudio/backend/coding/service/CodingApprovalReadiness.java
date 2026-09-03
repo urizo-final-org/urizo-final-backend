@@ -137,6 +137,10 @@ final class CodingApprovalReadiness {
         if (preview == null) {
             return null;
         }
+        if (stage == CodingHandlerContract.ApprovalStage.DEPLOY) {
+            Subject deploymentRequest = latestDeploymentRequest(jdbc, jobId, pipelineAttempt);
+            return deploymentRequest == null ? preview : deploymentRequest;
+        }
         if (stage != CodingHandlerContract.ApprovalStage.GITHUB) {
             return preview;
         }
@@ -177,13 +181,38 @@ final class CodingApprovalReadiness {
 
     private static Subject latestPullRequest(
             JdbcTemplate jdbc, UUID jobId, int pipelineAttempt) {
-        return latestSubject(jdbc, jobId, pipelineAttempt, """
+        Subject completed = latestSubject(jdbc, jobId, pipelineAttempt, """
+                SELECT candidate_sha, validation_hash
+                FROM app.coding_handler_result
+                WHERE job_id = ? AND pipeline_attempt = ?
+                  AND handler_key = 'coding.pr_complete'
+                  AND result_type = 'PULL_REQUEST'
+                  AND result_port = 'completed'
+                ORDER BY recorded_at DESC, result_id DESC
+                LIMIT 1
+                """);
+        return completed != null ? completed : latestSubject(jdbc, jobId, pipelineAttempt, """
                 SELECT candidate_sha, validation_hash
                 FROM app.coding_handler_result
                 WHERE job_id = ? AND pipeline_attempt = ?
                   AND handler_key = 'coding.pr_request'
                   AND result_type = 'PULL_REQUEST'
                   AND result_port = 'requested'
+                ORDER BY recorded_at DESC, result_id DESC
+                LIMIT 1
+                """);
+    }
+
+    private static Subject latestDeploymentRequest(
+            JdbcTemplate jdbc, UUID jobId, int pipelineAttempt) {
+        return latestSubject(jdbc, jobId, pipelineAttempt, """
+                SELECT candidate_sha, validation_hash
+                FROM app.coding_handler_result
+                WHERE job_id = ? AND pipeline_attempt = ?
+                  AND handler_key = 'coding.deploy_request'
+                  AND result_type = 'DEPLOY_REQUEST'
+                  AND result_port = 'recorded'
+                  AND payload ? 'deploymentRequestId'
                 ORDER BY recorded_at DESC, result_id DESC
                 LIMIT 1
                 """);

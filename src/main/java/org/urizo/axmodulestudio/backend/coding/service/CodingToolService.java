@@ -46,6 +46,9 @@ public final class CodingToolService {
             "check_package_allowlist", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "scan_changed_files", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa");
     private static final Pattern SHA256_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");
+    /** A unified diff hunk header. The count is optional: git reads '@@ -73 +73 @@' as one line. */
+    private static final Pattern UNIFIED_HUNK_HEADER =
+            Pattern.compile("@@ -\\d+(,\\d+)? \\+\\d+(,\\d+)? @@.*");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "messageType", "requestId", "toolCallId", "jobId",
             "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep",
@@ -636,14 +639,7 @@ public final class CodingToolService {
                     requireObjectFields(arguments, Set.of(), "tool arguments");
             case "apply_patch" -> {
                 requireObjectFields(arguments, Set.of("patch"), "tool arguments");
-                String patch = text(arguments, "patch");
-                // The MCP workspace only applies a patch whose first line is a canonical
-                // 'diff --git a/PATH b/PATH' header, so the precheck demands the same
-                // start. The old '--- ' start could never pass the MCP policy.
-                if (patch.length() > 50_000 || !patch.startsWith("diff --git a/")) {
-                    throw validation("apply_patch patch is invalid: it must start with a "
-                            + "'diff --git a/PATH b/PATH' line.");
-                }
+                validatePatchText(text(arguments, "patch"));
             }
             case "run_check" -> {
                 requireObjectFields(arguments, Set.of("checkId"), "tool arguments");
@@ -657,6 +653,61 @@ public final class CodingToolService {
             }
             default -> throw validation("Tool name is not registered.");
         }
+    }
+
+    /**
+     * git apply refuses a malformed hunk header as "patch with only garbage at :N", and the MCP
+     * workspace drops that stderr, so the model hears only that the operation failed and repeats
+     * the same mistake. Checking the shape here turns the same defect into a
+     * TOOL_ARGUMENTS_INVALID message naming the offending line, and that message is replayed to
+     * the model verbatim. Only the header shape is checked: whether the counts and the context
+     * lines match the file is git's judgement, not a guess this precheck should make.
+     */
+    static void validatePatchText(String patch) {
+        // The MCP workspace only applies a patch whose first line is a canonical
+        // 'diff --git a/PATH b/PATH' header, so the precheck demands the same
+        // start. The old '--- ' start could never pass the MCP policy.
+        if (patch.length() > 50_000 || !patch.startsWith("diff --git a/")) {
+            throw validation("apply_patch patch is invalid: it must start with a "
+                    + "'diff --git a/PATH b/PATH' line.");
+        }
+        String[] lines = patch.split("\n", -1);
+        int hunks = 0;
+        boolean oldPathLine = false;
+        boolean newPathLine = false;
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index].endsWith("\r")
+                    ? lines[index].substring(0, lines[index].length() - 1)
+                    : lines[index];
+            oldPathLine = oldPathLine || line.startsWith("--- ");
+            newPathLine = newPathLine || line.startsWith("+++ ");
+            // Every body line carries a ' ', '+' or '-' prefix, so a line that opens at
+            // column zero with '@@' can only be a hunk header.
+            if (!line.startsWith("@@")) {
+                continue;
+            }
+            hunks++;
+            if (!UNIFIED_HUNK_HEADER.matcher(line).matches()) {
+                throw validation("apply_patch patch is invalid: line " + (index + 1)
+                        + " is \"" + abbreviate(line) + "\", but a hunk header must carry the "
+                        + "real line numbers of the file, as "
+                        + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' - "
+                        + "for example '@@ -73,7 +73,7 @@'.");
+            }
+        }
+        if (hunks == 0) {
+            throw validation("apply_patch patch is invalid: it has no hunk. Add a "
+                    + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' header "
+                    + "followed by the changed lines.");
+        }
+        if (!oldPathLine || !newPathLine) {
+            throw validation("apply_patch patch is invalid: it must carry a '--- a/PATH' line "
+                    + "and a '+++ b/PATH' line before the first hunk header.");
+        }
+    }
+
+    private static String abbreviate(String line) {
+        return line.length() <= 80 ? line : line.substring(0, 80) + "...";
     }
 
     private static void validateRequestedPaths(

@@ -79,4 +79,16 @@ class NaturalCmsMigrationTest {
                 .count())
                 .isEqualTo(2);
     }
+
+    @Test
+    void outboxConflictMigrationGrantsOnlyTheRequiredEventKeyRead()
+            throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260903065547140__grant_natural_cms_outbox_conflict_read.sql"));
+
+        assertThat(migration)
+                .contains("GRANT SELECT (event_key) ON app.transactional_outbox TO ai_workspace;")
+                .doesNotContain("GRANT SELECT ON app.transactional_outbox TO ai_workspace;");
+    }
 }

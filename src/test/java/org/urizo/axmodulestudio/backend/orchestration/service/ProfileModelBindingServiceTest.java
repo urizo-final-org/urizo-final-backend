@@ -20,6 +20,8 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSupport;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
@@ -120,6 +122,93 @@ class ProfileModelBindingServiceTest {
                 .containsExactly(ModelProvider.ANTHROPIC, ModelProvider.OPENAI);
         assertThat(ProfileModelBindingService.isRegisteredBindingKey(
                 "NATURAL_CMS", "natural-cms-claude")).isTrue();
+    }
+
+    @Test
+    void resolvesSelectionMetadataWithoutChangingTheLegacyBindingShape() throws Exception {
+        ProfileModelBindingService service = service(registry(catalogRegistration()));
+        JsonNode snapshot = snapshot("""
+                {
+                  "analyze":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"OPENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}},
+                  "review":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"OPENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}}
+                }
+                """);
+
+        assertThat(service.resolve(snapshot, PROFILE, "analyze", "coding.analyze", ModelUseCase.CHAT))
+                .singleElement().satisfies(model -> assertThat(model.inferenceSettings().reasoningIntensity())
+                        .isEqualTo(org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings.ReasoningIntensity.HIGH));
+    }
+
+    @Test
+    void acceptsLegacyAliasesButRequiresRegistryCatalogMetadataForCatalogSelections()
+            throws Exception {
+        ProfileModelBindingService service = service(registry(catalogRegistration()));
+        JsonNode legacy = snapshot("""
+                {
+                  "analyze":{"primary":"llm-ops-analyze","fallback":[]},
+                  "review":{"primary":"llm-ops-review","fallback":[]}
+                }
+                """);
+        JsonNode selected = snapshot("""
+                {
+                  "analyze":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"OPENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}},
+                  "review":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"OPENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}}
+                }
+                """);
+
+        service.validateCatalogSelections("LLM_OPS", legacy);
+        service.validateCatalogSelections("LLM_OPS", selected);
+
+        ((com.fasterxml.jackson.databind.node.ObjectNode) selected.path("modelBindings")
+                .path("analyze").path("selections")).remove("openai-gpt-5-6-terra");
+        assertThatThrownBy(() -> service.validateCatalogSelections("LLM_OPS", selected))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure ->
+                        assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED"));
+    }
+
+    @Test
+    void rejectsCatalogSelectionProviderModelAndInferenceMismatches() throws Exception {
+        ProfileModelBindingService service = service(registry(catalogRegistration()));
+        JsonNode selected = snapshot("""
+                {
+                  "analyze":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"GOOGLE_GENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}},
+                  "review":{"primary":"openai-gpt-5-6-terra","fallback":[],"selections":{
+                    "openai-gpt-5-6-terra":{"provider":"OPENAI","model":"gpt-5.6-terra",
+                    "inference":{"reasoningIntensity":"HIGH"}}}}
+                }
+                """);
+
+        assertThatThrownBy(() -> service.validateCatalogSelections("LLM_OPS", selected))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure ->
+                        assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED"));
+    }
+
+    @Test
+    void rejectsGeminiBudgetMetadataWhenTheRegisteredModelIsLevelBased() throws Exception {
+        ProfileModelBindingService service = service(registry(levelBasedGeminiRegistration()));
+        JsonNode selected = snapshot("""
+                {
+                  "analyze":{"primary":"google-genai-gemini-3-5-flash-lite","fallback":[],"selections":{
+                    "google-genai-gemini-3-5-flash-lite":{"provider":"GOOGLE_GENAI",
+                    "model":"gemini-3.5-flash-lite","inference":{"reasoningIntensity":"HIGH",
+                    "reasoningBudgetTokens":128}}}},
+                  "review":{"primary":"llm-ops-review","fallback":[]}
+                }
+                """);
+
+        assertThatThrownBy(() -> service.validateCatalogSelections("LLM_OPS", selected))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure ->
+                        assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED"));
     }
 
     @Test
@@ -254,6 +343,37 @@ class ProfileModelBindingServiceTest {
                         ModelCapability.STRUCTURED_OUTPUT),
                 Duration.ofSeconds(30),
                 2);
+    }
+
+    private static ProviderModelRegistration catalogRegistration() {
+        return new ProviderModelRegistration(
+                ModelProvider.OPENAI,
+                Stage2ProviderModels.OPENAI_TERRA,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30), 2,
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                InferenceSettings.none(), new InferenceSupport(InferenceSettings.none(),
+                        Set.of(InferenceSettings.ReasoningIntensity.NONE,
+                                InferenceSettings.ReasoningIntensity.LOW,
+                                InferenceSettings.ReasoningIntensity.MEDIUM,
+                                InferenceSettings.ReasoningIntensity.HIGH), null));
+    }
+
+    private static ProviderModelRegistration levelBasedGeminiRegistration() {
+        return new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30), 2,
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                InferenceSettings.none(), new InferenceSupport(InferenceSettings.none(),
+                        Set.of(InferenceSettings.ReasoningIntensity.NONE,
+                                InferenceSettings.ReasoningIntensity.MINIMAL,
+                                InferenceSettings.ReasoningIntensity.LOW,
+                                InferenceSettings.ReasoningIntensity.MEDIUM,
+                                InferenceSettings.ReasoningIntensity.HIGH), null));
     }
 
     @FunctionalInterface

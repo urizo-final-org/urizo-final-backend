@@ -12,9 +12,12 @@ import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileDefaultT
 public final class ProfileDefaultTemplateService {
 
     private final ProfileDefaultTemplateRepository repository;
+    private final ProfileModelBindingService bindings;
 
-    public ProfileDefaultTemplateService(ProfileDefaultTemplateRepository repository) {
+    public ProfileDefaultTemplateService(ProfileDefaultTemplateRepository repository,
+            ProfileModelBindingService bindings) {
         this.repository = repository;
+        this.bindings = bindings;
     }
 
     public StoredDefaultTemplate get(String profileKey) {
@@ -30,8 +33,30 @@ public final class ProfileDefaultTemplateService {
 
     public StoredDefaultTemplate save(String profileKey, JsonNode snapshot) {
         String normalized = requireProfileKey(profileKey);
+        repository.findByProfileKey(normalized).ifPresent(current -> {
+            if (dropsSelectionMetadata(current.snapshot(), snapshot)) {
+                throw new ProfileVersionException(
+                        "CONTRACT_VALIDATION_FAILED",
+                        "modelBindings selections cannot be removed by this endpoint.",
+                        HttpStatus.BAD_REQUEST);
+            }
+        });
         ProfileSnapshotValidator.validateAuthoring(normalized, snapshot);
+        bindings.validateCatalogSelections(normalized, snapshot);
         return repository.save(normalized, snapshot);
+    }
+
+    private static boolean dropsSelectionMetadata(JsonNode current, JsonNode next) {
+        JsonNode currentBindings = current.path("modelBindings");
+        JsonNode nextBindings = next == null ? null : next.path("modelBindings");
+        if (!currentBindings.isObject() || nextBindings == null || !nextBindings.isObject()) return false;
+        java.util.Iterator<String> names = currentBindings.fieldNames();
+        while (names.hasNext()) {
+            String nodeId = names.next();
+            if (currentBindings.path(nodeId).has("selections")
+                    && !nextBindings.path(nodeId).has("selections")) return true;
+        }
+        return false;
     }
 
     private static String requireProfileKey(String profileKey) {

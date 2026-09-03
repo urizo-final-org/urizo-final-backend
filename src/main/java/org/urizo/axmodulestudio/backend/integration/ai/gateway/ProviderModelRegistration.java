@@ -11,7 +11,9 @@ public record ProviderModelRegistration(
         Set<ModelCapability> capabilities,
         Duration timeout,
         int maxAttempts,
-        int maxOutputTokens) {
+        int maxOutputTokens,
+        InferenceSettings inferenceSettings,
+        InferenceSupport inferenceSupport) {
 
     public static final int DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
     public static final int MIN_MAX_OUTPUT_TOKENS = 256;
@@ -25,6 +27,13 @@ public record ProviderModelRegistration(
         modelId = Objects.requireNonNull(modelId, "modelId is required");
         capabilities = Set.copyOf(Objects.requireNonNull(capabilities, "capabilities are required"));
         timeout = Objects.requireNonNull(timeout, "timeout is required");
+        inferenceSettings = Objects.requireNonNull(inferenceSettings, "inferenceSettings is required");
+        inferenceSupport = Objects.requireNonNull(inferenceSupport, "inferenceSupport is required");
+        if (!inferenceSupport.supports(inferenceSettings)) {
+            throw new CapabilityRegistrationException(
+                    ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED,
+                    "default inference settings are unsupported");
+        }
 
         if (!MODEL_ID.matcher(modelId).matches()) {
             throw new CapabilityRegistrationException(
@@ -67,6 +76,31 @@ public record ProviderModelRegistration(
             int maxAttempts) {
         this(provider, modelId, capabilities, timeout, maxAttempts,
                 DEFAULT_MAX_OUTPUT_TOKENS);
+    }
+
+    public ProviderModelRegistration(
+            ModelProvider provider, String modelId, Set<ModelCapability> capabilities,
+            Duration timeout, int maxAttempts, int maxOutputTokens) {
+        this(provider, modelId, capabilities, timeout, maxAttempts, maxOutputTokens,
+                InferenceSettings.none(), InferenceSupport.disabled());
+    }
+
+    public ProviderModelRegistration(
+            ModelProvider provider, String modelId, Set<ModelCapability> capabilities,
+            Duration timeout, int maxAttempts, int maxOutputTokens,
+            InferenceSettings inferenceSettings) {
+        this(provider, modelId, capabilities, timeout, maxAttempts, maxOutputTokens,
+                inferenceSettings, InferenceSupport.disabled());
+    }
+
+    public ProviderModelRegistration withInferenceSettings(InferenceSettings settings) {
+        return new ProviderModelRegistration(provider, modelId, capabilities, timeout, maxAttempts,
+                maxOutputTokens, settings, inferenceSupport);
+    }
+
+    public String selectionId() {
+        return provider.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-')
+                + "-" + modelId.replace('.', '-');
     }
 
     private static boolean requiresChat(Set<ModelCapability> capabilities) {

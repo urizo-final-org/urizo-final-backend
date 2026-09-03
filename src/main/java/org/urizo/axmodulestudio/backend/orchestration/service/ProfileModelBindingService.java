@@ -18,6 +18,7 @@ import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.CapabilityRegistrationException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
@@ -33,7 +34,7 @@ public class ProfileModelBindingService {
 
     private static final Pattern BINDING_KEY =
             Pattern.compile("^[a-z][a-z0-9_-]{0,127}$");
-    private static final Set<String> BINDING_FIELDS = Set.of("primary", "fallback");
+    private static final Set<String> BINDING_FIELDS = Set.of("primary", "fallback", "selections");
     private static final Map<String, Map<String, ModelTarget>> BINDINGS = Map.of(
             "LLM_OPS", Map.of(
                     "llm-ops-analyze", new ModelTarget(
@@ -139,10 +140,11 @@ public class ProfileModelBindingService {
             throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
         }
 
-        List<String> bindingKeys = bindingKeys(snapshot.path("modelBindings").path(nodeId));
-        Map<ModelTarget, ProviderModelRegistration> selected = new LinkedHashMap<>();
+        JsonNode binding = snapshot.path("modelBindings").path(nodeId);
+        List<String> bindingKeys = bindingKeys(binding);
+        Map<String, ProviderModelRegistration> selected = new LinkedHashMap<>();
         for (String bindingKey : bindingKeys) {
-            ModelTarget target = catalog.get(bindingKey);
+            ModelTarget target = target(binding.path("selections"), catalog, bindingKey);
             if (target == null) {
                 throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
             }
@@ -154,7 +156,8 @@ public class ProfileModelBindingService {
             catch (CapabilityRegistrationException failure) {
                 throw invalidBinding(failure.code());
             }
-            if (selected.putIfAbsent(target, registration) != null) {
+            if (selected.putIfAbsent(target.provider().name() + ":" + target.modelId(),
+                    registration.withInferenceSettings(target.inferenceSettings())) != null) {
                 throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
             }
         }
@@ -166,12 +169,79 @@ public class ProfileModelBindingService {
         return catalog != null && catalog.containsKey(bindingKey);
     }
 
+    void validateCatalogSelections(String profileKey, JsonNode snapshot) {
+        JsonNode bindings = snapshot.path("modelBindings");
+        if (!bindings.isObject()) throw contractInvalid();
+        java.util.Iterator<Map.Entry<String, JsonNode>> entries = bindings.fields();
+        while (entries.hasNext()) {
+            JsonNode binding = entries.next().getValue();
+            JsonNode selections = binding.path("selections");
+            if (selections.isObject()) {
+                java.util.Iterator<Map.Entry<String, JsonNode>> configured = selections.fields();
+                while (configured.hasNext()) {
+                    Map.Entry<String, JsonNode> selection = configured.next();
+                    ProviderModelRegistration registration =
+                            capabilityRegistry.findBySelectionId(selection.getKey());
+                    if (registration == null || !matchesCatalog(registration, selection.getValue())) {
+                        throw contractInvalid();
+                    }
+                }
+            }
+            for (String selectionId : bindingKeys(binding)) {
+                ProviderModelRegistration registration =
+                        capabilityRegistry.findBySelectionId(selectionId);
+                if (registration != null) {
+                    if (!selections.isObject()
+                            || !matchesCatalog(registration, selections.path(selectionId))) {
+                        throw contractInvalid();
+                    }
+                }
+                else if (!isRegisteredBindingKey(profileKey, selectionId)) {
+                    throw contractInvalid();
+                }
+            }
+        }
+    }
+
+    private static boolean matchesCatalog(ProviderModelRegistration registration, JsonNode configured) {
+        if (!configured.isObject() || configured.size() != 3
+                || !registration.provider().name().equals(configured.path("provider").textValue())
+                || !registration.modelId().equals(configured.path("model").textValue())) {
+            return false;
+        }
+        try {
+            JsonNode inference = configured.path("inference");
+            if (!inference.isObject() || !inference.has("reasoningIntensity")
+                    || inference.size() > 2 || !inference.path("reasoningIntensity").isTextual()) {
+                return false;
+            }
+            Integer budget = inference.has("reasoningBudgetTokens")
+                    && inference.path("reasoningBudgetTokens").isIntegralNumber()
+                    ? inference.path("reasoningBudgetTokens").intValue() : null;
+            if (inference.has("reasoningBudgetTokens") && budget == null) return false;
+            InferenceSettings settings = new InferenceSettings(
+                    InferenceSettings.ReasoningIntensity.valueOf(
+                            inference.path("reasoningIntensity").textValue()), budget);
+            return registration.inferenceSupport().supports(settings);
+        }
+        catch (IllegalArgumentException failure) {
+            return false;
+        }
+    }
+
+    private static ProfileVersionException contractInvalid() {
+        return new ProfileVersionException(
+                "CONTRACT_VALIDATION_FAILED", "modelBindings selections are invalid.",
+                org.springframework.http.HttpStatus.BAD_REQUEST);
+    }
+
     private static List<String> bindingKeys(JsonNode binding) {
         Set<String> fields = new HashSet<>();
         if (binding.isObject()) {
             binding.fieldNames().forEachRemaining(fields::add);
         }
-        if (!binding.isObject() || !fields.equals(BINDING_FIELDS)) {
+        if (!binding.isObject() || !BINDING_FIELDS.containsAll(fields)
+                || !fields.containsAll(Set.of("primary", "fallback"))) {
             throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
         }
 
@@ -196,11 +266,48 @@ public class ProfileModelBindingService {
         return List.copyOf(ordered);
     }
 
+    private static ModelTarget target(
+            JsonNode selections, Map<String, ModelTarget> legacy, String selectionId) {
+        JsonNode configured = selections.path(selectionId);
+        if (configured.isMissingNode()) {
+            ModelTarget target = legacy.get(selectionId);
+            if (target == null) throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+            return target;
+        }
+        if (!configured.isObject() || configured.size() != 3
+                || !configured.path("provider").isTextual() || !configured.path("model").isTextual()
+                || !configured.path("inference").isObject()) {
+            throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+        }
+        try {
+            ModelProvider provider = ModelProvider.valueOf(configured.path("provider").textValue());
+            String model = configured.path("model").textValue();
+            JsonNode inference = configured.path("inference");
+            if (!inference.has("reasoningIntensity") || inference.size() > 2
+                    || !inference.path("reasoningIntensity").isTextual()) {
+                throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+            }
+            Integer budget = inference.has("reasoningBudgetTokens")
+                    ? inference.path("reasoningBudgetTokens").intValue() : null;
+            return new ModelTarget(provider, model, new InferenceSettings(
+                    InferenceSettings.ReasoningIntensity.valueOf(
+                            inference.path("reasoningIntensity").textValue()), budget));
+        }
+        catch (IllegalArgumentException failure) {
+            throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+        }
+    }
+
     private static ProviderGatewayException invalidBinding(ModelGatewayErrorCode code) {
         return new ProviderGatewayException(
                 code,
                 "The job profile does not provide a supported model binding for this node.");
     }
 
-    private record ModelTarget(ModelProvider provider, String modelId) { }
+    private record ModelTarget(ModelProvider provider, String modelId,
+            InferenceSettings inferenceSettings) {
+        private ModelTarget(ModelProvider provider, String modelId) {
+            this(provider, modelId, InferenceSettings.none());
+        }
+    }
 }

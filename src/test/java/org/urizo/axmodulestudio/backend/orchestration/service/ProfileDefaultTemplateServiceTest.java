@@ -24,8 +24,9 @@ class ProfileDefaultTemplateServiceTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private final ProfileDefaultTemplateRepository repository =
             mock(ProfileDefaultTemplateRepository.class);
+    private final ProfileModelBindingService bindings = mock(ProfileModelBindingService.class);
     private final ProfileDefaultTemplateService service =
-            new ProfileDefaultTemplateService(repository);
+            new ProfileDefaultTemplateService(repository, bindings);
 
     @Test
     void loadsAndSavesTemplatesWithinTheirProfileKey() throws Exception {
@@ -38,6 +39,7 @@ class ProfileDefaultTemplateServiceTest {
 
         assertThat(service.get("LLM_OPS").snapshot()).isEqualTo(llmOps);
         assertThat(service.save("LLM_OPS", llmOps).profileKey()).isEqualTo("LLM_OPS");
+        verify(bindings).validateCatalogSelections("LLM_OPS", llmOps);
         verify(repository, never()).findByProfileKey("NATURAL_CMS");
     }
 

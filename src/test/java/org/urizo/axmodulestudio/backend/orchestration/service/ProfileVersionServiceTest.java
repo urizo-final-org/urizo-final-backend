@@ -31,7 +31,9 @@ class ProfileVersionServiceTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final ProfileVersionRepository repository = mock(ProfileVersionRepository.class);
-    private final ProfileVersionService service = new ProfileVersionService(repository);
+    private final ProfileModelBindingService bindings = mock(ProfileModelBindingService.class);
+    private final ProfileVersionService service = new ProfileVersionService(repository,
+            bindings, mock(org.urizo.axmodulestudio.backend.integration.ai.local.LocalProviderSecretService.class));
 
     @Test
     void returnsActiveSnapshotsForBoundJobs() {
@@ -100,6 +102,7 @@ class ProfileVersionServiceTest {
         assertThat(created.snapshot().path("profileVersionId").asText())
                 .isEqualTo(created.profileVersionId().toString());
         assertThat(authoring.has("profileVersionId")).isFalse();
+        verify(bindings).validateCatalogSelections("LLM_OPS", authoring);
     }
 
     @Test

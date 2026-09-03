@@ -13,6 +13,7 @@ import static org.mockito.Mockito.when;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -72,6 +73,83 @@ class NaturalCmsStageServiceTest {
         verify(harness.profileModelBindings).resolve(
                 PROFILE, "preview", "cms.preview", ModelUseCase.CHAT);
         verify(harness.mcp, never()).callTool(any(), any());
+    }
+
+    @Test
+    void commandPromptUsesTheResourceAndEditableFieldsForAllSupportedTypes()
+            throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        List<PromptCase> cases = List.of(
+                new PromptCase(
+                        new NaturalCmsContract.ResourceRef("MENU", "1"),
+                        (ObjectNode) mapper.readTree("""
+                                {"id":1,"name":"About","path":"/about","parentId":null,
+                                 "displayOrder":1,"targetType":"CONTENT","targetId":1}
+                                """),
+                        Set.of("name", "path", "parentId", "displayOrder",
+                                "targetType", "targetId")),
+                new PromptCase(
+                        new NaturalCmsContract.ResourceRef("BOARD", "1"),
+                        (ObjectNode) mapper.readTree("""
+                                {"id":1,"name":"Notice","description":"Board",
+                                 "updatedAt":"2026-08-30T08:00:00Z"}
+                                """),
+                        Set.of("name", "description")),
+                new PromptCase(
+                        new NaturalCmsContract.ResourceRef("CONTENT", "1"),
+                        (ObjectNode) mapper.readTree("""
+                                {"id":1,"title":"About","body":"Body",
+                                 "updatedAt":"2026-08-30T08:00:00Z"}
+                                """),
+                        Set.of("title", "body")),
+                new PromptCase(
+                        new NaturalCmsContract.ResourceRef("TEMPLATE", "DEFAULT"),
+                        (ObjectNode) mapper.readTree("""
+                                {"id":"DEFAULT","layout":"default","primaryColor":"#000000",
+                                 "siteName":"Site","headerText":null,"footerText":null,
+                                 "heroImageUrl":"/hero.jpg","heroTitle":"Hero",
+                                 "heroSubtitle":null,"heroButtonLabel":null,
+                                 "heroButtonUrl":null,"active":true,
+                                 "updatedAt":"2026-08-30T08:00:00Z"}
+                                """),
+                        Set.of("layout", "primaryColor", "siteName", "headerText",
+                                "footerText", "heroImageUrl", "heroTitle", "heroSubtitle",
+                                "heroButtonLabel", "heroButtonUrl")));
+
+        for (PromptCase promptCase : cases) {
+            Harness harness = new Harness(activeJob(promptCase.resource()));
+            when(harness.store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
+                    new NaturalCmsStore.RuntimePolicy(Set.of(), "central.default"));
+            when(harness.resources.snapshot(promptCase.resource()))
+                    .thenReturn(promptCase.currentState());
+            when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                    "{\"operation\":\"UPDATE\",\"fields\":{\"name\":\"New\"}}",
+                    List.of()));
+
+            assertThatThrownBy(() -> harness.service.execute(
+                    "Bearer worker", JOB, 1, RESULT,
+                    stageRequest("cms.preview", RESULT)))
+                    .isInstanceOfSatisfying(NaturalCmsException.class,
+                            failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+
+            ArgumentCaptor<CodingModelTurnContract.Request> request =
+                    ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+            verify(harness.models).executeNaturalCms(request.capture(), any());
+            List<JsonNode> messages = request.getValue().messages();
+            assertThat(messages.get(0).path("content").asText())
+                    .contains("Create one " + promptCase.resource().type() + " UPDATE command")
+                    .contains("fields may use only names from editableFields")
+                    .doesNotContain("fields title and body");
+
+            JsonNode context = mapper.readTree(messages.get(1).path("content").asText());
+            assertThat(context.path("resource").path("type").asText())
+                    .isEqualTo(promptCase.resource().type());
+            Set<String> editableFields = new HashSet<>();
+            context.path("editableFields").forEach(
+                    field -> editableFields.add(field.asText()));
+            assertThat(editableFields)
+                    .containsExactlyInAnyOrderElementsOf(promptCase.editableFields());
+        }
     }
 
     @Test
@@ -242,6 +320,11 @@ class NaturalCmsStageServiceTest {
         return job("ACTIVE", null, null, null, false);
     }
 
+    private static NaturalCmsContract.JobResponse activeJob(
+            NaturalCmsContract.ResourceRef resource) throws Exception {
+        return job("ACTIVE", null, null, null, false, resource);
+    }
+
     private static NaturalCmsContract.JobResponse approvedJob() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         return job(
@@ -260,9 +343,19 @@ class NaturalCmsStageServiceTest {
             UUID previewId,
             String previewHash,
             boolean previewValid) {
+        return job(status, command, previewId, previewHash, previewValid, RESOURCE);
+    }
+
+    private static NaturalCmsContract.JobResponse job(
+            String status,
+            JsonNode command,
+            UUID previewId,
+            String previewHash,
+            boolean previewValid,
+            NaturalCmsContract.ResourceRef resource) {
         return new NaturalCmsContract.JobResponse(
                 "1.0", JOB, TRACE, PROFILE, 1, 1, status,
-                "Update the content", RESOURCE, command, previewId, previewHash,
+                "Update the selected resource", resource, command, previewId, previewHash,
                 previewValid,
                 "WAITING_APPROVAL".equals(status) ? "APPROVED" : null,
                 null,
@@ -299,6 +392,12 @@ class NaturalCmsStageServiceTest {
         ObjectNode response = mapper.createObjectNode().put("isError", false);
         response.set("structuredContent", content.deepCopy());
         return response;
+    }
+
+    private record PromptCase(
+            NaturalCmsContract.ResourceRef resource,
+            ObjectNode currentState,
+            Set<String> editableFields) {
     }
 
     private static final class Harness {

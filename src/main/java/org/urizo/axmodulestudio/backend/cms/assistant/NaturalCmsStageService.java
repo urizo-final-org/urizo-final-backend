@@ -38,6 +38,8 @@ public final class NaturalCmsStageService {
 
     private static final int MAX_MODEL_TURNS = 8;
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
+    private static final Set<String> RESOURCE_METADATA_FIELDS =
+            Set.of("id", "updatedAt", "active");
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
     private final NaturalCmsStore store;
@@ -323,12 +325,21 @@ public final class NaturalCmsStageService {
         context.put("request", job.requestText());
         context.set("resource", objectMapper.valueToTree(job.resource()));
         context.set("currentState", currentState.deepCopy());
+        if (commandStage) {
+            ArrayNode editableFields = context.putArray("editableFields");
+            currentState.fieldNames().forEachRemaining(name -> {
+                if (!RESOURCE_METADATA_FIELDS.contains(name)) {
+                    editableFields.add(name);
+                }
+            });
+        }
         if (job.approvalFeedback() != null) {
             context.put("approvalFeedback", job.approvalFeedback());
         }
         String instruction = commandStage
-                ? "Create one CONTENT UPDATE command. You may call only declared CMS tools. "
-                    + "Finish with only JSON containing operation UPDATE and fields title and body."
+                ? "Create one " + job.resource().type() + " UPDATE command. "
+                    + "You may call only declared CMS tools. Finish with only JSON containing "
+                    + "operation UPDATE and fields; fields may use only names from editableFields."
                 : "Decide feasibility. Return only JSON with exactly fields port and payload; "
                     + "port must be feasible or infeasible and payload must be an object.";
         return List.of(

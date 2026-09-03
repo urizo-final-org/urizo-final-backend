@@ -58,6 +58,15 @@ public final class CodingHandlerStageService {
      * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
      */
     private static final int MAX_MODEL_TURNS = 24;
+    /**
+     * The digest of an empty diff - SHA-256 over zero bytes. Every apply_patch of Job
+     * 7e600583 was refused, yet read_diff, the package check and the guardrail scan all
+     * reported success because each of them examined that empty diff, and the Job reached
+     * approval carrying no change at all. A stage that changed nothing is not a stage that
+     * succeeded, so the Coding stage refuses to report one.
+     */
+    private static final String EMPTY_DIFF_DIGEST =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     /** Tool refusals the model itself caused and can correct when told why. */
     private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
@@ -334,6 +343,14 @@ public final class CodingHandlerStageService {
             }
             candidateSha = authority.baseSha();
             diffDigest = resultDigest(latestDiff);
+            if (EMPTY_DIFF_DIGEST.equals(diffDigest)) {
+                // Reached only after the model stopped calling tools and declared itself
+                // done, so every retry it had is already spent.
+                throw new CodingWorkerException(
+                        "CODING_DIFF_EMPTY",
+                        "The Coding stage finished without changing any file.",
+                        HttpStatus.UNPROCESSABLE_ENTITY);
+            }
         }
         else {
             CodingHandlerContract.HandlerResultResponse code = latestResult(

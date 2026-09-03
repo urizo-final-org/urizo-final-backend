@@ -555,6 +555,127 @@ class CodingHandlerStageServiceTest {
                 12, 6, Duration.ofMillis(10));
     }
 
+    /**
+     * Job 7e600583 measured the hole this closes: every apply_patch was refused, so the diff
+     * stayed empty, yet read_diff and the deterministic checks all passed because each of
+     * them inspected that empty diff, and the Job reached approval carrying no change.
+     */
+    @Test
+    void refusesCodingStageThatChangedNothing() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway,
+                mapper,
+                clock,
+                false);
+        ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(
+                PROFILE, "code", "coding.code", ModelUseCase.TOOL_CALL))
+                .thenReturn(List.of(registration));
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), profileModelBindings,
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE,
+                4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding",
+                BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60),
+                PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "Implement the approved change.",
+                        List.of(), List.of(), List.of(), NOW, null));
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request request = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    request.jobId(), request.idempotencyKey(), UUID.randomUUID());
+        });
+        when(gateway.chat(any())).thenReturn(
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "coding-test-model",
+                        "",
+                        List.of(new ProviderChatMessage.ToolCall(
+                                "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                                "read_diff",
+                                "{}")),
+                        10, 5, Duration.ofMillis(10)),
+                // The model claims success even though nothing was applied.
+                new ProviderChatResponse(
+                        ModelProvider.GOOGLE_GENAI,
+                        "coding-test-model",
+                        "{\"port\":\"completed\","
+                                + "\"payload\":{\"summary\":\"done\"}}",
+                        12, 6, Duration.ofMillis(10)));
+        AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
+        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            JsonNode request = invocation.getArgument(1);
+            submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
+            return new CodingToolContract.Accepted(
+                    "1.0", "TOOL_ACCEPTED",
+                    UUID.fromString(request.path("requestId").asText()),
+                    UUID.fromString(request.path("toolCallId").asText()),
+                    JOB, TRACE, request.path("idempotencyKey").asText(), EXECUTION,
+                    "ACCEPTED", "/internal/coding/tool-executions/" + EXECUTION,
+                    100, NOW);
+        });
+        when(toolService.result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent(
+                        "1.0",
+                        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        submittedToolCall.get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION,
+                        "application/json", 120,
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "{\"workspaceId\":\"" + WORKSPACE + "\","
+                                + "\"baseSha\":\"" + BASE_SHA + "\","
+                                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                                + "\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427"
+                                + "ae41e4649b934ca495991b7852b855\","
+                                + "\"changedPaths\":[]}"));
+
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.code", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .satisfies(failure -> assertThat(((CodingWorkerException) failure).code())
+                        .isEqualTo("CODING_DIFF_EMPTY"))
+                .hasMessageContaining("without changing any file");
+    }
+
     @Test
     void runsModelToApprovedToolToTerminalStageResult() {
         ObjectMapper mapper = new ObjectMapper();

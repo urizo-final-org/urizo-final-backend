@@ -4,7 +4,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -36,7 +35,6 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
         prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class NaturalCmsStageService {
 
-    private static final int MAX_MODEL_TURNS = 8;
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
     private static final Set<String> RESOURCE_METADATA_FIELDS =
             Set.of("id", "updatedAt", "active");
@@ -149,37 +147,19 @@ public final class NaturalCmsStageService {
             Set<String> allowedTools) {
         requireStatus(job, "ACTIVE");
         ObjectNode currentState = resources.snapshot(job.resource());
-        Set<String> modelTools = allowedTools(
-                allowedTools, NaturalCmsToolContract.PREVIEW_TOOLS);
-        List<JsonNode> schemas = toolSchemas(modelTools);
-        List<JsonNode> messages = new ArrayList<>(initialMessages(job, currentState, true));
+        requirePreviewTools(allowedTools);
+        List<JsonNode> schemas = previewToolSchemas();
         List<ProviderModelRegistration> modelBindings =
-                modelBindings(job, stage, schemas.isEmpty()
-                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
-        CodingModelTurnContract.Response terminal = null;
-        for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            terminal = modelTurn(
-                    job, stage, resultId, turn, schemas, messages, modelBindings);
-            if (terminal.toolCalls().isEmpty()) {
-                break;
-            }
-            CodingModelTurnContract.ToolCall call = terminal.toolCalls().get(0);
-            if (!modelTools.contains(call.name())) {
-                throw contract("Model selected a Tool outside the Natural CMS allowlist.");
-            }
-            JsonNode result = callPreviewTool(
-                    job.resource(), currentState, call, allowedTools);
-            messages.add(assistantToolMessage(terminal));
-            messages.add(toolMessage(resultId, turn, call, result));
-            if (turn == MAX_MODEL_TURNS) {
-                throw contract("Natural CMS Model exceeded the bounded Tool loop.");
-            }
+                modelBindings(job, stage, ModelUseCase.TOOL_CALL);
+        CodingModelTurnContract.Response response = modelTurn(
+                job, stage, resultId, 1, schemas,
+                initialMessages(job, currentState, true), modelBindings);
+        if (response.toolCalls().size() != 1
+                || !"validate_cms_command".equals(response.toolCalls().get(0).name())) {
+            throw contract("Natural CMS Model must return one validate_cms_command Tool Call.");
         }
-        if (terminal == null || !terminal.toolCalls().isEmpty()) {
-            throw contract("Natural CMS Model did not produce a terminal command.");
-        }
-        JsonNode command = parseCommand(terminal.assistant().content());
-        resources.validateCommand(job.resource(), command);
+        JsonNode command = resources.validateCommand(
+                job.resource(), response.toolCalls().get(0).arguments().path("command"));
 
         ObjectNode targetArguments = baseArguments(job.resource(), currentState);
         callTool("resolve_cms_target", targetArguments, allowedTools);
@@ -338,28 +318,14 @@ public final class NaturalCmsStageService {
         }
         String instruction = commandStage
                 ? "Create one " + job.resource().type() + " UPDATE command. "
-                    + "You may call only declared CMS tools. Finish with only JSON containing "
-                    + "operation UPDATE and fields; fields may use only names from editableFields."
+                    + "Call validate_cms_command exactly once with the UPDATE command. "
+                    + "fields may use only names from editableFields."
                 : "Decide feasibility. Return only JSON with exactly fields port and payload; "
                     + "port must be feasible or infeasible and payload must be an object.";
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
                         .put("content", encode(context)));
-    }
-
-    private JsonNode callPreviewTool(
-            NaturalCmsContract.ResourceRef resource,
-            JsonNode currentState,
-            CodingModelTurnContract.ToolCall call,
-            Set<String> allowedTools) {
-        ObjectNode arguments = baseArguments(resource, currentState);
-        if (!"resolve_cms_target".equals(call.name())) {
-            JsonNode command = call.arguments().path("command");
-            resources.validateCommand(resource, command);
-            arguments.set("command", command.deepCopy());
-        }
-        return callTool(call.name(), arguments, allowedTools);
     }
 
     private JsonNode callTool(
@@ -403,26 +369,25 @@ public final class NaturalCmsStageService {
         return arguments;
     }
 
-    private List<JsonNode> toolSchemas(Set<String> names) {
-        List<JsonNode> schemas = new ArrayList<>();
-        for (String name : names.stream().sorted().toList()) {
-            ObjectNode schema = objectMapper.createObjectNode();
-            schema.put("name", name);
-            schema.put("description", "Approved AX Module Studio Natural CMS Tool " + name + ".");
-            schema.put("schemaDigest",
-                    NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS.get(name));
-            ObjectNode input = schema.putObject("inputSchema");
-            input.put("type", "object");
-            input.put("additionalProperties", false);
-            ObjectNode properties = input.putObject("properties");
-            ArrayNode required = input.putArray("required");
-            if (!"resolve_cms_target".equals(name)) {
-                properties.putObject("command").put("type", "object");
-                required.add("command");
-            }
-            schemas.add(schema);
-        }
-        return List.copyOf(schemas);
+    private List<JsonNode> previewToolSchemas() {
+        ObjectNode schema = objectMapper.createObjectNode();
+        schema.put("name", "validate_cms_command");
+        schema.put("description", "Submit one Natural CMS UPDATE command.");
+        schema.put("schemaDigest", NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS
+                .get("validate_cms_command"));
+        ObjectNode input = schema.putObject("inputSchema");
+        input.put("type", "object");
+        input.put("additionalProperties", false);
+        ObjectNode command = input.putObject("properties")
+                .putObject("command");
+        command.put("type", "object");
+        command.put("additionalProperties", false);
+        ObjectNode commandProperties = command.putObject("properties");
+        commandProperties.putObject("operation").put("type", "string");
+        commandProperties.putObject("fields").put("type", "object");
+        command.putArray("required").add("operation").add("fields");
+        input.putArray("required").add("command");
+        return List.of(schema);
     }
 
     static Set<String> allowedTools(Set<String> profileTools, Set<String> stageTools) {
@@ -431,40 +396,13 @@ public final class NaturalCmsStageService {
         return Set.copyOf(allowed);
     }
 
-    private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
-        ObjectNode message = objectMapper.createObjectNode();
-        message.put("role", "assistant");
-        message.put("content", response.assistant().content());
-        ArrayNode calls = message.putArray("toolCalls");
-        for (CodingModelTurnContract.ToolCall call : response.toolCalls()) {
-            ObjectNode value = calls.addObject();
-            value.put("toolCallId", call.toolCallId().toString());
-            value.put("name", call.name());
-            value.set("arguments", call.arguments());
+    private static void requirePreviewTools(Set<String> allowedTools) {
+        if (!allowedTools.containsAll(NaturalCmsToolContract.PREVIEW_TOOLS)) {
+            throw new NaturalCmsException(
+                    "TOOL_NOT_ALLOWED",
+                    "Natural CMS runtime policy rejected the Tool.",
+                    HttpStatus.FORBIDDEN);
         }
-        return message;
-    }
-
-    private ObjectNode toolMessage(
-            UUID resultId,
-            int turn,
-            CodingModelTurnContract.ToolCall call,
-            JsonNode result) {
-        String content = encode(result);
-        UUID executionId = UUID.nameUUIDFromBytes(
-                (resultId + ":tool:" + turn + ":" + call.toolCallId())
-                        .getBytes(StandardCharsets.UTF_8));
-        ObjectNode message = objectMapper.createObjectNode();
-        message.put("role", "tool");
-        message.put("toolCallId", call.toolCallId().toString());
-        message.put("executionId", executionId.toString());
-        message.putObject("result")
-                .put("mediaType", "application/json")
-                .put("resultRef", "/internal/natural-cms/tool-results/" + executionId)
-                .put("sizeBytes", content.getBytes(StandardCharsets.UTF_8).length)
-                .put("digest", hash(content));
-        message.put("content", content);
-        return message;
     }
 
     private ModelOutcome parseAnalyze(String value) {
@@ -485,24 +423,6 @@ public final class NaturalCmsStageService {
         return parsed;
     }
 
-    private JsonNode parseCommand(String value) {
-        StructuredOutputGuard.ValidatedOutput<String> validated;
-        try {
-            validated = STRUCTURED_OUTPUT_GUARD.validateOrRepair(
-                    value,
-                    candidate -> readCommand(candidate) != null,
-                    StructuredOutputGuard::extractOutermostJsonObject);
-        }
-        catch (ProviderGatewayException failure) {
-            throw contract("Natural CMS structured command is invalid.");
-        }
-        JsonNode command = readCommand(validated.value());
-        if (command == null) {
-            throw contract("Natural CMS structured command is invalid.");
-        }
-        return command;
-    }
-
     private ModelOutcome readAnalyze(String value) {
         if (value == null) {
             return null;
@@ -517,13 +437,6 @@ public final class NaturalCmsStageService {
         }
         return new ModelOutcome(
                 parsed.path("port").asText(), parsed.path("payload").deepCopy());
-    }
-
-    private JsonNode readCommand(String value) {
-        if (value == null) {
-            return null;
-        }
-        return StructuredOutputGuard.readSingleJsonObject(objectMapper, value);
     }
 
     private static void requireStatus(

@@ -45,10 +45,19 @@ public final class CodingHandlerStageService {
      * one-line edit closed its code stage in six turns, of which the patch-verify-reply
      * tail is three; the first real multi-file request died at eleven productive turns
      * with its files found but nothing patched, so its measured floor was fourteen.
-     * Sixteen is that floor plus two spare turns for one rejected patch - not a proven
+     * Sixteen was that floor plus two spare turns for one rejected patch - not a proven
      * ceiling, only a bound the recorded runs fit under.
+     *
+     * <p>2026-09-03: sixteen stopped fitting. The first screen requests to reach a real
+     * page file - src/features/site/PublicSite.tsx, 21 KB holding every public page -
+     * died three times in a row, each at turn seventeen. The third had already finished
+     * the work: twelve tool calls ending in apply_patch, two run_check, scan_changed_files
+     * and check_package_allowlist, with only the terminal reply left to write. A bound
+     * that stops a run after it has patched and passed its own checks throws the work
+     * away for nothing. Twenty-four is that measured run plus room for one rejected patch
+     * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
      */
-    private static final int MAX_MODEL_TURNS = 16;
+    private static final int MAX_MODEL_TURNS = 24;
     /** Tool refusals the model itself caused and can correct when told why. */
     private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",

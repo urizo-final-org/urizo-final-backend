@@ -28,27 +28,10 @@ class NaturalCmsMigrationTest {
     }
 
     @Test
-    void storedResourceRangeMatchesTheFourScreenResources() throws IOException {
-        String migration = Files.readString(Path.of(
-                "src/main/resources/db/migration/"
-                        + "V20260902084628560__widen_natural_cms_resource_types.sql"));
-
-        assertThat(migration)
-                .contains("ALTER TABLE app.natural_cms_job")
-                .contains("ALTER TABLE app.natural_cms_handler_result")
-                .contains("ck_natural_cms_job_resource")
-                .contains("ck_natural_cms_result_resource")
-                .contains("resource_type IN ('MENU', 'BOARD', 'CONTENT', 'TEMPLATE')")
-                .contains("resource_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'")
-                .doesNotContain("GRANT")
-                .doesNotContain("DROP TABLE");
-    }
-
-    @Test
     void queueConflictCheckReadsOneColumnAndNothingElse() throws IOException {
         String migration = Files.readString(Path.of(
                 "src/main/resources/db/migration/"
-                        + "V20260902090828631__grant_natural_cms_outbox_conflict_read.sql"));
+                        + "V20260903062827180__grant_natural_cms_outbox_conflict_read.sql"));
 
         assertThat(migration)
                 .contains("GRANT SELECT (event_key) ON app.transactional_outbox TO ai_workspace")

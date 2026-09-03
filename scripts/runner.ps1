@@ -969,6 +969,15 @@ function Complete-RunnerTask {
         outcome       = $outcome
     }
     if ($null -ne $result) { $body['result'] = $result }
+    # A failure reported as a code alone tells the approval screen that something broke and
+    # nothing about what. The reason was already computed for the console line; it travels in
+    # the same result field, which the Job authority stores for any outcome. Bounded because
+    # it is stored and shown, and a compiler can be arbitrarily talkative.
+    elseif ($detail) {
+        $reason = "$detail"
+        if ($reason.Length -gt 500) { $reason = $reason.Substring(0, 500) }
+        $body['result'] = @{ detail = $reason }
+    }
     if ($null -ne $errorCode) { $body['errorCode'] = $errorCode }
 
     $stamp = (Get-Date).ToString('HH:mm:ss')

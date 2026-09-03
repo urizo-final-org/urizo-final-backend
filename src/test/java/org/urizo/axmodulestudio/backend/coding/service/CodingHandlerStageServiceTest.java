@@ -1136,6 +1136,33 @@ class CodingHandlerStageServiceTest {
         assertThat(queuedRepository(runner, "PREVIEW_UP")).isEqualTo("frontend");
     }
 
+    /**
+     * The frontend runtime image installs and serves without compiling or testing, so nothing
+     * would stand between a broken screen and the person asked to approve it.
+     */
+    @Test
+    void previewChecksAFrontendCandidateBeforeAnyoneIsAskedToApproveIt() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        runPreview(runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE), null, "frontend");
+
+        assertThat(queuedRepository(runner, "TEST")).isEqualTo("frontend");
+    }
+
+    /** A backend candidate has to compile to become an image at all, so BUILD is that check. */
+    @Test
+    void previewDoesNotQueueASeparateCheckForABackendCandidate() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        runPreview(runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE), null, "backend");
+
+        verify(runner, never()).enqueue(eq("TEST"), any());
+    }
+
     /** The "repo" the runner is told to work in, for one queued command kind. */
     private static String queuedRepository(CodingRunnerService runner, String kind) {
         ArgumentCaptor<com.fasterxml.jackson.databind.JsonNode> payload =

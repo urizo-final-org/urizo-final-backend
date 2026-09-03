@@ -431,6 +431,20 @@ public final class CodingHandlerStageService {
             runnerPayload.put("workspaceId", workspaceId);
         }
         runner.enqueue("BUILD", runnerPayload);
+        // The frontend runtime image installs and serves; it never compiles or tests what it
+        // serves, so a broken screen would reach the person asked to approve it. The backend
+        // has to compile to become an image at all. Queued between BUILD and PREVIEW_UP: the
+        // runner takes one pending row at a time in order, so the image it checks is the one
+        // BUILD just made.
+        if (CodingRepositories.FRONTEND.equals(repository)) {
+            // workspaceId is not read by the check itself. It is what ties the queued row back
+            // to this Job, which is how the approval screen finds out whether it passed.
+            ObjectNode checkPayload = objectMapper.createObjectNode().put("repo", repository);
+            if (workspaceId != null) {
+                checkPayload.put("workspaceId", workspaceId);
+            }
+            runner.enqueue("TEST", checkPayload);
+        }
         // The preview needs the repository too: a frontend Job's changed screen only reaches
         // 18081 if the preview is pointed at that Job's checkout rather than a stale one.
         ObjectNode previewPayload = objectMapper.createObjectNode().put("repo", repository);

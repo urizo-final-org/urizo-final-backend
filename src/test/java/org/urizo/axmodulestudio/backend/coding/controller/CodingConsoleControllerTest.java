@@ -282,7 +282,7 @@ class CodingConsoleControllerTest {
                         List.of(new CodingConsoleContract.CriterionResult(
                                 "목록에 가입일이 보인다", true))),
                 pendingApproval(), List.of(),
-                new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/"),
+                new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/", null),
                 technical, Instant.parse("2026-09-02T00:00:00Z"), null, false);
     }
 
@@ -301,7 +301,7 @@ class CodingConsoleControllerTest {
                 BASE_SHA, BASE_SHA, "sha256:" + "c".repeat(64),
                 List.of(CHANGED_PATH),
                 "diff --git a/README.md b/README.md +데모 확인",
-                "maven-verify", null, null);
+                "maven-verify", null, null, null);
     }
 
     @Test

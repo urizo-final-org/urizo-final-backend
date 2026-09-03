@@ -184,11 +184,23 @@ public final class CodingConsoleContract {
             String feedback,
             Instant decidedAt) { }
 
-    /** Where a general administrator looks instead of reading the diff. */
+    /**
+     * Where a general administrator looks instead of reading the diff.
+     *
+     * <p>{@code ready} used to mean "the preview stage recorded a result", which is not the
+     * same as "the preview is up". Raising it is Docker work the runner does afterwards, and
+     * when that failed the screen still offered the link - to the previous request's preview,
+     * which looks perfectly fine and is not what anyone is approving.
+     *
+     * <p>{@code blocked} is the reason there is nothing to open, in the requester's own words
+     * and without a path or a symbol in it: this is the screen a general administrator reads.
+     * Both null means the preview is still being raised.
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PreviewLink(
             boolean ready,
-            String url) { }
+            String url,
+            String blocked) { }
 
     /**
      * Super administrator only. The server omits this whole object for anyone else, so a
@@ -203,7 +215,12 @@ public final class CodingConsoleContract {
             String diff,
             String checkProfile,
             String pullRequestUrl,
-            BaseShaFreshness baseShaFreshness) {
+            BaseShaFreshness baseShaFreshness,
+            /**
+             * Why the build, the checks or the preview did not finish, as the runner reported
+             * it. It names files and compiler codes, so it stays on this side of the fence.
+             */
+            String runnerFailure) {
 
         public Technical {
             changedPaths = changedPaths == null ? List.of() : List.copyOf(changedPaths);

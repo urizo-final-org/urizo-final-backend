@@ -220,6 +220,9 @@ public class CodingConsoleService {
         JsonNode analysis = payloadOf(results, "coding.analyze");
         JsonNode review = payloadOf(results, "coding.review");
         JsonNode preview = payloadOf(results, "coding.preview");
+        // Read once: the same rows answer "is there a preview to open" for one reader and
+        // "why not" for the other.
+        List<RunnerRow> work = runnerWork(jobId);
 
         return new CodingConsoleContract.JobDetail(
                 "1.0",
@@ -234,13 +237,79 @@ public class CodingConsoleService {
                 report(review),
                 pendingApproval(job, jobId, attempt),
                 decisions(jobId),
-                new CodingConsoleContract.PreviewLink(preview != null, preview == null ? null : PREVIEW_URL),
+                previewLink(work, preview != null),
                 // Everything a general administrator must not read lives in this one object,
                 // and for them it is simply absent from the response.
-                role == AdminRole.SUPER_ADMIN ? technical(job, jobId, results, preview) : null,
+                role == AdminRole.SUPER_ADMIN
+                        ? technical(job, jobId, results, preview, work) : null,
                 job.createdAt(),
                 job.finishedAt(),
                 refused(results));
+    }
+
+    /**
+     * Whether there is a preview to open, and if not, why.
+     *
+     * <p>The preview stage records its result and queues the Docker work; raising the stack
+     * happens afterwards and can fail. Reading only the stage result told the screen "ready"
+     * either way, so the person opened the previous request's preview, saw a working site and
+     * approved it. The runner's own rows are the only place the answer exists.
+     *
+     * <p>The rows are found by the workspace they were queued with, which is this Job: a queue
+     * has no job column. Read through the connection this service already uses - it is the one
+     * that writes those rows, so no grant is involved.
+     */
+    static CodingConsoleContract.PreviewLink previewLink(
+            List<RunnerRow> rows, boolean stageRecorded) {
+        if (rows.isEmpty()) {
+            // Queued rows carry the workspace only for Jobs created by the current intake. An
+            // older Job has none, and no evidence is not evidence of failure: it keeps the
+            // answer it has always given.
+            return new CodingConsoleContract.PreviewLink(
+                    stageRecorded, stageRecorded ? PREVIEW_URL : null, null);
+        }
+        RunnerRow failed = rows.stream()
+                .filter(row -> "FAILED".equals(row.status()))
+                .findFirst()
+                .orElse(null);
+        if (failed != null) {
+            return new CodingConsoleContract.PreviewLink(false, null, blockedReason(failed.kind()));
+        }
+        boolean up = rows.stream()
+                .anyMatch(row -> "PREVIEW_UP".equals(row.kind()) && "SUCCEEDED".equals(row.status()));
+        return new CodingConsoleContract.PreviewLink(up, up ? PREVIEW_URL : null, null);
+    }
+
+    /**
+     * Why there is nothing to open, for the screen a general administrator reads.
+     *
+     * <p>Deliberately without the runner's own words: those name files and carry compiler
+     * codes, and showing them here is the thing approval 2 exists not to do. The detail is on
+     * the super administrator's side of the response.
+     */
+    private static String blockedReason(String kind) {
+        return switch (kind) {
+            case "TEST" -> "AI 가 만든 화면이 검사를 통과하지 못했습니다. "
+                    + "최고관리자에게 확인을 요청해 주세요.";
+            case "BUILD" -> "AI 가 만든 결과로 미리보기를 준비하지 못했습니다. "
+                    + "최고관리자에게 확인을 요청해 주세요.";
+            default -> "미리보기를 띄우지 못했습니다. 최고관리자에게 확인을 요청해 주세요.";
+        };
+    }
+
+    /** The newest queued Docker step of each kind for this Job, in the order they run. */
+    private List<RunnerRow> runnerWork(UUID jobId) {
+        return jdbc.query("""
+                SELECT DISTINCT ON (kind) kind, status, error_code,
+                       result_json ->> 'detail' AS detail
+                FROM app.coding_runner_task
+                WHERE payload ->> 'workspaceId' = ?
+                  AND kind IN ('BUILD', 'TEST', 'PREVIEW_UP')
+                ORDER BY kind, created_at DESC
+                """,
+                (rs, row) -> new RunnerRow(rs.getString("kind"), rs.getString("status"),
+                        rs.getString("error_code"), rs.getString("detail")),
+                jobId.toString());
     }
 
     /**
@@ -287,7 +356,8 @@ public class CodingConsoleService {
     }
 
     private CodingConsoleContract.Technical technical(
-            JobRow job, UUID jobId, List<ResultRow> results, JsonNode preview) {
+            JobRow job, UUID jobId, List<ResultRow> results, JsonNode preview,
+            List<RunnerRow> work) {
         ResultRow candidate = results.stream()
                 .filter(row -> "coding.preview".equals(row.handlerKey()))
                 .findFirst()
@@ -303,7 +373,25 @@ public class CodingConsoleService {
                 diff(jobId),
                 preview == null ? null : text(preview, "checkProfile"),
                 null,
-                null);
+                null,
+                runnerFailure(work));
+    }
+
+    /**
+     * The runner's own account of what broke, for the reader who can act on it.
+     *
+     * <p>The code alone says a step failed; the detail says which file and which rule. It is
+     * kept on this side because it names paths, which is exactly what the other screen must
+     * not show.
+     */
+    private static String runnerFailure(List<RunnerRow> work) {
+        return work.stream()
+                .filter(row -> "FAILED".equals(row.status()))
+                .findFirst()
+                .map(row -> row.detail() == null || row.detail().isBlank()
+                        ? row.kind() + " " + row.errorCode()
+                        : row.kind() + " " + row.errorCode() + ": " + row.detail())
+                .orElse(null);
     }
 
     /**
@@ -469,6 +557,9 @@ public class CodingConsoleService {
             String requestText,
             Instant createdAt,
             Instant finishedAt) { }
+
+    /** One queued Docker step as the runner left it. */
+    record RunnerRow(String kind, String status, String errorCode, String detail) { }
 
     private record ResultRow(
             String handlerKey,

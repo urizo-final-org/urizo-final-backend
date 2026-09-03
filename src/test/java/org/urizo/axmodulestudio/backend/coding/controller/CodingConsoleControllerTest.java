@@ -244,7 +244,7 @@ class CodingConsoleControllerTest {
                 new CodingConsoleContract.JobSummary(
                         JOB, "backend", "회원 목록에 가입일도 보이게 해줘",
                         "WAITING_APPROVAL", "코드 검토",
-                        Instant.parse("2026-09-02T00:00:00Z"), null, null))));
+                        Instant.parse("2026-09-02T00:00:00Z"), null, null, false))));
 
         mockMvc.perform(get("/api/admin/coding/jobs")
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
@@ -283,7 +283,7 @@ class CodingConsoleControllerTest {
                                 "목록에 가입일이 보인다", true))),
                 pendingApproval(), List.of(),
                 new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/"),
-                technical, Instant.parse("2026-09-02T00:00:00Z"), null);
+                technical, Instant.parse("2026-09-02T00:00:00Z"), null, false);
     }
 
     /**

@@ -76,7 +76,8 @@ public class CodingConsoleService {
         List<CodingConsoleContract.JobSummary> items = jdbc.query("""
                 SELECT cj.job_id, cj.status, cjr.request_text, cj.created_at, cj.finished_at,
                        cj.failure_code,
-                       COALESCE(latest.handler_key, cj.graph_step) AS stage
+                       COALESCE(latest.handler_key, cj.graph_step) AS stage,
+                       COALESCE(refusal.refused, FALSE) AS refused
                 FROM app.coding_job cj
                 LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
                 -- graph_step stops at the node the Job entered, not the one it reached, so a
@@ -89,6 +90,15 @@ public class CodingConsoleService {
                     ORDER BY chr.recorded_at DESC, chr.result_id DESC
                     LIMIT 1
                 ) latest ON TRUE
+                -- The analyst's own verdict. 'infeasible' is a refusal, and it is the only
+                -- place the refusal is recorded: the job itself ends as an ordinary success.
+                LEFT JOIN LATERAL (
+                    SELECT chr.result_port = 'infeasible' AS refused
+                    FROM app.coding_handler_result chr
+                    WHERE chr.job_id = cj.job_id AND chr.handler_key = 'coding.analyze'
+                    ORDER BY chr.recorded_at DESC, chr.result_id DESC
+                    LIMIT 1
+                ) refusal ON TRUE
                 WHERE cj.job_type = 'CODING_AGENT'
                 ORDER BY cj.created_at DESC
                 LIMIT ?
@@ -101,7 +111,8 @@ public class CodingConsoleService {
                         stageLabel(rs.getString("stage")),
                         instant(rs, "created_at"),
                         instant(rs, "finished_at"),
-                        rs.getString("failure_code")),
+                        rs.getString("failure_code"),
+                        rs.getBoolean("refused")),
                 limit);
         return new CodingConsoleContract.JobList("1.0", items);
     }
@@ -234,7 +245,22 @@ public class CodingConsoleService {
                 // and for them it is simply absent from the response.
                 role == AdminRole.SUPER_ADMIN ? technical(job, jobId, results, preview) : null,
                 job.createdAt(),
-                job.finishedAt());
+                job.finishedAt(),
+                refused(results));
+    }
+
+    /**
+     * The analyst's verdict, which the job status does not carry.
+     *
+     * <p>A refused request finishes the pipeline normally and is stored as COMPLETED. To the
+     * person who was turned down that reads as "done", so the screen is told plainly instead.
+     */
+    private static boolean refused(List<ResultRow> results) {
+        return results.stream()
+                .filter(row -> "coding.analyze".equals(row.handlerKey()))
+                .findFirst()
+                .map(row -> "infeasible".equals(row.resultPort()))
+                .orElse(false);
     }
 
     private CodingConsoleContract.Plan plan(JsonNode analysis) {
@@ -373,6 +399,7 @@ public class CodingConsoleService {
                 """,
                 (rs, row) -> new ResultRow(
                         rs.getString("handler_key"),
+                        rs.getString("result_port"),
                         rs.getString("candidate_sha"),
                         rs.getString("diff_digest"),
                         readTree(rs.getString("payload"))),
@@ -450,6 +477,7 @@ public class CodingConsoleService {
 
     private record ResultRow(
             String handlerKey,
+            String resultPort,
             String candidateSha,
             String diffDigest,
             JsonNode payload) { }

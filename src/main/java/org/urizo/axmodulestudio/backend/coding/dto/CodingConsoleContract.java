@@ -36,7 +36,13 @@ public final class CodingConsoleContract {
             String currentStage,
             Instant createdAt,
             Instant finishedAt,
-            String failureCode) { }
+            String failureCode,
+            /**
+             * The analyst judged the request outside what it may change. The pipeline then
+             * ends normally, so the job status is COMPLETED - which reads as "done" to the
+             * person who was actually turned down. The screen needs this to say otherwise.
+             */
+            boolean refused) { }
 
     /** The list endpoint's envelope. */
     public record JobList(
@@ -109,7 +115,8 @@ public final class CodingConsoleContract {
             PreviewLink preview,
             Technical technical,
             Instant createdAt,
-            Instant finishedAt) {
+            Instant finishedAt,
+            boolean refused) {
 
         public JobDetail {
             decisions = decisions == null ? List.of() : List.copyOf(decisions);

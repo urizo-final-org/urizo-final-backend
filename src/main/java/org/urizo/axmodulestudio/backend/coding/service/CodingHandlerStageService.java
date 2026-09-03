@@ -916,7 +916,12 @@ public final class CodingHandlerStageService {
                     + "fact, not a guess: do not assume the files such a request needs happen "
                     + "to live inside an allowed area. Judge by the area the request names. "
                     + "When it needs a denied area, or an area not listed as allowed, answer "
-                    + "port \"infeasible\" and explain in planSummary, in the language of the "
+                    + "port \"infeasible\". planSummary must then read as a refusal from its "
+                    // Live run 2026-09-03: an infeasible answer whose summary said "기능을
+                    // 개선합니다" reached the screen, where it read as an accepted request.
+                    + "first sentence - say that the request cannot be carried out and why, "
+                    + "and never describe the work as if it were going ahead. Explain in the "
+                    + "language of the "
                     + "request, naming the areas only by the guardrail labels, and end that "
                     + "refusal by asking the reader to request a guardrail change from the "
                     // Live run 2026-09-02: without this clause the refusal ending leaked into

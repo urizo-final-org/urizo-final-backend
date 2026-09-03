@@ -177,6 +177,28 @@ class ProfileSnapshotValidatorTest {
     }
 
     @Test
+    void acceptsLegacyAliasesAndRequiresAWellFormedSelectionObjectForCatalogIds() throws Exception {
+        ObjectNode legacy = (ObjectNode) authoringSnapshot();
+        ObjectNode selected = (ObjectNode) authoringSnapshot();
+        ObjectNode binding = selected.withObject("modelBindings").withObject("analyze");
+        binding.put("primary", "openai-gpt-5-6-terra");
+        binding.withObject("selections").withObject("openai-gpt-5-6-terra")
+                .put("provider", "OPENAI")
+                .put("model", "gpt-5.6-terra")
+                .withObject("inference").put("reasoningIntensity", "HIGH");
+
+        assertAll(
+                () -> assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring(
+                        "LLM_OPS", legacy)).doesNotThrowAnyException(),
+                () -> assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring(
+                        "LLM_OPS", selected)).doesNotThrowAnyException());
+
+        binding.withObject("selections").remove("openai-gpt-5-6-terra");
+        assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring(
+                "LLM_OPS", selected));
+    }
+
+    @Test
     void enforcesThePythonCommonHandlerConfigContract() throws Exception {
         ObjectNode startConfig = (ObjectNode) authoringSnapshot();
         node(startConfig, "start").withObject("config").put("unexpected", true);

@@ -38,12 +38,17 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.google.genai.GoogleGenAiChatModel;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.springframework.ai.google.genai.common.GoogleGenAiThinkingLevel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.StructuredOutputChatOptions;
 import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.ai.openai.api.OpenAiApi;
 import org.springframework.ai.retry.TransientAiException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSupport;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
@@ -111,6 +116,69 @@ class SpringAiProductProviderChatAdapterTest {
     void mapsAnthropicJsonSchemaIntoTheNativeProviderRequest() throws Exception {
         verifiesNativeStructuredOutputContract(
                 ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT);
+    }
+
+    @Test
+    void preservesProviderInferenceControlsForChatToolAndStructuredPrompts() throws Exception {
+        SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
+                mock(ProviderCredentialResolver.class), List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+        for (ModelProvider provider : List.of(
+                ModelProvider.OPENAI, ModelProvider.ANTHROPIC, ModelProvider.GOOGLE_GENAI)) {
+            String modelId = switch (provider) {
+                case OPENAI -> Stage2ProviderModels.OPENAI_TERRA;
+                case ANTHROPIC -> Stage2ProviderModels.ANTHROPIC_CHAT;
+                case GOOGLE_GENAI -> Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+                default -> throw new AssertionError("unsupported fixture provider");
+            };
+            InferenceSettings settings = new InferenceSettings(
+                    InferenceSettings.ReasoningIntensity.HIGH,
+                    provider == ModelProvider.ANTHROPIC ? 2_048 : null);
+            List<ProviderChatRequest> requests = List.of(
+                    new ProviderChatRequest(provider, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Reply with OK.")),
+                            List.of(), ProviderResponseFormat.text(), NOW.plusSeconds(30), settings),
+                    new ProviderChatRequest(provider, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Read the approved file.")),
+                            List.of(new ProviderToolDefinition(
+                                    "read_file", "Read one approved file.", readFileSchema())),
+                            ProviderResponseFormat.text(), NOW.plusSeconds(30), settings),
+                    new ProviderChatRequest(provider, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Return JSON.")),
+                            List.of(), ProviderResponseFormat.jsonSchema(readFileSchema()),
+                            NOW.plusSeconds(30), settings));
+
+            for (ProviderChatRequest request : requests) {
+                assertInference(promptFor(adapter, request), provider, settings);
+            }
+        }
+    }
+
+    @Test
+    void neverCombinesGoogleThinkingLevelAndBudgetForBudgetBasedModels() throws Exception {
+        SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
+                mock(ProviderCredentialResolver.class), List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+        InferenceSettings budget = new InferenceSettings(
+                InferenceSettings.ReasoningIntensity.NONE, 2_048);
+        List<ProviderChatRequest> requests = googleRequests(budget);
+
+        for (ProviderChatRequest request : requests) {
+            GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) promptFor(adapter, request)
+                    .getOptions();
+            assertThat(options.getThinkingBudget()).isEqualTo(2_048);
+            assertThat(options.getThinkingLevel()).isNull();
+        }
+
+        InferenceSettings levelAndBudget = new InferenceSettings(
+                InferenceSettings.ReasoningIntensity.HIGH, 2_048);
+        for (ProviderChatRequest request : googleRequests(levelAndBudget)) {
+            GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) promptFor(
+                    adapter, request, levelBasedGoogleSupport()).getOptions();
+            assertThat(options.getThinkingLevel()).isEqualTo(GoogleGenAiThinkingLevel.HIGH);
+            assertThat(options.getThinkingBudget()).isNull();
+        }
     }
 
     @Test
@@ -663,6 +731,89 @@ class SpringAiProductProviderChatAdapterTest {
             createRequest.setAccessible(true);
             return (GoogleGenAiChatModel.GeminiRequest) createRequest.invoke(
                     session.chatModel(), prompt);
+        }
+    }
+
+    private static Prompt promptFor(
+            SpringAiProductProviderChatAdapter adapter, ProviderChatRequest request) throws Exception {
+        InferenceSupport support = request.provider() == ModelProvider.GOOGLE_GENAI
+                && request.inferenceSettings().reasoningBudgetTokens() != null
+                ? budgetBasedGoogleSupport() : levelBasedGoogleSupport();
+        return promptFor(adapter, request, support);
+    }
+
+    private static Prompt promptFor(
+            SpringAiProductProviderChatAdapter adapter,
+            ProviderChatRequest request,
+            InferenceSupport support) throws Exception {
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                request.provider(), request.modelId(),
+                Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30), 1,
+                ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS,
+                InferenceSettings.none(), support);
+        Method prompt = SpringAiProductProviderChatAdapter.class.getDeclaredMethod(
+                "prompt", ProviderModelRegistration.class, ProviderChatRequest.class);
+        prompt.setAccessible(true);
+        return (Prompt) prompt.invoke(adapter, registration, request);
+    }
+
+    private static List<ProviderChatRequest> googleRequests(InferenceSettings settings) {
+        return List.of(
+                new ProviderChatRequest(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                        List.of(ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.USER, "Reply with OK.")),
+                        List.of(), ProviderResponseFormat.text(), NOW.plusSeconds(30), settings),
+                new ProviderChatRequest(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                        List.of(ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.USER, "Read the approved file.")),
+                        List.of(new ProviderToolDefinition(
+                                "read_file", "Read one approved file.", readFileSchema())),
+                        ProviderResponseFormat.text(), NOW.plusSeconds(30), settings),
+                new ProviderChatRequest(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT,
+                        List.of(ProviderChatMessage.plain(
+                                ProviderChatMessage.Role.USER, "Return JSON.")),
+                        List.of(), ProviderResponseFormat.jsonSchema(readFileSchema()),
+                        NOW.plusSeconds(30), settings));
+    }
+
+    private static InferenceSupport levelBasedGoogleSupport() {
+        return new InferenceSupport(InferenceSettings.none(),
+                Set.of(InferenceSettings.ReasoningIntensity.NONE,
+                        InferenceSettings.ReasoningIntensity.MINIMAL,
+                        InferenceSettings.ReasoningIntensity.LOW,
+                        InferenceSettings.ReasoningIntensity.MEDIUM,
+                        InferenceSettings.ReasoningIntensity.HIGH), null);
+    }
+
+    private static InferenceSupport budgetBasedGoogleSupport() {
+        return new InferenceSupport(InferenceSettings.none(),
+                Set.of(InferenceSettings.ReasoningIntensity.NONE),
+                new InferenceSupport.BudgetRange(1, 4_096, 1));
+    }
+
+    private static void assertInference(
+            Prompt prompt, ModelProvider provider, InferenceSettings settings) {
+        if (provider == ModelProvider.OPENAI) {
+            assertThat(prompt.getOptions()).isInstanceOf(OpenAiChatOptions.class);
+            assertThat(((OpenAiChatOptions) prompt.getOptions()).getReasoningEffort())
+                    .isEqualTo("high");
+        }
+        else if (provider == ModelProvider.ANTHROPIC) {
+            assertThat(prompt.getOptions()).isInstanceOf(AnthropicChatOptions.class);
+            assertThat(((AnthropicChatOptions) prompt.getOptions()).getThinking())
+                    .isEqualTo(new AnthropicApi.ChatCompletionRequest.ThinkingConfig(
+                            AnthropicApi.ThinkingType.ENABLED, settings.reasoningBudgetTokens()));
+        }
+        else {
+            assertThat(prompt.getOptions()).isInstanceOf(GoogleGenAiChatOptions.class);
+            GoogleGenAiChatOptions options = (GoogleGenAiChatOptions) prompt.getOptions();
+            assertThat(options.getThinkingLevel()).isEqualTo(GoogleGenAiThinkingLevel.HIGH);
+            assertThat(options.getThinkingBudget()).isEqualTo(settings.reasoningBudgetTokens());
         }
     }
 

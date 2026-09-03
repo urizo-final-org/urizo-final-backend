@@ -165,6 +165,33 @@ class ProviderCapabilityRegistryTest {
                 .isEqualTo(ModelGatewayErrorCode.CONTRACT_VALIDATION_FAILED);
     }
 
+    @Test
+    void configuredProductCatalogMatchesEachProviderNativeInferenceSurface() {
+        ProviderCapabilityRegistry registry = new ProviderCapabilityRegistry(
+                ProviderLane.PRODUCT, policy,
+                ProviderCapabilityConfiguration.registrations(ProviderLane.PRODUCT));
+
+        assertThat(registry.require(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT,
+                ModelUseCase.CHAT).inferenceSupport().reasoningIntensities())
+                .containsExactly(InferenceSettings.ReasoningIntensity.NONE);
+        assertThat(registry.require(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_TERRA,
+                ModelUseCase.CHAT).inferenceSupport().reasoningIntensities())
+                .containsExactlyInAnyOrder(InferenceSettings.ReasoningIntensity.NONE,
+                        InferenceSettings.ReasoningIntensity.MINIMAL,
+                        InferenceSettings.ReasoningIntensity.LOW,
+                        InferenceSettings.ReasoningIntensity.MEDIUM,
+                        InferenceSettings.ReasoningIntensity.HIGH);
+        assertThat(registry.require(ModelProvider.GOOGLE_GENAI,
+                Stage2ProviderModels.GOOGLE_GENAI_CHAT, ModelUseCase.TOOL_CALL)
+                .inferenceSupport().reasoningBudgetTokens())
+                .isNull();
+        assertThat(registry.require(ModelProvider.ANTHROPIC,
+                Stage2ProviderModels.ANTHROPIC_CHAT, ModelUseCase.STRUCTURED_OUTPUT)
+                .inferenceSupport().reasoningIntensities())
+                .containsExactlyInAnyOrder(InferenceSettings.ReasoningIntensity.NONE,
+                        InferenceSettings.ReasoningIntensity.HIGH);
+    }
+
     private static ProviderModelRegistration registration(
             ModelProvider provider,
             String modelId,

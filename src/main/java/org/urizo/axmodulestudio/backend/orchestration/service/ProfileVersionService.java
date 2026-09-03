@@ -4,20 +4,28 @@ import java.util.List;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository.AdminStoredProfileVersion;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
+import org.urizo.axmodulestudio.backend.integration.ai.local.LocalProviderSecretService;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class ProfileVersionService {
 
     private final ProfileVersionRepository repository;
+    private final ProfileModelBindingService bindings;
+    private final LocalProviderSecretService credentials;
 
-    public ProfileVersionService(ProfileVersionRepository repository) {
+    public ProfileVersionService(ProfileVersionRepository repository,
+            ProfileModelBindingService bindings, LocalProviderSecretService credentials) {
         this.repository = repository;
+        this.bindings = bindings;
+        this.credentials = credentials;
     }
 
     public JsonNode getBound(String authorization, UUID profileVersionId) {
@@ -44,7 +52,10 @@ public final class ProfileVersionService {
     public AdminStoredProfileVersion createDraft(String profileKey, JsonNode authoringSnapshot) {
         String normalized = requireProfileKey(profileKey);
         ProfileSnapshotValidator.validateAuthoring(normalized, authoringSnapshot);
-        return repository.createDraft(normalized, UUID.randomUUID(), authoringSnapshot);
+        bindings.validateCatalogSelections(normalized, authoringSnapshot);
+        UUID profileVersionId = UUID.randomUUID();
+        validateModels(normalized, profileVersionId, authoringSnapshot, true);
+        return repository.createDraft(normalized, profileVersionId, authoringSnapshot);
     }
 
     public AdminStoredProfileVersion activate(UUID profileVersionId) {
@@ -61,7 +72,30 @@ public final class ProfileVersionService {
                 stored.profileKey(),
                 stored.profileVersion(),
                 stored.snapshot());
+        bindings.validateCatalogSelections(stored.profileKey(), stored.snapshot());
+        validateModels(stored.profileKey(), stored.profileVersionId(), stored.snapshot(), false);
         return repository.activate(profileVersionId).orElseThrow(ProfileVersionService::notFound);
+    }
+
+    private void validateModels(String profileKey, UUID profileVersionId, JsonNode snapshot,
+            boolean authoring) {
+        ObjectNode full = snapshot.deepCopy();
+        if (authoring) {
+            full.put("profileVersionId", profileVersionId.toString());
+            full.put("profileKey", profileKey);
+        }
+        for (JsonNode node : full.path("nodes")) {
+            if (!"agent".equals(node.path("type").asText())) continue;
+            if (authoring && !full.path("modelBindings").path(node.path("id").asText())
+                    .has("selections")) continue;
+            bindings.resolve(full, profileVersionId, node.path("id").asText(),
+                    node.path("handlerKey").asText(), ModelUseCase.TOOL_CALL).forEach(model -> {
+                        if (!credentials.hasVerifiedCredential(model.provider())) {
+                            throw new ProfileVersionException("MODEL_CREDENTIAL_UNAVAILABLE",
+                                    "The selected Provider Credential is unavailable.", HttpStatus.CONFLICT);
+                        }
+                    });
+        }
     }
 
     private static String requireProfileKey(String profileKey) {

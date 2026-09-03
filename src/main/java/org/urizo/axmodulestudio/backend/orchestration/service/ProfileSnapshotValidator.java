@@ -149,8 +149,11 @@ final class ProfileSnapshotValidator {
         bindings.fields().forEachRemaining(entry -> {
             ObjectNode binding = object(entry.getValue(),
                     "snapshot.modelBindings." + entry.getKey());
-            exactFields(binding, Set.of("primary", "fallback"),
-                    "snapshot.modelBindings." + entry.getKey());
+            Set<String> bindingFields = fields(binding);
+            if (!Set.of("primary", "fallback", "selections").containsAll(bindingFields)
+                    || !bindingFields.containsAll(Set.of("primary", "fallback"))) {
+                invalid("snapshot.modelBindings binding fields are invalid");
+            }
             String primary = textMatching(binding.get("primary"), MODEL_KEY,
                     "snapshot.modelBindings." + entry.getKey() + ".primary");
             Set<String> fallback = stringSet(binding.get("fallback"), MODEL_KEY,
@@ -158,13 +161,25 @@ final class ProfileSnapshotValidator {
             if (fallback.contains(primary)) {
                 invalid("snapshot.modelBindings fallback must not repeat the primary model");
             }
-            if (!ProfileModelBindingService.isRegisteredBindingKey(profileKey, primary)
-                    || fallback.stream().anyMatch(bindingKey ->
-                            !ProfileModelBindingService.isRegisteredBindingKey(
-                                    profileKey, bindingKey))) {
+            JsonNode selections = binding.path("selections");
+            if ((!selections.isMissingNode() && !selections.isObject())
+                    || (!selectionKnown(selections, primary)
+                    && !ProfileModelBindingService.isRegisteredBindingKey(profileKey, primary))
+                    || fallback.stream().anyMatch(bindingKey -> !selectionKnown(selections, bindingKey)
+                            && !ProfileModelBindingService.isRegisteredBindingKey(profileKey, bindingKey))) {
                 invalid("snapshot.modelBindings contains an unregistered binding for this Profile");
             }
         });
+    }
+
+    private static boolean selectionKnown(JsonNode selections, String selectionId) {
+        JsonNode selection = selections.path(selectionId);
+        return selection.isObject() && selection.size() == 3
+                && selection.path("provider").isTextual() && selection.path("model").isTextual()
+                && selection.path("inference").isObject()
+                && selection.path("inference").size() >= 1
+                && selection.path("inference").size() <= 2
+                && selection.path("inference").path("reasoningIntensity").isTextual();
     }
 
     private static void validateToolPolicy(ObjectNode toolPolicy, String profileKey) {

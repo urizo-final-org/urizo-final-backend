@@ -41,6 +41,10 @@ param(
     # service runs, so this adds no new dependency and keeps Git versions equal.
     [string]$McpWorkspaceImage = 'axms/mcp-server:dev',
 
+    # Fixed by compose.preview.yaml. TEST runs the frontend checks inside the image BUILD
+    # just produced rather than building one of its own.
+    [string]$PreviewFrontendImage = 'axms/preview-frontend:latest',
+
     [switch]$RunOnce
 )
 
@@ -750,6 +754,54 @@ function Invoke-ComposeBuild {
     return @{ repo = $repository; services = $services; projectDirectory = $backendWorktree }
 }
 
+function Invoke-FrontendChecks {
+    # The frontend runtime image installs dependencies and serves the sources; nothing in it
+    # compiles or tests them. A backend candidate at least has to compile to become an image,
+    # so a broken one dies at BUILD. A broken screen does not - it reaches the person who is
+    # asked to approve it, and the guardrail screen promises the opposite in so many words:
+    # "빌드 통과 필수 · 테스트 통과 필수 - 항상 켜져 있으며 끌 수 없습니다".
+    #
+    # BUILD has already produced this image from the same workspace and the dev dependencies
+    # are in it, so the checks run in what is there. Building a second image would double the
+    # wait and could check something other than what the preview is about to serve.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm $PreviewFrontendImage pnpm run verify 2>&1
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
+    # vitest colours its summary, so the escape codes are stripped before anything is matched
+    # or reported. Left in, they reach the approval screen as unreadable noise.
+    # PowerShell 5.1 has no `e escape, and a raw control character in the source would not
+    # survive an editor round trip, so the byte is named rather than typed.
+    $escape = [char]27
+    $plain = @($output | ForEach-Object { "$_" -replace "$escape\[[0-9;]*[A-Za-z]", '' })
+    if ($exit -ne 0) {
+        # What failed has to survive into one line on the approval screen. Taking the tail
+        # does not work: pnpm echoes "Command failed" once per nested script and vitest signs
+        # off with timings, so the compiler error ends up buried in its own noise. The lines
+        # that name a failure are picked out instead, and the tail is only the fallback for a
+        # failure shaped like nothing here.
+        $named = @($plain | Select-String -Pattern 'error TS[0-9]|Tests .*failed|error during build|Error:' |
+            ForEach-Object { $_.ToString().Trim() } | Select-Object -First 2)
+        if ($named) {
+            $tail = $named
+        }
+        else {
+            $tail = @($plain | Where-Object { $_.Trim() -and $_ -notmatch 'ELIFECYCLE' }) |
+                Select-Object -Last 3
+        }
+        throw "RUNNER_TEST_FAILED|$($tail -join ' / ')"
+    }
+    $tests = ($plain | Select-String -Pattern '^\s*Tests\s+\S' | Select-Object -Last 1)
+    $summary = if ($tests) { $tests.ToString().Trim() } else { '검사 통과' }
+    return @{ repo = 'frontend'; summary = "$summary · 타입 검사와 빌드 통과" }
+}
+
 function Invoke-Tests {
     param($Payload)
 
@@ -759,18 +811,18 @@ function Invoke-Tests {
     # The runtime image has no Maven and no test dependencies: the Dockerfile
     # builds with -DskipTests on purpose. Tests therefore run in the build stage,
     # and the dependency cache is a named volume so only the first run downloads.
+    if ($repository -eq 'frontend') { return Invoke-FrontendChecks }
+    if ($repository -ne 'backend') {
+        throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository"
+    }
+
     $worktree = Get-AiWorktreePath -Repository $repository
     $stageImage = "axms/preview-$repository-test:latest"
-    $target = switch ($repository) {
-        'backend' { 'build' }
-        'frontend' { throw 'RUNNER_KIND_NOT_IMPLEMENTED|frontend 테스트는 아직 구현하지 않았습니다.' }
-        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository" }
-    }
 
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $build = & docker build --target $target -t $stageImage $worktree 2>&1
+        $build = & docker build --target build -t $stageImage $worktree 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "RUNNER_TEST_FAILED|테스트 이미지 준비 실패: $(($build | Select-Object -Last 3) -join ' ')"
         }

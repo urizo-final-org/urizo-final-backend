@@ -44,10 +44,12 @@ class CodingJobIntakeServiceTest {
     private final CodingHandlerCommandService commands = mock(CodingHandlerCommandService.class);
     private final CodingRunnerService runner = mock(CodingRunnerService.class);
     private final ProfileVersionRepository profiles = mock(ProfileVersionRepository.class);
+    private final GuardrailPathSelectionService guardrail =
+            mock(GuardrailPathSelectionService.class);
 
     private CodingJobIntakeService service() {
         return new CodingJobIntakeService(
-                commands, runner, profiles, mapper, Clock.fixed(NOW, ZoneOffset.UTC),
+                commands, runner, profiles, guardrail, mapper, Clock.fixed(NOW, ZoneOffset.UTC),
                 // A real wait would make the suite sleep; the polling itself is not what is
                 // under test, only what happens at each outcome.
                 3, Duration.ofMillis(1));
@@ -186,6 +188,21 @@ class CodingJobIntakeServiceTest {
         ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
         verify(runner).enqueue(eq("CREATE_WORKTREE"), payload.capture());
         assertThat(payload.getValue().path("repo").asText()).isEqualTo("frontend");
+    }
+
+    /**
+     * The analyst was seen to wave one of these through. With no allowed folder in this
+     * repository the file list it is handed is empty, and the label list alone did not stop it -
+     * so the whole pipeline ran to reach a verdict that was already decided at the request.
+     */
+    @Test
+    void refusesARequestIntoARepositoryTheFenceLeavesClosed() {
+        when(guardrail.closedTo("frontend")).thenReturn(true);
+
+        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("frontend")))
+                .isInstanceOf(CodingJobLifecycleException.class)
+                .hasMessageContaining("울타리");
+        verify(runner, never()).enqueue(any(), any());
     }
 
     @Test

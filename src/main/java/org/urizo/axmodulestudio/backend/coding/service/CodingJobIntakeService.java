@@ -74,6 +74,7 @@ public class CodingJobIntakeService {
      * supplies one; the loop then spins forever. Sixty half-second polls is the same thirty
      * seconds and cannot depend on time appearing to pass.
      */
+    private final GuardrailPathSelectionService guardrailSelections;
     private final int maxShaPolls;
     private final Duration shaPollInterval;
 
@@ -93,9 +94,10 @@ public class CodingJobIntakeService {
             CodingHandlerCommandService commands,
             CodingRunnerService runner,
             ProfileVersionRepository profileVersions,
+            GuardrailPathSelectionService guardrailSelections,
             ObjectMapper objectMapper,
             Clock clock) {
-        this(commands, runner, profileVersions, objectMapper, clock,
+        this(commands, runner, profileVersions, guardrailSelections, objectMapper, clock,
                 60, Duration.ofMillis(500));
     }
 
@@ -103,6 +105,7 @@ public class CodingJobIntakeService {
             CodingHandlerCommandService commands,
             CodingRunnerService runner,
             ProfileVersionRepository profileVersions,
+            GuardrailPathSelectionService guardrailSelections,
             ObjectMapper objectMapper,
             Clock clock,
             int maxShaPolls,
@@ -111,6 +114,8 @@ public class CodingJobIntakeService {
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.profileVersions = Objects.requireNonNull(
                 profileVersions, "profileVersions are required");
+        this.guardrailSelections = Objects.requireNonNull(
+                guardrailSelections, "guardrailSelections are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.maxShaPolls = maxShaPolls;
@@ -132,6 +137,18 @@ public class CodingJobIntakeService {
             // a work folder that was never created.
             throw failure("CODING_REPOSITORY_NOT_SUPPORTED",
                     "요청할 수 있는 저장소가 아닙니다.", HttpStatus.BAD_REQUEST);
+        }
+        // The fence names folders somewhere but none in this repository, so every change a
+        // request here could make lands outside it. Nothing about the sentence can alter that,
+        // and the analyst has already been seen to wave such a request through: with no allowed
+        // folder to draw from, the file list it is given is empty and the strongest signal it
+        // had is gone. Refused here, before a model is asked anything, because the answer is
+        // already decided. Guide 6-7 asks for exactly this - stopped at the request.
+        if (guardrailSelections.closedTo(repository)) {
+            throw failure("CODING_GUARDRAIL_REPOSITORY_CLOSED",
+                    "요청하신 영역은 지금 울타리에서 열려 있지 않습니다. "
+                            + "최고관리자에게 울타리 설정을 요청해 주세요.",
+                    HttpStatus.CONFLICT);
         }
         if (requestText == null || requestText.isEmpty()) {
             throw failure("CODING_REQUEST_TEXT_REQUIRED",

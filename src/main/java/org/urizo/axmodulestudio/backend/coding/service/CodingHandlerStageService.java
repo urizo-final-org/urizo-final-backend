@@ -388,10 +388,15 @@ public final class CodingHandlerStageService {
                             + String.join(", ", denied),
                     HttpStatus.UNPROCESSABLE_ENTITY);
         }
+        // Which repository this Job works in is recorded on the Job itself. Both the fence
+        // below and the queued build need it: the fence to read this repository's folders
+        // rather than every repository's, and the build to check out the right one. It used to
+        // be assumed to be the Backend, because there was nothing else it could be.
+        String repository = results.jobRepository(jobId);
         // The second layer: the folders the administrator chose when this job was created. The
         // copy taken then is used, not what the setting says now.
         List<String> outside = outsideAllowedFolders(
-                guardrailSelections.jobSnapshot(jobId), diff, scan);
+                repository, guardrailSelections.jobSnapshot(jobId), diff, scan);
         if (!outside.isEmpty()) {
             throw new CodingWorkerException(
                     "CODING_GUARDRAIL_PATH_NOT_SELECTED",
@@ -422,10 +427,6 @@ public final class CodingHandlerStageService {
         // --no-build and the runner claims one PENDING row at a time in order.
         String workspaceId = aggregate.workspaceId() == null
                 ? null : aggregate.workspaceId().toString();
-        // Which repository this Job works in is recorded on the Job itself. It used to be
-        // written here as "backend" because there was nothing else it could be; naming the
-        // wrong one now would build one repository's services from another one's checkout.
-        String repository = results.jobRepository(jobId);
         ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", repository);
         if (workspaceId != null) {
             runnerPayload.put("workspaceId", workspaceId);
@@ -482,22 +483,30 @@ public final class CodingHandlerStageService {
      * the fixed Denylist applies. Refusing everything instead would stop ordinary work the moment
      * nobody had filled the screen in, while the paths that actually matter stay closed either way.
      *
-     * <p>The allow list entries are {@code repository:path}; only the path is compared. The Coding
-     * pipeline works on the Backend checkout today and a job carries no repository name, while the
-     * two repositories' folder shapes do not overlap - Backend selections sit under
-     * {@code src/main/java/...} and Frontend ones under {@code src/features/...}, {@code src/app},
-     * {@code src/shared/...} and {@code src/styles}. When the pipeline gains a second repository,
-     * the repository has to come from the job rather than from the shape of the path.
+     * <p>The allow list entries are {@code repository:path} and only this repository's are read.
+     * That used to be left to the shape of the paths - the two repositories' folders do not
+     * overlap - which held only while every Job was a Backend Job. It is no longer true and the
+     * comparison is no longer a coincidence.
+     *
+     * <p>An allow list with nothing for this repository is not an empty allow list. The
+     * administrator filled the screen in and left this repository closed, so everything changed
+     * here is outside the fence. Reading it as "nothing chosen, therefore open" would turn a
+     * closed repository into an unguarded one, which is the opposite of what was chosen.
      */
     static List<String> outsideAllowedFolders(
-            List<String> allowedPaths, JsonNode... toolResults) {
+            String repository, List<String> allowedPaths, JsonNode... toolResults) {
         if (allowedPaths.isEmpty()) {
             return List.of();
         }
+        String prefix = repository + ":";
         List<String> folders = allowedPaths.stream()
-                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(entry -> entry.startsWith(prefix))
+                .map(entry -> entry.substring(prefix.length()))
                 .filter(folder -> !folder.isBlank())
                 .toList();
+        if (folders.isEmpty()) {
+            return changedPaths(toolResults);
+        }
         return changedPaths(toolResults).stream()
                 .filter(path -> folders.stream().noneMatch(
                         folder -> path.equals(folder) || path.startsWith(folder + "/")))

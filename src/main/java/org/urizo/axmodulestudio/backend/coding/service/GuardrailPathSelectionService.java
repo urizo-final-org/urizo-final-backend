@@ -58,6 +58,27 @@ public class GuardrailPathSelectionService {
         return new GuardrailSelectionContract.SelectionList(repository, stored);
     }
 
+    /**
+     * Whether the administrator has chosen folders but none of them in this repository.
+     *
+     * <p>Not the same as an unconfigured fence. With nothing chosen anywhere the pipeline
+     * treats the system as open and the path check does not run at all - refusing then would
+     * stop ordinary work the moment nobody had filled the screen in. With folders chosen
+     * elsewhere, every change in this repository lands outside the fence, so the only thing a
+     * request here can do is spend a whole pipeline discovering that.
+     */
+    public boolean closedTo(String repository) {
+        requireKnownRepository(repository);
+        List<Boolean> rows = jdbc.query(
+                "SELECT EXISTS (SELECT 1 FROM app.guardrail_path_selection WHERE enabled) "
+                        + "AS chosen_anywhere, "
+                        + "EXISTS (SELECT 1 FROM app.guardrail_path_selection "
+                        + "WHERE enabled AND repository = ?) AS chosen_here",
+                (row, index) -> row.getBoolean("chosen_anywhere") && !row.getBoolean("chosen_here"),
+                repository);
+        return !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0));
+    }
+
     public GuardrailSelectionContract.SelectionList save(
             GuardrailSelectionContract.SaveRequest request) {
         String repository = request.repository();

@@ -786,7 +786,7 @@ class CodingHandlerStageServiceTest {
     void anEmptySelectionLeavesOnlyTheFixedDenylistInForce() {
         JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java");
 
-        assertThat(CodingHandlerStageService.outsideAllowedFolders(List.of(), diff, diff))
+        assertThat(CodingHandlerStageService.outsideAllowedFolders("backend", List.of(), diff, diff))
                 .isEmpty();
     }
 
@@ -797,7 +797,7 @@ class CodingHandlerStageServiceTest {
                 CMS_BACKEND + "/controller/MemberController.java");
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
-                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+                "backend", List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
     }
 
     @Test
@@ -806,7 +806,7 @@ class CodingHandlerStageServiceTest {
         JsonNode diff = changedPaths(CMS_BACKEND + "/service/BoardService.java", health);
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
-                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(health);
+                "backend", List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(health);
     }
 
     @Test
@@ -815,15 +815,45 @@ class CodingHandlerStageServiceTest {
         JsonNode diff = changedPaths(lookalike);
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
-                List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(lookalike);
+                "backend", List.of("backend:" + CMS_BACKEND), diff, diff)).containsExactly(lookalike);
     }
 
     @Test
-    void theRepositoryPrefixIsStrippedBeforeComparing() {
+    void aChangeInsideThisRepositorysOwnSelectedFolderPasses() {
         JsonNode diff = changedPaths("src/features/cms/MemberListPage.tsx");
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
-                List.of("frontend:src/features/cms"), diff, diff)).isEmpty();
+                "frontend", List.of("frontend:src/features/cms"), diff, diff)).isEmpty();
+    }
+
+    /**
+     * The prefix used to be discarded and every repository's folders compared against every
+     * Job's changes. That was safe only while every Job was a Backend Job, which stopped being
+     * true the day a screen request could be made.
+     */
+    @Test
+    void anotherRepositorysSelectedFolderDoesNotOpenThisOne() {
+        JsonNode diff = changedPaths("src/features/cms/MemberListPage.tsx");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                "frontend", List.of("backend:" + CMS_BACKEND), diff, diff))
+                .containsExactly("src/features/cms/MemberListPage.tsx");
+    }
+
+    /**
+     * Nothing chosen anywhere means nobody has filled the screen in, and the pipeline leaves
+     * such a system open. Nothing chosen <em>here</em> is the opposite: the administrator filled
+     * it in and left this repository shut. Reading the second as the first would turn a closed
+     * repository into an unguarded one.
+     */
+    @Test
+    void aRepositoryLeftOutOfANonEmptyFenceIsShutRatherThanOpen() {
+        JsonNode diff = changedPaths("src/app/AppShell.tsx");
+
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                "frontend", List.of("backend:" + CMS_BACKEND), diff, diff)).isNotEmpty();
+        assertThat(CodingHandlerStageService.outsideAllowedFolders(
+                "frontend", List.of(), diff, diff)).isEmpty();
     }
 
     @Test
@@ -831,7 +861,7 @@ class CodingHandlerStageServiceTest {
         JsonNode diff = changedPaths(CMS_BACKEND);
 
         assertThat(CodingHandlerStageService.outsideAllowedFolders(
-                List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
+                "backend", List.of("backend:" + CMS_BACKEND), diff, diff)).isEmpty();
     }
 
     private static JsonNode diffBody(String body, String... paths) {

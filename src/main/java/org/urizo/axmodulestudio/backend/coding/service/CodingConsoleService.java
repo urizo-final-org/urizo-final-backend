@@ -106,6 +106,84 @@ public class CodingConsoleService {
         return new CodingConsoleContract.JobList("1.0", items);
     }
 
+
+    /**
+     * What happened while the reader was away: other people's decisions, and the approvals
+     * now waiting on this reader's own role.
+     *
+     * <p>A person's own decision is left out. Being told what you just clicked is noise, and
+     * noise is how a notification badge stops being read at all.
+     *
+     * <p>The decision rows carry an actor id, not a name. Names live in {@code app.admin_account},
+     * which this connection has no grant on - deliberately, since the Coding console reads
+     * Coding tables. The caller resolves the names through the authentication service, which
+     * already holds that access.
+     */
+    public List<DecisionEvent> recentDecisions(UUID excludedActorId, int limit) {
+        return jdbc.query("""
+                SELECT cad.job_id, cad.stage, cad.decision, cad.actor_id, cad.actor_role,
+                       cad.decided_at, cjr.request_text
+                FROM app.coding_approval_decision cad
+                LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cad.job_id
+                WHERE cad.actor_id <> ?
+                ORDER BY cad.decided_at DESC
+                LIMIT ?
+                """,
+                (rs, row) -> new DecisionEvent(
+                        rs.getObject("job_id", UUID.class),
+                        rs.getString("request_text"),
+                        rs.getString("stage"),
+                        rs.getString("decision"),
+                        rs.getObject("actor_id", UUID.class),
+                        rs.getString("actor_role"),
+                        instant(rs, "decided_at")),
+                excludedActorId, limit);
+    }
+
+    /** One decision, before the actor's name has been looked up. */
+    public record DecisionEvent(
+            UUID jobId,
+            String requestText,
+            String stage,
+            String decision,
+            UUID actorId,
+            String actorRole,
+            Instant decidedAt) { }
+
+    /**
+     * The requests now waiting for someone with this role to decide.
+     *
+     * <p>Read from the job status rather than from a readiness computation: the console list
+     * already treats WAITING_APPROVAL as the truth about what needs a person, and a second
+     * definition of "waiting" would be one more thing to keep in step.
+     */
+    public List<CodingConsoleContract.Notification> waitingForRole(AdminRole role, int limit) {
+        return jdbc.query("""
+                SELECT cj.job_id, cjr.request_text, cj.updated_at,
+                       COALESCE(latest.handler_key, cj.graph_step) AS stage
+                FROM app.coding_job cj
+                LEFT JOIN app.coding_job_request cjr ON cjr.job_id = cj.job_id
+                LEFT JOIN LATERAL (
+                    SELECT chr.handler_key
+                    FROM app.coding_handler_result chr
+                    WHERE chr.job_id = cj.job_id
+                    ORDER BY chr.recorded_at DESC, chr.result_id DESC
+                    LIMIT 1
+                ) latest ON TRUE
+                WHERE cj.job_type = 'CODING_AGENT' AND cj.status = 'WAITING_APPROVAL'
+                ORDER BY cj.updated_at DESC
+                LIMIT ?
+                """,
+                (rs, row) -> new CodingConsoleContract.Notification(
+                        "APPROVAL_WAITING",
+                        rs.getObject("job_id", UUID.class),
+                        rs.getString("request_text"),
+                        stageLabel(rs.getString("stage")),
+                        null, null, null,
+                        instant(rs, "updated_at")),
+                limit);
+    }
+
     /** Returns null when no such Job exists, so the controller can answer 404 plainly. */
     public CodingConsoleContract.JobDetail detail(UUID jobId, AdminRole role) {
         List<JobRow> jobs = jdbc.query("""

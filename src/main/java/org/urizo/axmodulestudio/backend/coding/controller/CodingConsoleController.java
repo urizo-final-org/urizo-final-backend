@@ -1,5 +1,8 @@
 package org.urizo.axmodulestudio.backend.coding.controller;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -106,6 +109,64 @@ public class CodingConsoleController {
         CodingRunnerService.Liveness liveness = runner.liveness();
         return new CodingConsoleContract.RunnerStatus(
                 "1.0", liveness.alive(), liveness.lastSeenAt());
+    }
+
+    /**
+     * The bell's feed: other people's decisions and this reader's own waiting approvals.
+     *
+     * <p>The names are resolved here rather than in the query. The Coding console connection
+     * has no grant on the account table, and the authentication service already reads it for
+     * every request; borrowing that is cheaper and safer than widening a grant.
+     */
+    @GetMapping("/notifications")
+    CodingConsoleContract.NotificationList notifications(Authentication authentication) {
+        AuthenticatedActor actor = actor(authentication);
+        List<CodingConsoleContract.Notification> items = new ArrayList<>();
+        for (CodingConsoleService.DecisionEvent event
+                : service.recentDecisions(actor.actorId(), 20)) {
+            items.add(new CodingConsoleContract.Notification(
+                    "APPROVAL_DECIDED",
+                    event.jobId(),
+                    event.requestText(),
+                    approvalStageLabel(event.stage()),
+                    event.decision(),
+                    actorName(event.actorId()),
+                    event.actorRole(),
+                    event.decidedAt()));
+        }
+        items.addAll(service.waitingForRole(actor.role(), 20));
+        items.sort(Comparator.comparing(
+                CodingConsoleContract.Notification::occurredAt,
+                Comparator.nullsLast(Comparator.reverseOrder())));
+        return new CodingConsoleContract.NotificationList("1.0", items);
+    }
+
+    /** A deleted or unreadable account must not cost the reader the whole feed. */
+    private String actorName(java.util.UUID actorId) {
+        if (actorId == null) {
+            return null;
+        }
+        try {
+            return authService.loadActor(actorId).name();
+        }
+        catch (RuntimeException unavailable) {
+            return null;
+        }
+    }
+
+    /** The approval names an administrator uses, not the graph's node words. */
+    private static String approvalStageLabel(String stage) {
+        if (stage == null) {
+            return null;
+        }
+        return switch (stage) {
+            case "SCOPE" -> "계획";
+            case "CANDIDATE" -> "미리보기";
+            case "GITHUB" -> "코드";
+            case "CMS" -> "CMS 반영";
+            case "DEPLOY" -> "배포";
+            default -> stage;
+        };
     }
 
     @GetMapping("/{jobId}")

@@ -122,6 +122,61 @@ class CodingConsoleControllerTest {
                 .andExpect(jsonPath("$.lastSeenAt").value("2026-09-02T13:00:00Z"));
     }
 
+    /**
+     * The bell's feed. The name is resolved through the authentication service because the
+     * Coding console connection has no grant on the account table - a join would fail with
+     * "permission denied", which is how the first attempt at the file hint failed.
+     */
+    @Test
+    void namesThePersonBehindEachDecisionAndLeavesOutTheReadersOwn() throws Exception {
+        authenticate(AdminRole.GENERAL_ADMIN);
+        UUID otherActor = UUID.fromString("22222222-2222-4222-8222-222222222222");
+        when(service.recentDecisions(eq(ACTOR_ID), any(Integer.class))).thenReturn(List.of(
+                new CodingConsoleService.DecisionEvent(
+                        JOB, "회원 목록에 가입일도 보이게 해줘", "GITHUB", "APPROVED",
+                        otherActor, "SUPER_ADMIN", Instant.parse("2026-09-03T01:00:00Z"))));
+        when(service.waitingForRole(eq(AdminRole.GENERAL_ADMIN), any(Integer.class)))
+                .thenReturn(List.of(new CodingConsoleContract.Notification(
+                        "APPROVAL_WAITING", JOB, "공지사항에 첨부파일을 붙일 수 있게 해줘",
+                        "요구사항 분석", null, null, null,
+                        Instant.parse("2026-09-03T02:00:00Z"))));
+        when(authService.loadActor(otherActor)).thenReturn(
+                new AuthenticatedActor(otherActor, "최고 관리자", AdminRole.SUPER_ADMIN));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/notifications")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                // Newest first, so the waiting approval leads.
+                .andExpect(jsonPath("$.items[0].kind").value("APPROVAL_WAITING"))
+                .andExpect(jsonPath("$.items[1].kind").value("APPROVAL_DECIDED"))
+                .andExpect(jsonPath("$.items[1].actorName").value("최고 관리자"))
+                // The stage is said in the administrator's words, not the graph's.
+                .andExpect(jsonPath("$.items[1].stage").value("코드"))
+                .andExpect(jsonPath("$.items[1].decision").value("APPROVED"));
+
+        // The reader's own id is what the query excludes; that is the whole "not my own" rule.
+        verify(service).recentDecisions(eq(ACTOR_ID), any(Integer.class));
+    }
+
+    /** An unreadable account costs that one name, never the whole feed. */
+    @Test
+    void keepsTheFeedWhenAnActorNameCannotBeRead() throws Exception {
+        authenticate(AdminRole.SUPER_ADMIN);
+        UUID otherActor = UUID.fromString("22222222-2222-4222-8222-222222222222");
+        when(service.recentDecisions(eq(ACTOR_ID), any(Integer.class))).thenReturn(List.of(
+                new CodingConsoleService.DecisionEvent(
+                        JOB, "요청", "SCOPE", "REJECTED", otherActor, "GENERAL_ADMIN",
+                        Instant.parse("2026-09-03T01:00:00Z"))));
+        when(service.waitingForRole(any(), any(Integer.class))).thenReturn(List.of());
+        when(authService.loadActor(otherActor)).thenThrow(new IllegalStateException("no account"));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/notifications")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items[0].actorRole").value("GENERAL_ADMIN"))
+                .andExpect(jsonPath("$.items[0].actorName").doesNotExist());
+    }
+
     @Test
     void aGeneralAdministratorReadsThePlanAndTheReportButNeverTheCode() throws Exception {
         authenticate(AdminRole.GENERAL_ADMIN);

@@ -60,6 +60,35 @@ public final class CodingConsoleContract {
             Instant lastSeenAt) { }
 
     /**
+     * One thing that happened while the reader was not looking.
+     *
+     * <p>{@code actorName} is the person, not the role: "누가 승인했나" is the question an
+     * approval ledger has to answer, and a demo with one account per role still reads better
+     * with a name than with a role word repeated on every line. It is absent for a waiting
+     * approval, which nobody has decided yet.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Notification(
+            String kind,
+            UUID jobId,
+            String requestText,
+            String stage,
+            String decision,
+            String actorName,
+            String actorRole,
+            Instant occurredAt) { }
+
+    /** What the bell counts and the screen lists, newest first. */
+    public record NotificationList(
+            String schemaVersion,
+            List<Notification> items) {
+
+        public NotificationList {
+            items = List.copyOf(items);
+        }
+    }
+
+    /**
      * One request, opened. {@code plan} feeds approval 1, {@code report} feeds approval 2,
      * and {@code technical} feeds approval 3 and is null for a general administrator.
      */

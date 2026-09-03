@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -48,7 +49,7 @@ public final class CodingToolService {
     private static final Pattern SHA256_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");
     /** A unified diff hunk header. The count is optional: git reads '@@ -73 +73 @@' as one line. */
     private static final Pattern UNIFIED_HUNK_HEADER =
-            Pattern.compile("@@ -\\d+(,\\d+)? \\+\\d+(,\\d+)? @@.*");
+            Pattern.compile("@@ -\\d+(?:,(\\d+))? \\+\\d+(?:,(\\d+))? @@.*");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "messageType", "requestId", "toolCallId", "jobId",
             "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep",
@@ -656,12 +657,14 @@ public final class CodingToolService {
     }
 
     /**
-     * git apply refuses a malformed hunk header as "patch with only garbage at :N", and the MCP
-     * workspace drops that stderr, so the model hears only that the operation failed and repeats
-     * the same mistake. Checking the shape here turns the same defect into a
-     * TOOL_ARGUMENTS_INVALID message naming the offending line, and that message is replayed to
-     * the model verbatim. Only the header shape is checked: whether the counts and the context
-     * lines match the file is git's judgement, not a guess this precheck should make.
+     * git apply refuses a malformed patch as "patch with only garbage at :N" or "patch
+     * fragment without header at :N", and the MCP workspace drops that stderr, so the model
+     * hears only that the operation failed and repeats the same mistake. Checking the patch
+     * here turns the same defect into a TOOL_ARGUMENTS_INVALID message naming the offending
+     * line, and that message is replayed to the model verbatim. Two things are checked: the
+     * hunk header shape, and whether each header's declared counts match its own body -
+     * both are internal consistency of the patch text. Whether the line numbers and context
+     * match the real file is git's judgement, not a guess this precheck should make.
      */
     static void validatePatchText(String patch) {
         // The MCP workspace only applies a patch whose first line is a canonical
@@ -675,26 +678,73 @@ public final class CodingToolService {
         int hunks = 0;
         boolean oldPathLine = false;
         boolean newPathLine = false;
+        // The hunk currently being read: where its header sits, what the header declared,
+        // and what its body actually carries. headerLine 0 means no hunk is open.
+        int headerLine = 0;
+        int declaredOld = 0;
+        int declaredNew = 0;
+        int actualOld = 0;
+        int actualNew = 0;
         for (int index = 0; index < lines.length; index++) {
             String line = lines[index].endsWith("\r")
                     ? lines[index].substring(0, lines[index].length() - 1)
                     : lines[index];
-            oldPathLine = oldPathLine || line.startsWith("--- ");
-            newPathLine = newPathLine || line.startsWith("+++ ");
+            // A trailing newline leaves one empty element behind the last real line;
+            // it is an artifact of the split, not a context line of the last hunk.
+            if (line.isEmpty() && index == lines.length - 1) {
+                break;
+            }
             // Every body line carries a ' ', '+' or '-' prefix, so a line that opens at
             // column zero with '@@' can only be a hunk header.
-            if (!line.startsWith("@@")) {
+            if (line.startsWith("@@")) {
+                Matcher header = UNIFIED_HUNK_HEADER.matcher(line);
+                if (!header.matches()) {
+                    throw validation("apply_patch patch is invalid: line " + (index + 1)
+                            + " is \"" + abbreviate(line) + "\", but a hunk header must carry "
+                            + "the real line numbers of the file, as "
+                            + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' - "
+                            + "for example '@@ -73,7 +73,7 @@'.");
+                }
+                requireHunkCounts(headerLine, declaredOld, declaredNew, actualOld, actualNew);
+                hunks++;
+                headerLine = index + 1;
+                declaredOld = header.group(1) == null ? 1 : Integer.parseInt(header.group(1));
+                declaredNew = header.group(2) == null ? 1 : Integer.parseInt(header.group(2));
+                actualOld = 0;
+                actualNew = 0;
                 continue;
             }
-            hunks++;
-            if (!UNIFIED_HUNK_HEADER.matcher(line).matches()) {
-                throw validation("apply_patch patch is invalid: line " + (index + 1)
-                        + " is \"" + abbreviate(line) + "\", but a hunk header must carry the "
-                        + "real line numbers of the file, as "
-                        + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' - "
-                        + "for example '@@ -73,7 +73,7 @@'.");
+            if (headerLine > 0) {
+                if (line.startsWith("diff --git ")) {
+                    // The next file begins, so the open hunk is complete.
+                    requireHunkCounts(
+                            headerLine, declaredOld, declaredNew, actualOld, actualNew);
+                    headerLine = 0;
+                }
+                else if (line.startsWith("\\")) {
+                    // '\ No newline at end of file' belongs to neither side.
+                    continue;
+                }
+                else if (line.startsWith("+")) {
+                    actualNew++;
+                    continue;
+                }
+                else if (line.startsWith("-")) {
+                    actualOld++;
+                    continue;
+                }
+                else {
+                    // ' ' context; git also tolerates a context line whose lone
+                    // space was trimmed away, so a bare empty line counts as one.
+                    actualOld++;
+                    actualNew++;
+                    continue;
+                }
             }
+            oldPathLine = oldPathLine || line.startsWith("--- ");
+            newPathLine = newPathLine || line.startsWith("+++ ");
         }
+        requireHunkCounts(headerLine, declaredOld, declaredNew, actualOld, actualNew);
         if (hunks == 0) {
             throw validation("apply_patch patch is invalid: it has no hunk. Add a "
                     + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' header "
@@ -704,6 +754,17 @@ public final class CodingToolService {
             throw validation("apply_patch patch is invalid: it must carry a '--- a/PATH' line "
                     + "and a '+++ b/PATH' line before the first hunk header.");
         }
+    }
+
+    private static void requireHunkCounts(
+            int headerLine, int declaredOld, int declaredNew, int actualOld, int actualNew) {
+        if (headerLine == 0 || (declaredOld == actualOld && declaredNew == actualNew)) {
+            return;
+        }
+        throw validation("apply_patch patch is invalid: the hunk header at line " + headerLine
+                + " declares " + declaredOld + " old and " + declaredNew + " new lines, but "
+                + "its body has " + actualOld + " old and " + actualNew + " new. Recount the "
+                + "' ', '-' and '+' body lines and write the real totals in that header.");
     }
 
     private static String abbreviate(String line) {

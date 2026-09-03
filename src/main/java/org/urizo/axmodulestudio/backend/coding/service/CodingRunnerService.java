@@ -37,7 +37,9 @@ public class CodingRunnerService {
             "TEST", Duration.ofMinutes(15),
             "PREVIEW_UP", Duration.ofMinutes(10),
             "PREVIEW_DOWN", Duration.ofMinutes(10),
-            "CREATE_PR", Duration.ofMinutes(3));
+            "CREATE_PR", Duration.ofMinutes(3),
+            "CHECK_DEV_MERGE", Duration.ofMinutes(3),
+            "DEPLOY_LOCAL_COMPOSE", Duration.ofMinutes(20));
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -97,12 +99,17 @@ public class CodingRunnerService {
      * the runner's own allowlist; the payload never names a build target.
      */
     public UUID enqueue(String kind, JsonNode payload) {
+        return enqueue(UUID.randomUUID(), kind, payload);
+    }
+
+    /** Enqueues a replay-safe external operation under a caller-derived stable task id. */
+    public UUID enqueue(UUID taskId, String kind, JsonNode payload) {
+        Objects.requireNonNull(taskId, "taskId is required");
         Objects.requireNonNull(kind, "kind is required");
         Objects.requireNonNull(payload, "payload is required");
         if (!LEASE_BY_KIND.containsKey(kind) || !payload.isObject()) {
             throw new IllegalArgumentException("The runner command is not registered.");
         }
-        UUID taskId = UUID.randomUUID();
         String encoded;
         try {
             encoded = objectMapper.writeValueAsString(payload);
@@ -110,8 +117,23 @@ public class CodingRunnerService {
         catch (JsonProcessingException failure) {
             throw new IllegalArgumentException("The runner payload is invalid.", failure);
         }
-        jdbc.update("INSERT INTO app.coding_runner_task (task_id, kind, payload) "
-                + "VALUES (?, ?, ?::jsonb)", taskId, kind, encoded);
+        int inserted = jdbc.update("INSERT INTO app.coding_runner_task (task_id, kind, payload) "
+                + "VALUES (?, ?, ?::jsonb) ON CONFLICT (task_id) DO NOTHING",
+                taskId, kind, encoded);
+        if (inserted == 0) {
+            List<TaskBinding> bindings = jdbc.query(
+                    "SELECT kind, payload::text FROM app.coding_runner_task WHERE task_id = ?",
+                    (rs, row) -> new TaskBinding(rs.getString(1), readJson(rs.getString(2))),
+                    taskId);
+            if (bindings.size() != 1
+                    || !kind.equals(bindings.get(0).kind())
+                    || !payload.equals(bindings.get(0).payload())) {
+                throw new CodingWorkerException(
+                        "RUNNER_TASK_CONFLICT",
+                        "The runner task id is already bound to another command.",
+                        HttpStatus.CONFLICT);
+            }
+        }
         return taskId;
     }
 
@@ -321,6 +343,8 @@ public class CodingRunnerService {
     }
 
     private record TaskRow(UUID taskId, String kind, String payload, int attempt, int maxAttempts) { }
+
+    private record TaskBinding(String kind, JsonNode payload) { }
 
     private record TaskCounters(int attempt, int maxAttempts) { }
 }

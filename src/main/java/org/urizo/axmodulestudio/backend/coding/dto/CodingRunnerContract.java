@@ -22,7 +22,9 @@ public final class CodingRunnerContract {
             "TEST",
             "PREVIEW_UP",
             "PREVIEW_DOWN",
-            "CREATE_PR");
+            "CREATE_PR",
+            "CHECK_DEV_MERGE",
+            "DEPLOY_LOCAL_COMPOSE");
 
     private static final Set<String> OUTCOMES = Set.of(
             "SUCCEEDED", "RETRYABLE_FAILURE", "PERMANENT_FAILURE");

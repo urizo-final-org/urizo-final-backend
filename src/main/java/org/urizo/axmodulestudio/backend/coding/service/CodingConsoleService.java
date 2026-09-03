@@ -237,6 +237,7 @@ public class CodingConsoleService {
                 report(review),
                 pendingApproval(job, jobId, attempt),
                 decisions(jobId),
+                handover(job.finishedAt(), results),
                 previewLink(work, preview != null),
                 // Everything a general administrator must not read lives in this one object,
                 // and for them it is simply absent from the response.
@@ -245,6 +246,42 @@ public class CodingConsoleService {
                 job.createdAt(),
                 job.finishedAt(),
                 refused(results));
+    }
+
+    /**
+     * The record a person inherits, or nothing when nobody has to inherit anything.
+     *
+     * <p>Nothing writes down "this was handed over": the gate that decides it runs inside the
+     * graph and records no result of its own. What it leaves behind is enough. A review that
+     * asks for rework is always followed by another coding round, unless there were no rounds
+     * left - so a finished Job whose newest word is "changes requested" is one the model gave
+     * up on. Any other ending has a preview, an approval, or a refusal after it.
+     */
+    static CodingConsoleContract.Handover handover(Instant finishedAt, List<ResultRow> results) {
+        if (finishedAt == null || results.isEmpty()) {
+            return null;
+        }
+        ResultRow newest = results.get(0);
+        if (!"coding.review".equals(newest.handlerKey())
+                || !"changes_requested".equals(newest.resultPort())) {
+            return null;
+        }
+        // Rows arrive newest first; a handover is read forwards, in the order it happened.
+        List<CodingConsoleContract.Attempt> attempts = new ArrayList<>();
+        for (int index = results.size() - 1; index >= 0; index--) {
+            ResultRow row = results.get(index);
+            if (!"coding.review".equals(row.handlerKey())) {
+                continue;
+            }
+            JsonNode payload = row.payload();
+            attempts.add(new CodingConsoleContract.Attempt(
+                    attempts.size() + 1,
+                    "passed".equals(row.resultPort()),
+                    payload == null ? null : text(payload, "reportSummary"),
+                    criteria(payload),
+                    row.recordedAt()));
+        }
+        return new CodingConsoleContract.Handover(attempts.size(), attempts);
     }
 
     /**
@@ -339,7 +376,20 @@ public class CodingConsoleService {
         if (review == null) {
             return null;
         }
+        return new CodingConsoleContract.Report(text(review, "reportSummary"), criteria(review));
+    }
+
+    /**
+     * The criteria the review judged, in the order it judged them.
+     *
+     * <p>Shared with the handover record: a round the reviewer sent back is read for exactly
+     * the same thing as the round it accepted - which of the agreed statements came true.
+     */
+    private static List<CodingConsoleContract.CriterionResult> criteria(JsonNode review) {
         List<CodingConsoleContract.CriterionResult> verdicts = new ArrayList<>();
+        if (review == null) {
+            return verdicts;
+        }
         JsonNode array = review.path("criteriaResults");
         if (array.isArray()) {
             for (JsonNode item : array) {
@@ -352,7 +402,7 @@ public class CodingConsoleService {
                         criterion, met.isBoolean() ? met.asBoolean() : null));
             }
         }
-        return new CodingConsoleContract.Report(text(review, "reportSummary"), verdicts);
+        return verdicts;
     }
 
     private CodingConsoleContract.Technical technical(
@@ -474,7 +524,8 @@ public class CodingConsoleService {
 
     private List<ResultRow> results(UUID jobId, int attempt) {
         return jdbc.query("""
-                SELECT handler_key, result_port, candidate_sha, diff_digest, payload::text
+                SELECT handler_key, result_port, candidate_sha, diff_digest, payload::text,
+                       recorded_at
                 FROM app.coding_handler_result
                 WHERE job_id = ? AND pipeline_attempt = ?
                 ORDER BY recorded_at DESC, result_id DESC
@@ -484,7 +535,8 @@ public class CodingConsoleService {
                         rs.getString("result_port"),
                         rs.getString("candidate_sha"),
                         rs.getString("diff_digest"),
-                        readTree(rs.getString("payload"))),
+                        readTree(rs.getString("payload")),
+                        instant(rs, "recorded_at")),
                 jobId, attempt);
     }
 
@@ -561,10 +613,11 @@ public class CodingConsoleService {
     /** One queued Docker step as the runner left it. */
     record RunnerRow(String kind, String status, String errorCode, String detail) { }
 
-    private record ResultRow(
+    record ResultRow(
             String handlerKey,
             String resultPort,
             String candidateSha,
             String diffDigest,
-            JsonNode payload) { }
+            JsonNode payload,
+            Instant recordedAt) { }
 }

@@ -281,7 +281,7 @@ class CodingConsoleControllerTest {
                         "가입일을 추가했습니다.",
                         List.of(new CodingConsoleContract.CriterionResult(
                                 "목록에 가입일이 보인다", true))),
-                pendingApproval(), List.of(),
+                pendingApproval(), List.of(), null,
                 new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/", null),
                 technical, Instant.parse("2026-09-02T00:00:00Z"), null, false);
     }

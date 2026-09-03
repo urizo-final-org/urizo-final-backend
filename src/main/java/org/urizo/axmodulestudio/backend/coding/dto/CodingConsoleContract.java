@@ -112,6 +112,7 @@ public final class CodingConsoleContract {
             Report report,
             PendingApproval pendingApproval,
             List<DecisionRecord> decisions,
+            Handover handover,
             PreviewLink preview,
             Technical technical,
             Instant createdAt,
@@ -183,6 +184,45 @@ public final class CodingConsoleContract {
             String actorRole,
             String feedback,
             Instant decidedAt) { }
+
+    /**
+     * What a person inherits when the model ran out of tries.
+     *
+     * <p>The review may send a candidate back for rework a fixed number of times. On the last
+     * refusal the Job ends normally rather than as an execution error, precisely so that what
+     * it made and what was wrong with it survive to be read. Absent on every Job that did not
+     * end that way.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Handover(
+            int rounds,
+            List<Attempt> attempts) {
+
+        public Handover {
+            attempts = attempts == null ? List.of() : List.copyOf(attempts);
+        }
+    }
+
+    /**
+     * One pass the model made at the request, and what the review made of it.
+     *
+     * <p>{@code summary} is the reviewer's own words, which the contract already requires to be
+     * readable by someone who cannot read code. That is why this sits outside {@link Technical}:
+     * whoever decides what to do with an abandoned request is not necessarily the person who
+     * can read the diff, and "the AI gave up" is not a fact to keep from them.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Attempt(
+            int round,
+            boolean accepted,
+            String summary,
+            List<CriterionResult> criteriaResults,
+            Instant recordedAt) {
+
+        public Attempt {
+            criteriaResults = criteriaResults == null ? List.of() : List.copyOf(criteriaResults);
+        }
+    }
 
     /**
      * Where a general administrator looks instead of reading the diff.

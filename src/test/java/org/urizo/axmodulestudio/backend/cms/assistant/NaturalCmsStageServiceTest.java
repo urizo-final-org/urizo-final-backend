@@ -6,7 +6,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,30 +47,19 @@ class NaturalCmsStageServiceTest {
             "discard_cms_preview", "revalidate_cms_preview", "apply_cms_preview");
 
     @Test
-    void emptyPolicyIntersectionUsesChatOnlyAndRejectsTheFirstToolExecution() throws Exception {
+    void previewFailsClosedBeforeTheModelWhenRequiredToolsAreMissing() throws Exception {
         Harness harness = new Harness(activeJob());
         when(harness.store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
                 new NaturalCmsStore.RuntimePolicy(Set.of(), "central.default"));
         when(harness.resources.snapshot(RESOURCE)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7));
-        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
-                "{\"operation\":\"UPDATE\",\"fields\":{"
-                        + "\"title\":\"New\",\"body\":\"Body\"}}",
-                List.of()));
-
         assertThatThrownBy(() -> harness.service.execute(
                 "Bearer worker", JOB, 1, RESULT,
                 stageRequest("cms.preview", RESULT)))
                 .isInstanceOfSatisfying(NaturalCmsException.class,
                         failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
 
-        ArgumentCaptor<CodingModelTurnContract.Request> request =
-                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
-        verify(harness.models).executeNaturalCms(request.capture(), any());
-        assertThat(request.getValue().requiredCapabilities()).containsExactly("CHAT");
-        assertThat(request.getValue().toolSchemas()).isEmpty();
-        verify(harness.profileModelBindings).resolve(
-                PROFILE, "preview", "cms.preview", ModelUseCase.CHAT);
+        verify(harness.models, never()).executeNaturalCms(any(), any());
         verify(harness.mcp, never()).callTool(any(), any());
     }
 
@@ -118,19 +106,20 @@ class NaturalCmsStageServiceTest {
 
         for (PromptCase promptCase : cases) {
             Harness harness = new Harness(activeJob(promptCase.resource()));
-            when(harness.store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
-                    new NaturalCmsStore.RuntimePolicy(Set.of(), "central.default"));
             when(harness.resources.snapshot(promptCase.resource()))
                     .thenReturn(promptCase.currentState());
-            when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
-                    "{\"operation\":\"UPDATE\",\"fields\":{\"name\":\"New\"}}",
-                    List.of()));
+            ObjectNode command = mapper.createObjectNode().put("operation", "UPDATE")
+                    .putObject("fields");
+            when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                    toolResponse("validate_cms_command", command));
+            when(harness.resources.validateCommand(eq(promptCase.resource()), any()))
+                    .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+            stubPreviewTools(harness, promptCase.currentState());
 
-            assertThatThrownBy(() -> harness.service.execute(
+            NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
                     "Bearer worker", JOB, 1, RESULT,
-                    stageRequest("cms.preview", RESULT)))
-                    .isInstanceOfSatisfying(NaturalCmsException.class,
-                            failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+                    stageRequest("cms.preview", RESULT));
+            assertThat(response.resultPort()).isEqualTo("ready");
 
             ArgumentCaptor<CodingModelTurnContract.Request> request =
                     ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
@@ -138,8 +127,28 @@ class NaturalCmsStageServiceTest {
             List<JsonNode> messages = request.getValue().messages();
             assertThat(messages.get(0).path("content").asText())
                     .contains("Create one " + promptCase.resource().type() + " UPDATE command")
+                    .contains("Call validate_cms_command exactly once")
                     .contains("fields may use only names from editableFields")
-                    .doesNotContain("fields title and body");
+                    .doesNotContain("Finish with only JSON");
+
+            assertThat(request.getValue().requiredCapabilities())
+                    .containsExactly("CHAT", "TOOL_CALLING");
+            assertThat(request.getValue().toolSchemas())
+                    .singleElement()
+                    .satisfies(schema -> {
+                        assertThat(schema.path("name").asText())
+                                .isEqualTo("validate_cms_command");
+                        JsonNode commandSchema = schema.path("inputSchema")
+                                .path("properties").path("command");
+                        assertThat(commandSchema.path("additionalProperties").asBoolean()).isFalse();
+                        assertThat(commandSchema.path("required"))
+                                .extracting(JsonNode::asText)
+                                .containsExactly("operation", "fields");
+                        assertThat(commandSchema.path("properties").path("operation").path("type")
+                                .asText()).isEqualTo("string");
+                        assertThat(commandSchema.path("properties").path("fields").path("type")
+                                .asText()).isEqualTo("object");
+                    });
 
             JsonNode context = mapper.readTree(messages.get(1).path("content").asText());
             assertThat(context.path("resource").path("type").asText())
@@ -150,6 +159,38 @@ class NaturalCmsStageServiceTest {
             assertThat(editableFields)
                     .containsExactlyInAnyOrderElementsOf(promptCase.editableFields());
         }
+    }
+
+    @Test
+    void rejectsTextOnlyOrWrongToolPreviewResponses() throws Exception {
+        Harness textOnly = new Harness(activeJob());
+        when(textOnly.resources.snapshot(RESOURCE)).thenReturn(
+                textOnly.mapper.createObjectNode().put("id", 7));
+        when(textOnly.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"operation\":\"UPDATE\",\"fields\":{}}", List.of()));
+
+        assertThatThrownBy(() -> textOnly.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.preview", RESULT)))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(textOnly.resources, never()).validateCommand(any(), any());
+
+        Harness wrongTool = new Harness(activeJob());
+        when(wrongTool.resources.snapshot(RESOURCE)).thenReturn(
+                wrongTool.mapper.createObjectNode().put("id", 7));
+        when(wrongTool.models.executeNaturalCms(any(), any())).thenReturn(toolResponse(
+                "create_cms_preview", wrongTool.mapper.createObjectNode()
+                        .put("operation", "UPDATE").putObject("fields")));
+
+        assertThatThrownBy(() -> wrongTool.service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.preview", RESULT)))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(wrongTool.resources, never()).validateCommand(any(), any());
     }
 
     @Test
@@ -169,7 +210,7 @@ class NaturalCmsStageServiceTest {
     }
 
     @Test
-    void feedsToolOutputBackToTheModelAndStoresOnlyThePreviewBoundary() throws Exception {
+    void usesOneValidateCommandToolCallAndStoresOnlyThePreviewBoundary() throws Exception {
         Harness harness = new Harness(activeJob());
         ObjectNode state = harness.mapper.createObjectNode()
                 .put("id", 7).put("title", "Old").put("body", "Old body")
@@ -177,18 +218,11 @@ class NaturalCmsStageServiceTest {
         when(harness.resources.snapshot(RESOURCE)).thenReturn(state);
         when(harness.resources.validateCommand(eq(RESOURCE), any()))
                 .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+        ObjectNode command = harness.mapper.createObjectNode().put("operation", "UPDATE");
+        command.putObject("fields").put("title", "New").put("body", "Body");
         when(harness.models.executeNaturalCms(any(), any())).thenReturn(
-                modelResponse("", List.of(new CodingModelTurnContract.ToolCall(
-                        UUID.fromString("66666666-6666-4666-8666-666666666666"),
-                        "resolve_cms_target",
-                        harness.mapper.createObjectNode()))),
-                modelResponse(
-                        "Command follows.\n```json\n"
-                                + "{\"operation\":\"UPDATE\",\"fields\":{"
-                                + "\"title\":\"New\",\"body\":\"Body\"}}\n```",
-                        List.of()));
+                toolResponse("validate_cms_command", command));
         when(harness.mcp.callTool(eq("resolve_cms_target"), any())).thenReturn(
-                structured(harness.mapper.createObjectNode().put("resolved", true)),
                 structured(harness.mapper.createObjectNode().put("resolved", true)));
         when(harness.mcp.callTool(eq("validate_cms_command"), any())).thenReturn(
                 structured(harness.mapper.createObjectNode().put("valid", true)));
@@ -213,10 +247,10 @@ class NaturalCmsStageServiceTest {
 
         ArgumentCaptor<CodingModelTurnContract.Request> turns =
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
-        verify(harness.models, times(2)).executeNaturalCms(turns.capture(), any());
-        assertThat(turns.getAllValues().get(1).messages())
-                .anySatisfy(message -> assertThat(message.path("role").asText())
-                        .isEqualTo("tool"));
+        verify(harness.models).executeNaturalCms(turns.capture(), any());
+        assertThat(turns.getValue().toolSchemas())
+                .extracting(schema -> schema.path("name").asText())
+                .containsExactly("validate_cms_command");
         verify(harness.store).record(eq("Bearer worker"), eq(JOB), eq(1), any());
     }
 
@@ -367,6 +401,27 @@ class NaturalCmsStageServiceTest {
             String handlerKey, UUID resultId) {
         return new NaturalCmsContract.StageExecutionRequest(
                 "1.0", TRACE, PROFILE, 1, 1, handlerKey, resultId);
+    }
+
+    private static CodingModelTurnContract.Response toolResponse(String name, JsonNode command) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode arguments = mapper.createObjectNode();
+        arguments.set("command", command.deepCopy());
+        return modelResponse("Submitting the command.", List.of(new CodingModelTurnContract.ToolCall(
+                UUID.randomUUID(), name, arguments)));
+    }
+
+    private static void stubPreviewTools(Harness harness, JsonNode currentState) {
+        when(harness.mcp.callTool(eq("resolve_cms_target"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode().put("resolved", true)));
+        when(harness.mcp.callTool(eq("validate_cms_command"), any())).thenReturn(
+                structured(harness.mapper.createObjectNode().put("valid", true)));
+        ObjectNode preview = harness.mapper.createObjectNode()
+                .put("previewId", PREVIEW.toString())
+                .put("previewHash", PREVIEW_HASH);
+        preview.set("before", currentState.deepCopy());
+        when(harness.mcp.callTool(eq("create_cms_preview"), any()))
+                .thenReturn(structured(preview));
     }
 
     private static CodingModelTurnContract.Response modelResponse(

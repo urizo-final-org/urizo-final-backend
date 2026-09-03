@@ -27,7 +27,7 @@ public final class ProfileDefaultTemplateService {
                         "PROFILE_DEFAULT_TEMPLATE_NOT_FOUND",
                         "The default Profile Template was not found.",
                         HttpStatus.NOT_FOUND));
-        ProfileSnapshotValidator.validateAuthoring(normalized, stored.snapshot());
+        ProfileSnapshotValidator.validateLegacyDefault(normalized, stored.snapshot());
         return stored;
     }
 

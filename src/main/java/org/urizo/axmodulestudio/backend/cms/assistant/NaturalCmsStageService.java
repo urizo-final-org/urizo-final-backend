@@ -90,11 +90,11 @@ public final class NaturalCmsStageService {
             }
             return response(replay);
         }
-        Set<String> allowedTools = store.runtimePolicy(
-                authorization, job.profileVersionId()).allowedTools();
+        NaturalCmsStore.RuntimePolicy toolPolicy = store.runtimePolicy(
+                authorization, job.profileVersionId());
 
         if ("cms.apply".equals(request.handlerKey())) {
-            JsonNode approvedCommand = revalidateApply(job, allowedTools);
+            JsonNode approvedCommand = revalidateApply(job, request, toolPolicy);
             NaturalCmsContract.HandlerResult stored = store.recordApplied(
                     authorization,
                     jobId,
@@ -107,8 +107,8 @@ public final class NaturalCmsStageService {
 
         NaturalCmsContract.StageExecutionResponse executed = switch (request.handlerKey()) {
             case "cms.analyze" -> analyze(job, request, resultId);
-            case "cms.preview" -> preview(job, request, resultId, allowedTools);
-            case "cms.discard" -> discard(job, request, resultId, allowedTools);
+            case "cms.preview" -> preview(job, request, resultId, toolPolicy);
+            case "cms.discard" -> discard(job, request, resultId, toolPolicy);
             default -> throw contract("Natural CMS stage handler is not registered.");
         };
         NaturalCmsContract.HandlerResult stored = store.record(
@@ -144,10 +144,13 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId,
-            Set<String> allowedTools) {
+            NaturalCmsStore.RuntimePolicy toolPolicy) {
         requireStatus(job, "ACTIVE");
         ObjectNode currentState = resources.snapshot(job.resource());
-        requirePreviewTools(allowedTools);
+        Set<String> allowedTools = nodeTools(
+                toolPolicy, stage.nodeId(),
+                Set.of("validate_cms_command"),
+                Set.of("resolve_cms_target", "create_cms_preview"));
         List<JsonNode> schemas = previewToolSchemas();
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(job, stage, ModelUseCase.TOOL_CALL);
@@ -189,8 +192,10 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId,
-            Set<String> allowedTools) {
+            NaturalCmsStore.RuntimePolicy toolPolicy) {
         requireDecision(job, "REJECTED");
+        Set<String> allowedTools = nodeTools(
+                toolPolicy, stage.nodeId(), Set.of(), Set.of("discard_cms_preview"));
         ObjectNode arguments = objectMapper.createObjectNode();
         arguments.put("previewId", job.previewId().toString());
         arguments.put("previewHash", job.previewHash());
@@ -215,8 +220,12 @@ public final class NaturalCmsStageService {
 
     private JsonNode revalidateApply(
             NaturalCmsContract.JobResponse job,
-            Set<String> allowedTools) {
+            NaturalCmsContract.StageExecutionRequest stage,
+            NaturalCmsStore.RuntimePolicy toolPolicy) {
         requireDecision(job, "APPROVED");
+        Set<String> allowedTools = nodeTools(
+                toolPolicy, stage.nodeId(), Set.of(),
+                Set.of("revalidate_cms_preview", "apply_cms_preview"));
         JsonNode command = resources.validateCommand(job.resource(), job.structuredCommand());
         ObjectNode currentState = resources.snapshot(job.resource());
         ObjectNode arguments = baseArguments(job.resource(), currentState);
@@ -396,13 +405,31 @@ public final class NaturalCmsStageService {
         return Set.copyOf(allowed);
     }
 
-    private static void requirePreviewTools(Set<String> allowedTools) {
-        if (!allowedTools.containsAll(NaturalCmsToolContract.PREVIEW_TOOLS)) {
+    private static Set<String> nodeTools(
+            NaturalCmsStore.RuntimePolicy policy,
+            String nodeId,
+            Set<String> requiredModelTools,
+            Set<String> requiredSystemTools) {
+        if (policy.toolBindings().legacy()) {
+            Set<String> required = new java.util.HashSet<>(requiredModelTools);
+            required.addAll(requiredSystemTools);
+            if (!policy.allowedTools().containsAll(required)) {
+                throw new NaturalCmsException(
+                        "TOOL_NOT_ALLOWED",
+                        "Natural CMS runtime policy rejected the Tool.",
+                        HttpStatus.FORBIDDEN);
+            }
+            return policy.allowedTools();
+        }
+        if (!policy.toolBindings().modelToolsForNode(nodeId).equals(requiredModelTools)
+                || !policy.toolBindings().systemToolsForNode(nodeId)
+                .equals(requiredSystemTools)) {
             throw new NaturalCmsException(
                     "TOOL_NOT_ALLOWED",
-                    "Natural CMS runtime policy rejected the Tool.",
+                    "Natural CMS node Tool binding is incomplete.",
                     HttpStatus.FORBIDDEN);
         }
+        return policy.toolBindings().toolsForNode(nodeId);
     }
 
     private ModelOutcome parseAnalyze(String value) {

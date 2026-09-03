@@ -67,7 +67,7 @@ public final class ProfileVersionService {
                     "An INACTIVE Profile Version cannot be reactivated.",
                     HttpStatus.CONFLICT);
         }
-        ProfileSnapshotValidator.validateStored(
+        ProfileSnapshotValidator.validateForActivation(
                 stored.profileVersionId(),
                 stored.profileKey(),
                 stored.profileVersion(),

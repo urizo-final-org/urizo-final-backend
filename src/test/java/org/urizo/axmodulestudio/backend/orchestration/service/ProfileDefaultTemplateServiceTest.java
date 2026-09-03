@@ -64,6 +64,21 @@ class ProfileDefaultTemplateServiceTest {
                         assertThat(failure.status().value()).isEqualTo(400));
     }
 
+    @Test
+    void readsLegacyDefaultsButRequiresBindingsWhenSaving() throws Exception {
+        ObjectNode legacy = (ObjectNode) authoringSnapshot(
+                "llm-ops-coding-handler.snapshot.valid.json");
+        legacy.remove("toolBindings");
+        when(repository.findByProfileKey("LLM_OPS"))
+                .thenReturn(Optional.of(stored("LLM_OPS", legacy)));
+
+        assertThat(service.get("LLM_OPS").snapshot()).isEqualTo(legacy);
+        assertThatThrownBy(() -> service.save("LLM_OPS", legacy))
+                .isInstanceOfSatisfying(ProfileVersionException.class, failure ->
+                        assertThat(failure.code()).isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).save("LLM_OPS", legacy);
+    }
+
     private static ProfileDefaultTemplateRepository.StoredDefaultTemplate stored(
             String profileKey, JsonNode snapshot) {
         return new ProfileDefaultTemplateRepository.StoredDefaultTemplate(

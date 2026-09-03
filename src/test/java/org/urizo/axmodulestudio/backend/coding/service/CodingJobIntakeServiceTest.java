@@ -44,13 +44,10 @@ class CodingJobIntakeServiceTest {
     private final CodingHandlerCommandService commands = mock(CodingHandlerCommandService.class);
     private final CodingRunnerService runner = mock(CodingRunnerService.class);
     private final ProfileVersionRepository profiles = mock(ProfileVersionRepository.class);
-    private final GuardrailJobSnapshotWriter guardrailSnapshots =
-            mock(GuardrailJobSnapshotWriter.class);
 
     private CodingJobIntakeService service() {
         return new CodingJobIntakeService(
-                commands, runner, guardrailSnapshots, profiles, mapper,
-                Clock.fixed(NOW, ZoneOffset.UTC),
+                commands, runner, profiles, mapper, Clock.fixed(NOW, ZoneOffset.UTC),
                 // A real wait would make the suite sleep; the polling itself is not what is
                 // under test, only what happens at each outcome.
                 3, Duration.ofMillis(1));
@@ -74,7 +71,7 @@ class CodingJobIntakeServiceTest {
     void aCreatedJobQueuesTheWorkspaceItsCodeStageWillNeed() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 
@@ -116,13 +113,13 @@ class CodingJobIntakeServiceTest {
     void fillsTheContractFromTheActiveProfileAndTheRunnersRealHead() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), eq(TRACE), eq("key-1"), sent.capture());
+        verify(commands).create(any(), eq(TRACE), eq("key-1"), sent.capture(), any());
         CodingHandlerContract.CreateCodingJobRequest built = sent.getValue();
 
         // The runner reports a bare sha; the Job contract's pattern demands the prefix.
@@ -151,7 +148,7 @@ class CodingJobIntakeServiceTest {
         assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("backend")))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("현재 코드 기준");
-        verify(commands, never()).create(any(), any(), any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -166,7 +163,7 @@ class CodingJobIntakeServiceTest {
         assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("backend")))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("실행기가 응답하지 않습니다");
-        verify(commands, never()).create(any(), any(), any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any());
     }
 
     @Test

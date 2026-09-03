@@ -47,6 +47,13 @@ public class GuardrailJobSnapshotWriter {
      * folder. So both sides' labels are copied, while the off rows still contribute no path.
      */
     public List<String> capture(UUID jobId) {
+        return capture(jobId, List.of());
+    }
+
+    /**
+     * @param repositoryFiles every tracked file the scan saw, filtered here to the fence
+     */
+    public List<String> capture(UUID jobId, List<String> repositoryFiles) {
         Objects.requireNonNull(jobId, "jobId is required");
         List<StoredSelection> stored = jdbc.query(
                 "SELECT repository, path, enabled, label FROM app.guardrail_path_selection "
@@ -63,6 +70,8 @@ public class GuardrailJobSnapshotWriter {
         allowed.forEach(allowedPaths::add);
         areas(snapshot, "allowedAreas", stored, true);
         areas(snapshot, "deniedAreas", stored, false);
+        ArrayNode files = snapshot.putArray("files");
+        insideFence(repositoryFiles, allowed).forEach(files::add);
         snapshot.set("rules", rules());
         // The job request is replayable, so a repeated initialize must not rewrite the copy.
         jdbc.update("INSERT INTO app.guardrail_job_snapshot (job_id, snapshot_json) "
@@ -78,48 +87,25 @@ public class GuardrailJobSnapshotWriter {
     private static final int MAX_SNAPSHOT_FILES = 300;
 
     /**
-     * Adds the files the job may change, taken from the scan the job's baseSha came from.
+     * The files a job may change, out of every file the scan saw.
      *
-     * <p>Written after {@link #capture}, not inside it: the list comes from the runner, and
-     * waiting on a host process inside the transaction that creates the job would hold a
-     * database transaction open across a network call. That is safe here because the list is
-     * a hint for the agents and never an authority — the enforcement stays {@code allowedPaths}
-     * and the post-check on the files actually changed.
-     *
-     * <p>Filtered against the job's own snapshot rather than the current selection, so a job
-     * is never handed a file outside the fence it was created under.
+     * <p>Part of the one INSERT rather than a later UPDATE. No runtime account may update this
+     * table, which is what makes the copy a copy; a second write was refused with "permission
+     * denied" when this was first written that way. The grant is the invariant, not an obstacle.
      */
-    public List<String> recordFiles(UUID jobId, List<String> repositoryFiles) {
-        Objects.requireNonNull(jobId, "jobId is required");
-        if (repositoryFiles == null || repositoryFiles.isEmpty()) {
+    private static List<String> insideFence(List<String> repositoryFiles, List<String> allowed) {
+        if (repositoryFiles == null || repositoryFiles.isEmpty() || allowed.isEmpty()) {
             return List.of();
         }
-        List<String> allowed = jdbc.queryForList(
-                "SELECT jsonb_array_elements_text(snapshot_json -> 'allowedPaths') "
-                        + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
-                String.class, jobId);
         List<String> folders = allowed.stream()
                 .map(entry -> entry.substring(entry.indexOf(':') + 1))
                 .filter(folder -> !folder.isBlank())
                 .toList();
-        if (folders.isEmpty()) {
-            return List.of();
-        }
-        List<String> selected = repositoryFiles.stream()
+        return repositoryFiles.stream()
                 .filter(file -> folders.stream().anyMatch(folder -> file.startsWith(folder + "/")))
                 .distinct()
                 .limit(MAX_SNAPSHOT_FILES)
                 .toList();
-        if (selected.isEmpty()) {
-            return List.of();
-        }
-        ArrayNode files = objectMapper.createArrayNode();
-        selected.forEach(files::add);
-        jdbc.update("UPDATE app.guardrail_job_snapshot "
-                        + "SET snapshot_json = jsonb_set(snapshot_json, '{files}', ?::jsonb) "
-                        + "WHERE job_id = ?",
-                files.toString(), jobId);
-        return List.copyOf(selected);
     }
 
     /** One stored guardrail row, as much of it as the snapshot needs. */

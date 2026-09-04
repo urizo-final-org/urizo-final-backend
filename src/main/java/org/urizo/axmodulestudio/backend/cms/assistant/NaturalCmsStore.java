@@ -26,6 +26,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 @Service
 @Profile("dev & local-full")
@@ -138,15 +139,10 @@ public final class NaturalCmsStore {
                     || !"central.default".equals(guardrail.textValue())) {
                 throw conflict("Natural CMS runtime policy is not executable.");
             }
-            java.util.HashSet<String> tools = new java.util.HashSet<>();
-            for (JsonNode tool : allowed) {
-                if (!tool.isTextual()
-                        || !RUNTIME_TOOLS.contains(tool.textValue())
-                        || !tools.add(tool.textValue())) {
-                    throw conflict("Natural CMS runtime policy is not executable.");
-                }
-            }
-            return new RuntimePolicy(tools, guardrail.textValue());
+            ProfileToolBindingPolicy bindings = ProfileToolBindingPolicy.decode(
+                    snapshot, RUNTIME_TOOLS);
+            return new RuntimePolicy(
+                    bindings.profileAllowedTools(), guardrail.textValue(), bindings);
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
             throw conflict("Natural CMS runtime policy is not executable.");
@@ -559,9 +555,17 @@ public final class NaturalCmsStore {
                 true);
     }
 
-    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+    record RuntimePolicy(
+            Set<String> allowedTools,
+            String guardrailProfileKey,
+            ProfileToolBindingPolicy toolBindings) {
+        RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            this(allowedTools, guardrailProfileKey,
+                    ProfileToolBindingPolicy.legacy(allowedTools));
+        }
         RuntimePolicy {
             allowedTools = Set.copyOf(allowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
         }
     }
 }

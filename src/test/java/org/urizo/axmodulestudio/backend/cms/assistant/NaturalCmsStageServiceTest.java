@@ -12,6 +12,8 @@ import static org.mockito.Mockito.when;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
@@ -30,6 +32,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 class NaturalCmsStageServiceTest {
 
@@ -200,12 +203,21 @@ class NaturalCmsStageServiceTest {
     }
 
     @Test
-    void boundNaturalCmsPolicyDecodeFailsClosedForMissingTools() {
+    void boundNaturalCmsPolicyDecodeFailsClosedForMissingTools() throws Exception {
         NaturalCmsStore.RuntimePolicy valid = NaturalCmsStore.decodeRuntimePolicy(
                 new ObjectMapper(),
                 "{\"toolPolicy\":{\"allowedTools\":[\"resolve_cms_target\"]},"
                         + "\"guardrailProfileKey\":\"central.default\"}");
         assertThat(valid.allowedTools()).containsExactly("resolve_cms_target");
+        assertThat(valid.toolBindings().legacy()).isTrue();
+
+        NaturalCmsStore.RuntimePolicy bound = NaturalCmsStore.decodeRuntimePolicy(
+                new ObjectMapper(), Files.readString(Path.of(
+                        "contracts/fixtures/orchestration/natural-cms-handler.snapshot.valid.json")));
+        assertThat(bound.toolBindings().modelToolsForNode("preview"))
+                .containsExactly("validate_cms_command");
+        assertThat(bound.toolBindings().systemToolsForNode("apply"))
+                .containsExactlyInAnyOrder("revalidate_cms_preview", "apply_cms_preview");
 
         assertThatThrownBy(() -> NaturalCmsStore.decodeRuntimePolicy(
                 new ObjectMapper(),
@@ -547,7 +559,7 @@ class NaturalCmsStageServiceTest {
             when(store.findResult("Bearer worker", JOB, 1, RESULT))
                     .thenReturn(Optional.empty());
             when(store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(
-                    new NaturalCmsStore.RuntimePolicy(ALL_TOOLS, "central.default"));
+                    runtimePolicy(mapper));
             when(store.record(eq("Bearer worker"), eq(JOB), eq(1), any()))
                     .thenAnswer(call -> {
                         NaturalCmsContract.StageExecutionResponse value = call.getArgument(3);
@@ -579,6 +591,20 @@ class NaturalCmsStageServiceTest {
                     provider,
                     mapper,
                     Clock.fixed(NOW, ZoneOffset.UTC));
+        }
+    }
+
+    private static NaturalCmsStore.RuntimePolicy runtimePolicy(ObjectMapper mapper) {
+        try {
+            JsonNode snapshot = mapper.readTree(Files.readString(Path.of(
+                    "contracts/fixtures/orchestration/natural-cms-handler.snapshot.valid.json")));
+            ProfileToolBindingPolicy bindings = ProfileToolBindingPolicy.decode(
+                    snapshot, ALL_TOOLS);
+            return new NaturalCmsStore.RuntimePolicy(
+                    ALL_TOOLS, "central.default", bindings);
+        }
+        catch (java.io.IOException failure) {
+            throw new AssertionError(failure);
         }
     }
 }

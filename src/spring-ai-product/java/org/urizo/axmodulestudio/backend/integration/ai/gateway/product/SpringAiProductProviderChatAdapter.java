@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -31,6 +32,7 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.context.annotation.Profile;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.springframework.ai.google.genai.common.GoogleGenAiThinkingLevel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
 import org.springframework.ai.model.tool.StructuredOutputChatOptions;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -50,6 +52,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFinishRea
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
 
 @Component
 @Profile("dev & !coding-model-turn-local-mock")
@@ -114,7 +117,7 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                         credential,
                         registration.modelId(),
                         registration.maxOutputTokens())) {
-                    ChatResponse response = session.chatModel().call(prompt(request));
+                    ChatResponse response = session.chatModel().call(prompt(registration, request));
                     return response(request, response, startedAt);
                 }
             }
@@ -124,30 +127,28 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
     }
 
-    private Prompt prompt(ProviderChatRequest request) {
+    private Prompt prompt(ProviderModelRegistration registration, ProviderChatRequest request) {
         List<ProviderChatMessage> providerMessages = request.providerMessages();
         List<Message> messages = new ArrayList<>();
         for (int index = 0; index < providerMessages.size(); index++) {
             messages.add(springMessage(request, providerMessages.get(index), index));
         }
         if (request.tools().isEmpty() && !request.responseFormat().structured()) {
-            return new Prompt(messages);
+            return new Prompt(messages, chatOptions(registration, request));
         }
         if (request.responseFormat().structured()) {
-            return new Prompt(messages, structuredOptions(
-                    request.provider(), request.responseFormat()));
+            return new Prompt(messages, structuredOptions(registration, request));
         }
         List<ToolCallback> callbacks = request.tools().stream()
                 .map(SpringAiProductProviderChatAdapter::toolCallback)
                 .toList();
-        ToolCallingChatOptions options = toolOptions(request.provider(), callbacks);
+        ToolCallingChatOptions options = toolOptions(registration, request, callbacks);
         return new Prompt(messages, options);
     }
 
     private static StructuredOutputChatOptions structuredOptions(
-            ModelProvider provider,
-            ProviderResponseFormat responseFormat) {
-        StructuredOutputChatOptions options = switch (provider) {
+            ProviderModelRegistration registration, ProviderChatRequest request) {
+        StructuredOutputChatOptions options = switch (request.provider()) {
             case OPENAI -> new OpenAiChatOptions();
             case GOOGLE_GENAI -> {
                 GoogleGenAiChatOptions google = new GoogleGenAiChatOptions();
@@ -158,15 +159,24 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             case VERTEX_AI_GEMINI ->
                     throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         };
-        options.setOutputSchema(responseFormat.providerOutputSchema());
+        if (options instanceof OpenAiChatOptions openAi) {
+            applyInference(openAi, request.inferenceSettings());
+        }
+        if (options instanceof AnthropicChatOptions anthropic) applyInference(anthropic, request.inferenceSettings());
+        if (options instanceof GoogleGenAiChatOptions google) {
+            applyInference(google, request.inferenceSettings(), registration.inferenceSupport());
+        }
+        options.setOutputSchema(request.responseFormat().providerOutputSchema());
         return options;
     }
 
     private static ToolCallingChatOptions toolOptions(
-            ModelProvider provider, List<ToolCallback> callbacks) {
-        return switch (provider) {
+            ProviderModelRegistration registration,
+            ProviderChatRequest request, List<ToolCallback> callbacks) {
+        return switch (request.provider()) {
             case OPENAI -> {
                 OpenAiChatOptions options = new OpenAiChatOptions();
+                applyInference(options, request.inferenceSettings());
                 options.setToolCallbacks(callbacks);
                 options.setInternalToolExecutionEnabled(false);
                 options.setParallelToolCalls(false);
@@ -174,12 +184,14 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             }
             case GOOGLE_GENAI -> {
                 GoogleGenAiChatOptions options = new GoogleGenAiChatOptions();
+                applyInference(options, request.inferenceSettings(), registration.inferenceSupport());
                 options.setToolCallbacks(callbacks);
                 options.setInternalToolExecutionEnabled(false);
                 yield options;
             }
             case ANTHROPIC -> {
                 AnthropicChatOptions options = new AnthropicChatOptions();
+                applyInference(options, request.inferenceSettings());
                 options.setToolCallbacks(callbacks);
                 options.setInternalToolExecutionEnabled(false);
                 yield options;
@@ -187,6 +199,47 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             case VERTEX_AI_GEMINI ->
                     throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         };
+    }
+
+    private static void applyInference(OpenAiChatOptions options, InferenceSettings settings) {
+        if (settings.reasoningIntensity() != InferenceSettings.ReasoningIntensity.NONE) {
+            options.setReasoningEffort(settings.reasoningIntensity().name().toLowerCase(java.util.Locale.ROOT));
+        }
+    }
+
+    private static org.springframework.ai.chat.prompt.ChatOptions chatOptions(
+            ProviderModelRegistration registration, ProviderChatRequest request) {
+        return switch (request.provider()) {
+            case OPENAI -> { OpenAiChatOptions value = new OpenAiChatOptions(); applyInference(value, request.inferenceSettings()); yield value; }
+            case ANTHROPIC -> { AnthropicChatOptions value = new AnthropicChatOptions(); applyInference(value, request.inferenceSettings()); yield value; }
+            case GOOGLE_GENAI -> { GoogleGenAiChatOptions value = new GoogleGenAiChatOptions(); applyInference(value, request.inferenceSettings(), registration.inferenceSupport()); yield value; }
+            case VERTEX_AI_GEMINI -> throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        };
+    }
+
+    private static void applyInference(AnthropicChatOptions options, InferenceSettings settings) {
+        if (settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE) {
+            // Spring AI 1.1.8 cannot encode Anthropic adaptive thinking. Leaving the
+            // field absent preserves the provider default used by Opus 5 and Sonnet 5.
+            return;
+        }
+        options.setThinking(new AnthropicApi.ChatCompletionRequest.ThinkingConfig(
+                AnthropicApi.ThinkingType.ENABLED,
+                settings.reasoningBudgetTokens()));
+    }
+
+    private static void applyInference(
+            GoogleGenAiChatOptions options,
+            InferenceSettings settings,
+            org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSupport support) {
+        if (settings.reasoningBudgetTokens() != null && support.reasoningBudgetTokens() != null) {
+            // Google accepts either its budget-based control or thinkingLevel, never both.
+            options.setThinkingBudget(settings.reasoningBudgetTokens());
+            return;
+        }
+        options.setThinkingLevel(settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE
+                ? GoogleGenAiThinkingLevel.THINKING_LEVEL_UNSPECIFIED
+                : GoogleGenAiThinkingLevel.valueOf(settings.reasoningIntensity().name()));
     }
 
     private static ToolCallback toolCallback(ProviderToolDefinition tool) {

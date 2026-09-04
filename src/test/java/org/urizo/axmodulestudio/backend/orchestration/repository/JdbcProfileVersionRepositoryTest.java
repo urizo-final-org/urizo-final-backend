@@ -160,6 +160,7 @@ class JdbcProfileVersionRepositoryTest {
         authoring.putArray("edges");
         authoring.putObject("config");
         authoring.putObject("modelBindings");
+        authoring.putObject("toolBindings");
         authoring.putObject("toolPolicy");
         authoring.put("guardrailProfileKey", "central.default");
         when(jdbc.queryForObject(

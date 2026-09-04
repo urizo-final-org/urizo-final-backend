@@ -142,8 +142,8 @@ public class CodingModelTurnService {
                         "The bound model selection is invalid.");
             }
             try {
-                validated.add(capabilityRegistry.require(
-                        candidate.provider(), candidate.modelId(), useCase));
+                capabilityRegistry.require(candidate.provider(), candidate.modelId(), useCase);
+                validated.add(candidate);
             }
             catch (CapabilityRegistrationException failure) {
                 throw new ProviderGatewayException(failure.code(),
@@ -175,7 +175,8 @@ public class CodingModelTurnService {
                 normalizedMessages(request, requestOverhead(providerTools, responseFormat)),
                 providerTools,
                 responseFormat,
-                request.deadlineAt()));
+                request.deadlineAt(),
+                selected.inferenceSettings()));
         if (providerResponse.provider() != selected.provider()
                 || !providerResponse.modelId().equals(selected.modelId())
                 || providerResponse.content().length() > 200_000

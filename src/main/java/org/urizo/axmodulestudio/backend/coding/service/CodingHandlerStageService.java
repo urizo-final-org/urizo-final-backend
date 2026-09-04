@@ -147,11 +147,11 @@ public final class CodingHandlerStageService {
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.code" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), CODE_TOOLS),
+                    modelTools(authority, request.nodeId(), CODE_TOOLS),
                     Set.of("completed"));
             case "coding.review" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), REVIEW_TOOLS),
+                    modelTools(authority, request.nodeId(), REVIEW_TOOLS),
                     Set.of("passed", "changes_requested"));
             case "coding.preview" -> preview(
                     authorization, jobId, resultId, request, authority, aggregate);
@@ -289,6 +289,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        requireSystemTools(authority, request.nodeId(), Set.of(
+                "read_diff", "run_check", "check_package_allowlist", "scan_changed_files"));
         CodingHandlerContract.HandlerResultResponse code = latestResult(
                 aggregate, "coding.code", "completed");
         CodingHandlerContract.HandlerResultResponse review = latestResult(
@@ -895,7 +897,8 @@ public final class CodingHandlerStageService {
             CodingModelTurnContract.ToolCall call) {
         ObjectNode request = toolRequest(
                 jobId, stage, authority, aggregate, resultId, sequence, call);
-        CodingToolContract.Accepted accepted = tools.submit(authorization, request);
+        CodingToolContract.Accepted accepted =
+                tools.submitForNode(authorization, request, stage.nodeId());
         return tools.result(authorization, accepted.executionId());
     }
 
@@ -1072,6 +1075,27 @@ public final class CodingHandlerStageService {
         Set<String> allowed = new java.util.HashSet<>(stageTools);
         allowed.retainAll(profileTools);
         return Set.copyOf(allowed);
+    }
+
+    static Set<String> modelTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> stageTools) {
+        if (authority.toolBindings().legacy()) {
+            return allowedTools(authority.profileAllowedTools(), stageTools);
+        }
+        return allowedTools(
+                authority.toolBindings().modelToolsForNode(nodeId), stageTools);
+    }
+
+    private static void requireSystemTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> requiredTools) {
+        if (authority.toolBindings().legacy()) return;
+        if (!authority.toolBindings().systemToolsForNode(nodeId).equals(requiredTools)) {
+            throw forbidden("The Coding node system Tool binding is incomplete.");
+        }
     }
 
     /** Every diff-bound tool is refused until read_diff has established the current diff. */

@@ -78,9 +78,10 @@ public final class CodingHandlerStageService {
      * the context needs to be pointed at the real bytes, not just told to try again.
      */
     private static final String APPLY_PATCH_RETRY_HINT =
-            " If the patch did not apply, call read_file on the target file first and "
-            + "rebuild the patch against its exact current content: correct @@ line "
-            + "numbers, context lines copied verbatim, and no added trailing whitespace.";
+            " If a diff you wrote did not apply, do not rewrite it. Call read_file on the "
+            + "target file and send path, oldText and newText instead: copy the exact text "
+            + "to replace out of what read_file returned as oldText, and the server builds "
+            + "the diff. Retyping a long line is what fails.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
     /**
@@ -1184,7 +1185,20 @@ public final class CodingHandlerStageService {
                 result.putArray("roots").add(source.path("scope").asText("."));
             }
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
-            case "apply_patch" -> result.put("patch", source.path("patch").asText());
+            case "apply_patch" -> {
+                if (source.has("patch")) {
+                    result.put("patch", source.path("patch").asText());
+                }
+                else {
+                    // Copied field by field so an incomplete call reaches the Gateway as
+                    // what the model actually sent, and is named back to it there.
+                    for (String field : List.of("path", "oldText", "newText")) {
+                        if (source.has(field)) {
+                            result.put(field, source.path(field).asText());
+                        }
+                    }
+                }
+            }
             case "run_check" -> result.put("checkId", source.path("profile").asText());
             default -> throw contract("The model selected an unregistered Coding tool.");
         }
@@ -1346,8 +1360,10 @@ public final class CodingHandlerStageService {
                         + "search that already answered with a slight variation of itself, "
                         + "and do not reword a search that found nothing - open the most "
                         + "likely file instead. Once the files to change are in hand, stop "
-                        + "exploring and edit with apply_patch; a patch can be corrected "
-                        + "after the next read_diff, but a spent answer cannot be recovered. "
+                        + "exploring and edit with apply_patch, sending path, oldText and "
+                        + "newText rather than writing a diff yourself; an edit can be "
+                        + "corrected after the next read_diff, but a spent answer cannot be "
+                        + "recovered. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -1359,7 +1375,7 @@ public final class CodingHandlerStageService {
                         .put("content", encode(context)));
     }
 
-    private List<JsonNode> toolSchemas(Set<String> names) {
+    List<JsonNode> toolSchemas(Set<String> names) {
         List<JsonNode> schemas = new ArrayList<>();
         for (String name : CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet().stream()
                 .sorted().toList()) {
@@ -1418,11 +1434,20 @@ public final class CodingHandlerStageService {
             case "read_file" -> "Read one repository-relative text file.";
             case "search_code" -> "Search the repository for a literal string.";
             case "read_diff" -> "Read the workspace diff as it stands now.";
-            case "apply_patch" -> "Apply one unified diff to the workspace. " + AFTER_READ_DIFF
-                    + " Every file in the patch starts with a line 'diff --git a/PATH b/PATH' "
-                    + "carrying the same repository-relative path twice, then '--- a/PATH', "
-                    + "then '+++ b/PATH', then its @@ hunks. Rename, copy, mode and binary "
-                    + "diffs are refused.";
+            case "apply_patch" -> "Edit the workspace, in either of two ways. "
+                    + AFTER_READ_DIFF
+                    + " Preferred: send path, oldText and newText, and the server writes the "
+                    + "diff for you. oldText is the exact text to replace, copied character "
+                    + "for character out of read_file and appearing exactly once in the file; "
+                    + "newText is what takes its place, or \"\" to delete it. Use this "
+                    + "whenever you are changing text inside a file - it is the only way "
+                    + "that works on long lines, because you never retype the parts you are "
+                    + "keeping. Otherwise: send patch alone, a unified diff, when one call "
+                    + "must touch several files or add or delete a whole file. Every file in "
+                    + "such a patch starts with 'diff --git a/PATH b/PATH' carrying the same "
+                    + "repository-relative path twice, then '--- a/PATH', then '+++ b/PATH', "
+                    + "then its @@ hunks. Rename, copy, mode and binary diffs are refused. "
+                    + "Never send patch together with the other three fields.";
             case "run_check" -> "Run one approved check over the changed files. Call it "
                     + "with exactly {\"profile\":\"git-diff-check\"} or "
                     + "{\"profile\":\"python-syntax\"}; an empty argument object is "
@@ -1447,7 +1472,16 @@ public final class CodingHandlerStageService {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");
             }
-            case "apply_patch" -> stringProperty(properties, required, "patch");
+            // Two shapes, one tool: 'patch' alone, or path/oldText/newText together.
+            // JSON Schema cannot say "exactly one of these sets" in the subset the
+            // provider gateway accepts, so nothing is required here and
+            // CodingToolService names the missing half in words the model can act on.
+            case "apply_patch" -> {
+                properties.putObject("patch").put("type", "string");
+                properties.putObject("path").put("type", "string");
+                properties.putObject("oldText").put("type", "string");
+                properties.putObject("newText").put("type", "string");
+            }
             case "run_check" -> stringProperty(properties, required, "profile");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");

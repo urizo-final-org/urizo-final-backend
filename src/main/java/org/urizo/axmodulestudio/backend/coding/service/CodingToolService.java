@@ -46,7 +46,7 @@ public final class CodingToolService {
             "read_file", "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
             "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
             "read_diff", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
-            "apply_patch", "sha256:f6594e18aaedfb029106fa669c557027854ec5f86cce436fcec1723791743cd7",
+            "apply_patch", "sha256:f80e35f798eb3962fb3c65da2b8e9c0583d3d177b5e0435c273a296ff88f2411",
             "run_check", "sha256:9c8ff63f21a3414335f7f7788d00bdfb096480b37a1cee5e9084d2954439824a",
             "check_package_allowlist", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "scan_changed_files", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa");
@@ -68,6 +68,15 @@ public final class CodingToolService {
             "repositoryId", "baseSha", "candidateSha");
     private static final Set<String> APPROVAL_FIELDS = Set.of(
             "approvalId", "scopeDigest", "expiresAt");
+    /**
+     * Bound on one side of a replacement edit. The provider gateway caps a whole tool call
+     * at 32,768 characters, so two sides of this size still leave room for the rest.
+     */
+    private static final int REPLACEMENT_TEXT_LIMIT = 8_000;
+    /** Lines of unchanged text kept on each side of a rewritten hunk, as git writes them. */
+    private static final int PATCH_CONTEXT_LINES = 3;
+    /** The replacement form's arguments, as opposed to the one-field patch form. */
+    private static final Set<String> REPLACEMENT_FIELDS = Set.of("path", "oldText", "newText");
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -308,16 +317,27 @@ public final class CodingToolService {
             case "apply_patch" -> {
                 requireDiffDigest(binding);
                 arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
-                String patch = text(request.arguments(), "patch");
-                String normalized = normalizePatchText(patch);
-                if (!normalized.equals(patch)) {
-                    // The model's own text stays in coding_model_turn_idempotency; this
-                    // line is the only record that the counts it sent were not the counts
-                    // git received, which an audit of a changed file has to be able to see.
-                    LOG.warn("Coding apply_patch hunk counts rewritten: job={} toolCall={}",
-                            request.jobId(), request.toolCallId());
+                if (isReplacementForm(request.arguments())) {
+                    // The model names the text to change; the diff around it - line
+                    // numbers, counts, context copied byte for byte - is arithmetic over
+                    // the file, so the server does it. Measured on Jobs a15a51b1 and
+                    // 0c78172c, where fifteen patches in a row died on a 1,832-character
+                    // context line the model could not transcribe twice.
+                    arguments.put("patch", replacementPatch(client, binding, request));
                 }
-                arguments.put("patch", normalized);
+                else {
+                    String patch = text(request.arguments(), "patch");
+                    String normalized = normalizePatchText(patch);
+                    if (!normalized.equals(patch)) {
+                        // The model's own text stays in coding_model_turn_idempotency;
+                        // this line is the only record that the counts it sent were not
+                        // the counts git received, which an audit of a changed file has
+                        // to be able to see.
+                        LOG.warn("Coding apply_patch hunk counts rewritten: job={} toolCall={}",
+                                request.jobId(), request.toolCallId());
+                    }
+                    arguments.put("patch", normalized);
+                }
             }
             case "run_check" -> {
                 requireDiffDigest(binding);
@@ -655,7 +675,7 @@ public final class CodingToolService {
         return List.copyOf(values);
     }
 
-    private static void validateToolArguments(String toolName, JsonNode arguments) {
+    static void validateToolArguments(String toolName, JsonNode arguments) {
         switch (toolName) {
             case "read_file" -> {
                 requireObjectFields(arguments, Set.of("path"), "tool arguments");
@@ -681,10 +701,32 @@ public final class CodingToolService {
             case "read_diff", "check_package_allowlist", "scan_changed_files" ->
                     requireObjectFields(arguments, Set.of(), "tool arguments");
             case "apply_patch" -> {
-                requireObjectFields(arguments, Set.of("patch"), "tool arguments");
-                // Rejects a malformed patch here; the normalized text it returns is
-                // rebuilt in execute(), which is where the MCP arguments are assembled.
-                normalizePatchText(text(arguments, "patch"));
+                Set<String> actual = objectFields(arguments, "tool arguments");
+                if (actual.equals(Set.of("patch"))) {
+                    // Rejects a malformed patch here; the normalized text it returns is
+                    // rebuilt in execute(), which is where the MCP arguments are assembled.
+                    normalizePatchText(text(arguments, "patch"));
+                }
+                else if (actual.equals(REPLACEMENT_FIELDS)) {
+                    relativePath(text(arguments, "path"), "path");
+                    if (boundedText(arguments, "oldText", false)
+                            .equals(boundedText(arguments, "newText", true))) {
+                        throw validation("apply_patch oldText and newText are identical, so "
+                                + "the call would change nothing. Send the text you want in "
+                                + "place of oldText as newText.");
+                    }
+                }
+                else {
+                    // Neither form is complete, and the schema cannot say "one of these two
+                    // sets" - so this sentence is the only place the model is told which
+                    // fields go together and what it actually sent.
+                    throw validation("apply_patch takes either 'patch' alone, holding a "
+                            + "unified diff, or all three of 'path', 'oldText' and 'newText' "
+                            + "to replace one exact piece of text. This call sent "
+                            + (actual.isEmpty() ? "no arguments"
+                                    : String.join(", ", new java.util.TreeSet<>(actual)))
+                            + ".");
+                }
             }
             case "run_check" -> {
                 requireObjectFields(arguments, Set.of("checkId"), "tool arguments");
@@ -697,6 +739,163 @@ public final class CodingToolService {
                 }
             }
             default -> throw validation("Tool name is not registered.");
+        }
+    }
+
+    /**
+     * True when the call names the text to replace instead of carrying a diff. Both forms
+     * live in one tool because they are one action - edit this file - and validation has
+     * already established that the arguments are exactly one of the two shapes.
+     */
+    private static boolean isReplacementForm(JsonNode arguments) {
+        return !arguments.has("patch");
+    }
+
+    /** One side of a replacement, bounded. {@code newText} may be empty: that is a deletion. */
+    private static String boundedText(JsonNode arguments, String field, boolean allowEmpty) {
+        JsonNode value = arguments.get(field);
+        if (value == null || !value.isTextual()
+                || !allowEmpty && value.textValue().isEmpty()
+                || value.textValue().length() > REPLACEMENT_TEXT_LIMIT) {
+            throw validation("apply_patch " + field + " must be a string of at most "
+                    + REPLACEMENT_TEXT_LIMIT + " characters"
+                    + (allowEmpty ? "." : ", and it may not be empty."));
+        }
+        return value.textValue();
+    }
+
+    /**
+     * Reads the file, finds the one place the text occurs, and returns the diff for
+     * replacing it. Every refusal here is worded for the model, because the stage replays
+     * it verbatim and it is the only thing the model learns from.
+     */
+    private String replacementPatch(
+            McpPlatformClient client, ToolBinding binding, ParsedRequest request) {
+        String path = text(request.arguments(), "path");
+        String oldText = request.arguments().path("oldText").textValue();
+        String newText = request.arguments().path("newText").textValue();
+        String content = readFileForReplacement(client, binding, path);
+        int first = content.indexOf(oldText);
+        if (first < 0) {
+            throw validation("apply_patch could not find that oldText in " + path + ". The "
+                    + "file is there but does not contain those exact characters - spacing, "
+                    + "indentation and line breaks all count. Call read_file on " + path
+                    + " and copy the text to replace straight out of what it returns.");
+        }
+        int second = content.indexOf(oldText, first + 1);
+        if (second >= 0) {
+            throw validation("apply_patch found that oldText more than once in " + path
+                    + ", so it cannot tell which one to change. Extend oldText with the "
+                    + "surrounding lines until it appears only once.");
+        }
+        String updated = content.substring(0, first) + newText
+                + content.substring(first + oldText.length());
+        String patch = buildReplacementPatch(path, content, updated);
+        if (patch.length() > 50_000) {
+            throw validation("apply_patch built a diff larger than the 50,000 character "
+                    + "bound from that replacement, because the lines around it are very "
+                    + "long. Replace a smaller piece of " + path + ".");
+        }
+        return patch;
+    }
+
+    /**
+     * The current bytes of one file, read through the same MCP tool the model uses. A
+     * failure here is the model's path or the fence, not a broken gateway, so it is
+     * reported as a refusal the model can answer - {@link #unavailable()} would end the Job.
+     */
+    private String readFileForReplacement(
+            McpPlatformClient client, ToolBinding binding, String path) {
+        ObjectNode arguments = objectMapper.createObjectNode();
+        arguments.put("workspace", binding.workspaceId().toString());
+        arguments.put("expectedHead", gitHash(binding.expectedHead()));
+        arguments.put("path", path);
+        JsonNode result;
+        try {
+            result = client.callTool("read_file", arguments);
+        }
+        catch (McpPlatformException failure) {
+            throw unavailable();
+        }
+        JsonNode structured = result.path("structuredContent");
+        if (result.path("isError").asBoolean() || !structured.isObject()
+                || !structured.path("content").isTextual()) {
+            throw validation("apply_patch could not read " + path + " to build the change. "
+                    + mcpRefusalReason(result) + " Check the path and call read_file on it "
+                    + "first.");
+        }
+        return structured.path("content").asText();
+    }
+
+    /**
+     * The unified diff that turns {@code original} into {@code updated}. One replacement
+     * touches one run of lines, so one hunk carries it, with the usual three lines of
+     * context on each side. Both the start lines and the counts are counted from the file
+     * the workspace just returned rather than declared, and git still checks every context
+     * line against the real file before it applies anything.
+     */
+    static String buildReplacementPatch(String path, String original, String updated) {
+        boolean originalNewlineAtEof = original.endsWith("\n");
+        boolean updatedNewlineAtEof = updated.endsWith("\n");
+        List<String> oldLines = contentLines(original);
+        List<String> newLines = contentLines(updated);
+        int shorter = Math.min(oldLines.size(), newLines.size());
+        int prefix = 0;
+        while (prefix < shorter && oldLines.get(prefix).equals(newLines.get(prefix))) {
+            prefix++;
+        }
+        int suffix = 0;
+        while (suffix < shorter - prefix
+                && oldLines.get(oldLines.size() - 1 - suffix)
+                        .equals(newLines.get(newLines.size() - 1 - suffix))) {
+            suffix++;
+        }
+        // A last line that reads the same but ends differently is not a context line: the
+        // '\ No newline at end of file' marker belongs to one side only.
+        if (originalNewlineAtEof != updatedNewlineAtEof) {
+            suffix = 0;
+        }
+        int oldChangeEnd = oldLines.size() - suffix;
+        int newChangeEnd = newLines.size() - suffix;
+        int start = Math.max(0, prefix - PATCH_CONTEXT_LINES);
+        int trailing = Math.min(PATCH_CONTEXT_LINES, suffix);
+
+        StringBuilder body = new StringBuilder();
+        for (int line = start; line < prefix; line++) {
+            appendPatchLine(body, ' ', oldLines, line, originalNewlineAtEof);
+        }
+        for (int line = prefix; line < oldChangeEnd; line++) {
+            appendPatchLine(body, '-', oldLines, line, originalNewlineAtEof);
+        }
+        for (int line = prefix; line < newChangeEnd; line++) {
+            appendPatchLine(body, '+', newLines, line, updatedNewlineAtEof);
+        }
+        for (int line = oldChangeEnd; line < oldChangeEnd + trailing; line++) {
+            appendPatchLine(body, ' ', oldLines, line, originalNewlineAtEof);
+        }
+        return "diff --git a/" + path + " b/" + path + "\n"
+                + "--- a/" + path + "\n"
+                + "+++ b/" + path + "\n"
+                + "@@ -" + (start + 1) + "," + (oldChangeEnd + trailing - start)
+                + " +" + (start + 1) + "," + (newChangeEnd + trailing - start) + " @@\n"
+                + body;
+    }
+
+    /** The lines of a file, without the empty element a closing newline leaves behind. */
+    private static List<String> contentLines(String content) {
+        if (content.isEmpty()) {
+            return List.of();
+        }
+        String body = content.endsWith("\n")
+                ? content.substring(0, content.length() - 1) : content;
+        return List.of(body.split("\n", -1));
+    }
+
+    private static void appendPatchLine(
+            StringBuilder body, char marker, List<String> lines, int index, boolean newlineAtEof) {
+        body.append(marker).append(lines.get(index)).append('\n');
+        if (!newlineAtEof && index == lines.size() - 1) {
+            body.append("\\ No newline at end of file\n");
         }
     }
 

@@ -41,6 +41,10 @@ param(
     # service runs, so this adds no new dependency and keeps Git versions equal.
     [string]$McpWorkspaceImage = 'axms/mcp-server:dev',
 
+    # Fixed by compose.preview.yaml. TEST runs the frontend checks inside the image BUILD
+    # just produced rather than building one of its own.
+    [string]$PreviewFrontendImage = 'axms/preview-frontend:latest',
+
     [switch]$RunOnce
 )
 
@@ -366,8 +370,16 @@ function Export-McpWorkspaceToHost {
     if ($LASTEXITCODE -ne 0) {
         throw "RUNNER_WORKSPACE_EXPORT_FAILED|작업 폴더를 꺼내지 못했습니다: $(($output | Select-Object -Last 3) -join ' ')"
     }
-    if (-not (Test-Path -LiteralPath (Join-Path $target 'compose.dev.yaml') -PathType Leaf)) {
-        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 compose.dev.yaml 이 없습니다: $target"
+    # A marker the repository is known to carry, so a half-copied export is caught here
+    # rather than as an unreadable Compose error later. It is per repository: the Compose
+    # files are Backend files, and a frontend checkout has never held one.
+    $marker = switch ($Repository) {
+        'backend' { 'compose.dev.yaml' }
+        'frontend' { 'package.json' }
+        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $Repository" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $target $marker) -PathType Leaf)) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 $marker 이 없습니다: $target"
     }
 
     # The clone was made on Linux, so its config keeps core.filemode true. Windows
@@ -395,6 +407,24 @@ function Get-AiWorktreePath {
         throw "RUNNER_WORKTREE_MISSING|작업 폴더가 없습니다. CREATE_WORKTREE 를 먼저 실행하세요: $path"
     }
     return $path
+}
+
+function Get-ScanFiles {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    # The Coding agents cannot list files themselves: their only ways to find one are a
+    # search that has to guess the word and a read that has to guess the path. Three live
+    # runs burned every turn that way and never reached apply_patch. The tracked file list
+    # is small enough (a few hundred paths) to hand over whole, and the Backend filters it
+    # to the guardrail rather than the runner - the same reason Get-ScanFolders returns raw
+    # folders: one copy of the fence, on the Backend.
+    $listed = @(& git -C $Root ls-files 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        # A missing file list must not fail a scan whose real product is the sha. The agents
+        # then work the old way instead of the Job being refused.
+        return @()
+    }
+    return @($listed | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
 }
 
 function Get-ScanFolders {
@@ -470,6 +500,7 @@ function Invoke-PrepareScanWorktree {
                     repo = $repository; scanPath = $target; sha = 'unchanged'
                     note = '로컬 변경이 있어 갱신하지 않았습니다.'
                     folders = (Get-ScanFolders -Repository $repository -Root $target)
+                    files = (Get-ScanFiles -Root $target)
                 }
             }
             $current = "$(& git -C $target rev-parse HEAD 2>&1)".Trim()
@@ -482,6 +513,7 @@ function Invoke-PrepareScanWorktree {
             return @{
                 repo = $repository; scanPath = $target; sha = $baseSha; reused = $true
                 folders = (Get-ScanFolders -Repository $repository -Root $target)
+                files = (Get-ScanFiles -Root $target)
             }
         }
 
@@ -496,6 +528,7 @@ function Invoke-PrepareScanWorktree {
     return @{
         repo = $repository; scanPath = $target; sha = $baseSha; reused = $false
         folders = (Get-ScanFolders -Repository $repository -Root $target)
+        files = (Get-ScanFiles -Root $target)
     }
 }
 
@@ -511,11 +544,17 @@ function Get-PreviewArguments {
 }
 
 function Set-PreviewEnvironment {
+    # Which screen the preview shows. A frontend Job passes its own exported workspace: the
+    # whole point of the preview is the screen the model just changed, and the shared
+    # ai-frontend checkout is not that. Without a source given, that checkout is still the
+    # right answer - a backend Job's preview keeps showing the screen it always showed.
+    param([string]$FrontendSource)
+
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
-    $frontend = Join-Path $WorkRoot 'ai-frontend'
+    $frontend = if ($FrontendSource) { $FrontendSource } else { Join-Path $WorkRoot 'ai-frontend' }
     if (Test-Path -LiteralPath $frontend -PathType Container) {
         $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontend
     }
@@ -590,17 +629,27 @@ function Copy-SourceDatabase {
 function Invoke-PreviewUp {
     param($Payload)
 
-    # BUILD already exported this workspace and produced the images from it, so
-    # the same directory is used here for the Compose files.
+    # BUILD already exported this workspace and produced the images from it, so the same
+    # export is reused here rather than taken again.
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
+    if (-not $repository) { $repository = 'backend' }
     $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    $exported = ''
     if ($workspaceId) {
-        $backendWorktree = Get-WorkspaceHostPath -WorkspaceId $workspaceId
-        if (-not (Test-Path -LiteralPath $backendWorktree -PathType Container)) {
-            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $backendWorktree"
+        $exported = Get-WorkspaceHostPath -WorkspaceId $workspaceId
+        if (-not (Test-Path -LiteralPath $exported -PathType Container)) {
+            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $exported"
         }
     }
-    else {
+    # Same split as BUILD: the Compose files are Backend files, so the project directory is a
+    # Backend checkout even when the Job worked in the frontend.
+    if ($repository -eq 'frontend') {
         $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        $frontendSource = $exported
+    }
+    else {
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendSource = ''
     }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
@@ -609,7 +658,7 @@ function Invoke-PreviewUp {
     $dumpBytes = 0
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    Set-PreviewEnvironment
+    Set-PreviewEnvironment -FrontendSource $frontendSource
     try {
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
@@ -664,13 +713,23 @@ function Invoke-ComposeBuild {
     # exported here first. Without one this stays the host worktree the command
     # already used, so the existing path is untouched.
     $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
-    if ($workspaceId) {
-        $backendWorktree = Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    $exported = if ($workspaceId) {
+        Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    }
+    else { '' }
+    if ($repository -eq 'frontend') {
+        # The Compose files live in the Backend repository, so the project directory stays a
+        # Backend checkout no matter which repository is being built. A frontend workspace holds
+        # no compose.dev.yaml and naming it here fails before the build starts.
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The image is built from the model's own work when there is any. Falling back to the
+        # shared checkout would build a screen nobody changed and call it the candidate.
+        $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }
     }
     else {
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendWorktree = ''
     }
-    $frontendWorktree = if ($repository -eq 'frontend') { Get-AiWorktreePath -Repository 'frontend' } else { '' }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }
@@ -703,6 +762,54 @@ function Invoke-ComposeBuild {
     return @{ repo = $repository; services = $services; projectDirectory = $backendWorktree }
 }
 
+function Invoke-FrontendChecks {
+    # The frontend runtime image installs dependencies and serves the sources; nothing in it
+    # compiles or tests them. A backend candidate at least has to compile to become an image,
+    # so a broken one dies at BUILD. A broken screen does not - it reaches the person who is
+    # asked to approve it, and the guardrail screen promises the opposite in so many words:
+    # "빌드 통과 필수 · 테스트 통과 필수 - 항상 켜져 있으며 끌 수 없습니다".
+    #
+    # BUILD has already produced this image from the same workspace and the dev dependencies
+    # are in it, so the checks run in what is there. Building a second image would double the
+    # wait and could check something other than what the preview is about to serve.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm $PreviewFrontendImage pnpm run verify 2>&1
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
+    # vitest colours its summary, so the escape codes are stripped before anything is matched
+    # or reported. Left in, they reach the approval screen as unreadable noise.
+    # PowerShell 5.1 has no `e escape, and a raw control character in the source would not
+    # survive an editor round trip, so the byte is named rather than typed.
+    $escape = [char]27
+    $plain = @($output | ForEach-Object { "$_" -replace "$escape\[[0-9;]*[A-Za-z]", '' })
+    if ($exit -ne 0) {
+        # What failed has to survive into one line on the approval screen. Taking the tail
+        # does not work: pnpm echoes "Command failed" once per nested script and vitest signs
+        # off with timings, so the compiler error ends up buried in its own noise. The lines
+        # that name a failure are picked out instead, and the tail is only the fallback for a
+        # failure shaped like nothing here.
+        $named = @($plain | Select-String -Pattern 'error TS[0-9]|Tests .*failed|error during build|Error:' |
+            ForEach-Object { $_.ToString().Trim() } | Select-Object -First 2)
+        if ($named) {
+            $tail = $named
+        }
+        else {
+            $tail = @($plain | Where-Object { $_.Trim() -and $_ -notmatch 'ELIFECYCLE' }) |
+                Select-Object -Last 3
+        }
+        throw "RUNNER_TEST_FAILED|$($tail -join ' / ')"
+    }
+    $tests = ($plain | Select-String -Pattern '^\s*Tests\s+\S' | Select-Object -Last 1)
+    $summary = if ($tests) { $tests.ToString().Trim() } else { '검사 통과' }
+    return @{ repo = 'frontend'; summary = "$summary · 타입 검사와 빌드 통과" }
+}
+
 function Invoke-Tests {
     param($Payload)
 
@@ -712,18 +819,18 @@ function Invoke-Tests {
     # The runtime image has no Maven and no test dependencies: the Dockerfile
     # builds with -DskipTests on purpose. Tests therefore run in the build stage,
     # and the dependency cache is a named volume so only the first run downloads.
+    if ($repository -eq 'frontend') { return Invoke-FrontendChecks }
+    if ($repository -ne 'backend') {
+        throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository"
+    }
+
     $worktree = Get-AiWorktreePath -Repository $repository
     $stageImage = "axms/preview-$repository-test:latest"
-    $target = switch ($repository) {
-        'backend' { 'build' }
-        'frontend' { throw 'RUNNER_KIND_NOT_IMPLEMENTED|frontend 테스트는 아직 구현하지 않았습니다.' }
-        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository" }
-    }
 
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $build = & docker build --target $target -t $stageImage $worktree 2>&1
+        $build = & docker build --target build -t $stageImage $worktree 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "RUNNER_TEST_FAILED|테스트 이미지 준비 실패: $(($build | Select-Object -Last 3) -join ' ')"
         }
@@ -1206,6 +1313,15 @@ function Complete-RunnerTask {
         outcome       = $outcome
     }
     if ($null -ne $result) { $body['result'] = $result }
+    # A failure reported as a code alone tells the approval screen that something broke and
+    # nothing about what. The reason was already computed for the console line; it travels in
+    # the same result field, which the Job authority stores for any outcome. Bounded because
+    # it is stored and shown, and a compiler can be arbitrarily talkative.
+    elseif ($detail) {
+        $reason = "$detail"
+        if ($reason.Length -gt 500) { $reason = $reason.Substring(0, 500) }
+        $body['result'] = @{ detail = $reason }
+    }
     if ($null -ne $errorCode) { $body['errorCode'] = $errorCode }
 
     $stamp = (Get-Date).ToString('HH:mm:ss')

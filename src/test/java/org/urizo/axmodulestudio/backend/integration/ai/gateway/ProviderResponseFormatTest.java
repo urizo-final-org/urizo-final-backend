@@ -91,6 +91,60 @@ class ProviderResponseFormatTest {
                 .hasMessageContaining("require every field");
     }
 
+    /*
+     * The approval screen reads a list of acceptance criteria, so the schema has to be able to
+     * say "array of string". Before this the gateway knew only object, string and integer, and a
+     * list could travel only inside an open payload that strict structured output rejects.
+     */
+    @Test
+    void carriesAnArrayOfStringsAndRejectsAnElementOfTheWrongType() {
+        ProviderResponseFormat format = listFormat();
+
+        JsonNode value = format.validateOrRepair(
+                "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"두 줄을 고칩니다.\","
+                        + "\"acceptanceCriteria\":[\"버튼이 잠긴다\",\"이유가 보인다\"]}}");
+
+        assertThat(value.path("payload").path("acceptanceCriteria"))
+                .hasSize(2);
+        assertThatThrownBy(() -> format.validateOrRepair(
+                "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"ok\","
+                        + "\"acceptanceCriteria\":[1]}}"))
+                .isInstanceOfSatisfying(ProviderGatewayException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID));
+    }
+
+    @Test
+    void rejectsAnArrayThatDoesNotDeclareItsElementType() {
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("items");
+        schema.putObject("properties").putObject("items").put("type", "array");
+
+        assertThatThrownBy(() -> ProviderResponseFormat.jsonSchema(schema))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    private static ProviderResponseFormat listFormat() {
+        ObjectNode schema = JsonNodeFactory.instance.objectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        payload.putArray("required").add("planSummary").add("acceptanceCriteria");
+        ObjectNode payloadProperties = payload.putObject("properties");
+        payloadProperties.putObject("planSummary").put("type", "string");
+        payloadProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        return ProviderResponseFormat.jsonSchema(schema);
+    }
+
     private static ProviderResponseFormat format() {
         return ProviderResponseFormat.jsonSchema(schema());
     }

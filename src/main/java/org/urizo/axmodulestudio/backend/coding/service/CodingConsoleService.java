@@ -6,16 +6,19 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminRole;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingConsoleContract;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 
 /**
  * Reads a Coding Job the way the administrator console needs it.
@@ -51,18 +54,83 @@ public class CodingConsoleService {
             "coding.pr_request", "PR 요청",
             "coding.deploy_request", "배포 요청");
 
+    /**
+     * The states a request can still be called off from. A Job that has finished has nothing to
+     * stop, and RUNNING is left out on purpose: the tool gateway and the stage authority both
+     * require the Job to read RUNNING ({@code CodingToolService}), so flipping it mid-run would
+     * not stop the work cleanly - it would fail the next tool call and leave the worker trying
+     * to record a failure the state machine forbids. Stopping a running model needs the worker
+     * to cooperate, which is a separate piece of work.
+     */
+    private static final Set<String> CANCELLABLE = Set.of("PENDING", "WAITING_APPROVAL");
+
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
+    private final CodingJobLifecycleService lifecycle;
 
     // app.coding_* is granted to ai_workspace only; the primary cms_app datasource cannot
     // read a single one of these tables. Unit tests mock the template and never notice, so the
     // qualifier is the whole difference between this class working and failing at every query.
     CodingConsoleService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            CodingJobLifecycleService lifecycle) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
+        this.lifecycle = lifecycle;
     }
+
+    /**
+     * Calls off a request the administrator no longer wants.
+     *
+     * <p>Rejecting is not this. A rejection at the preview stage starts the next attempt - that
+     * is what it is for - so a person who has changed their mind entirely has no way to say so
+     * and has to reject three times, waiting through a full model run each time. Measured on
+     * 2026-09-04, when the only way out was the development-only transition endpoint.
+     *
+     * <p>Nothing here decides anything the state machine does not already decide. The transition
+     * is the same one every other path uses, so the version check, the audit row and the
+     * allowed-target rules are the existing ones rather than a second copy.
+     */
+    public CodingConsoleContract.JobDetail cancel(
+            UUID jobId, String idempotencyKey, AdminRole role) {
+        List<CancelRow> rows = jdbc.query("""
+                SELECT trace_id, status, state_version
+                FROM app.coding_job
+                WHERE job_id = ?
+                """,
+                (rs, row) -> new CancelRow(
+                        rs.getObject("trace_id", UUID.class),
+                        rs.getString("status"),
+                        rs.getInt("state_version")),
+                jobId);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        CancelRow job = rows.get(0);
+        if (!CANCELLABLE.contains(job.status())) {
+            // Worded for the person reading the screen: they need to know whether waiting
+            // will help, which is the only difference that matters between these two.
+            throw new CodingJobLifecycleException(
+                    "RUNNING".equals(job.status())
+                            ? "CODING_JOB_IS_RUNNING" : "CODING_JOB_ALREADY_FINISHED",
+                    "RUNNING".equals(job.status())
+                            ? "지금은 AI 가 작업 중입니다. 작업이 끝나면 취소할 수 있습니다."
+                            : "이미 끝난 요청은 취소할 수 없습니다.",
+                    HttpStatus.CONFLICT,
+                    false,
+                    null);
+        }
+        lifecycle.transition(jobId, job.traceId(), idempotencyKey,
+                new CodingJobLifecycleContract.TransitionRequest(
+                        CodingJobLifecycleContract.SCHEMA_VERSION,
+                        job.stateVersion(),
+                        CodingJobLifecycleContract.Status.CANCELLED,
+                        null));
+        return detail(jobId, role);
+    }
+
+    private record CancelRow(UUID traceId, String status, int stateVersion) { }
 
     /** Newest first. A console list is read far more often than it is paged. */
     public CodingConsoleContract.JobList list(int limit) {

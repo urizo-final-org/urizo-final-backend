@@ -177,6 +177,23 @@ public class CodingConsoleController {
         return detail == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(detail);
     }
 
+    /**
+     * Calls off a request. Separate from the approval endpoint on purpose: a rejection there
+     * buys another attempt, which is the opposite of what someone who has changed their mind
+     * wants, and folding both into one call would make the difference a flag nobody reads.
+     */
+    @PostMapping("/{jobId}/cancel")
+    ResponseEntity<CodingConsoleContract.JobDetail> cancel(
+            @PathVariable UUID jobId,
+            @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
+            Authentication authentication) {
+        String key = idempotencyKey == null || idempotencyKey.isBlank()
+                ? UUID.randomUUID().toString() : idempotencyKey;
+        CodingConsoleContract.JobDetail detail =
+                service.cancel(jobId, key, actor(authentication).role());
+        return detail == null ? ResponseEntity.notFound().build() : ResponseEntity.ok(detail);
+    }
+
     @ExceptionHandler(CodingJobLifecycleException.class)
     ResponseEntity<CodingJobLifecycleContract.ErrorEnvelope> commandFailure(
             CodingJobLifecycleException failure, HttpServletRequest request) {

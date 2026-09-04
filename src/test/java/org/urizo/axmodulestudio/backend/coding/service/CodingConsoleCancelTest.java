@@ -47,8 +47,12 @@ class CodingConsoleCancelTest {
             new CodingConsoleService(jdbc, new ObjectMapper(), lifecycle);
 
     /** Answers the cancel lookup with one row in the given state; every other query is empty. */
-    @SuppressWarnings("unchecked")
     private void jobIs(String status, int stateVersion) {
+        jobIs(status, stateVersion, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void jobIs(String status, int stateVersion, boolean expired) {
         when(jdbc.query(anyString(), any(RowMapper.class), any(Object[].class)))
                 .thenAnswer(invocation -> {
                     String sql = invocation.getArgument(0);
@@ -61,6 +65,7 @@ class CodingConsoleCancelTest {
                     when(row.getObject("trace_id", UUID.class)).thenReturn(TRACE);
                     when(row.getString("status")).thenReturn(status);
                     when(row.getInt("state_version")).thenReturn(stateVersion);
+                    when(row.getBoolean("expired")).thenReturn(expired);
                     return List.of(mapper.mapRow(row, 0));
                 });
     }
@@ -120,6 +125,38 @@ class CodingConsoleCancelTest {
                     .isEqualTo("CODING_JOB_ALREADY_FINISHED");
         }
         verify(lifecycle, never()).transition(any(), any(), anyString(), any());
+    }
+
+    /**
+     * An expired Job still reads WAITING_APPROVAL, so without this check it passed straight to
+     * the state machine - which refuses every target but EXPIRED, in a sentence written for the
+     * worker that normally reads it. On 2026-09-04 a general administrator's screen showed
+     * "The coding job must transition to EXPIRED." The verdict is unchanged; only who explains
+     * it, and in what words, is.
+     */
+    @Test
+    @DisplayName("시간이 지나 자동 종료된 요청은 한국어로 설명하고 거절한다")
+    void explainsAnExpiredJobInKoreanRatherThanLeakingTheStateMachine() {
+        jobIs("WAITING_APPROVAL", 6, true);
+
+        assertThatThrownBy(() -> service.cancel(JOB, "cancel-key-0006", AdminRole.GENERAL_ADMIN))
+                .isInstanceOf(CodingJobLifecycleException.class)
+                .hasMessageContaining("자동으로 종료된 요청입니다")
+                .hasMessageNotContainingAny("EXPIRED", "transition", "coding job")
+                .extracting(failure -> ((CodingJobLifecycleException) failure).code())
+                .isEqualTo("CODING_JOB_EXPIRED");
+
+        verify(lifecycle, never()).transition(any(), any(), anyString(), any());
+    }
+
+    @Test
+    @DisplayName("아직 시간이 남은 요청은 예전처럼 취소된다")
+    void stillCancelsAJobInsideItsWindow() {
+        jobIs("WAITING_APPROVAL", 6, false);
+
+        service.cancel(JOB, "cancel-key-0007", AdminRole.SUPER_ADMIN);
+
+        verify(lifecycle).transition(eq(JOB), eq(TRACE), eq("cancel-key-0007"), any());
     }
 
     @Test

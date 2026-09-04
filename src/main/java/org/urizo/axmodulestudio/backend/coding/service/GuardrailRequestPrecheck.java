@@ -16,10 +16,15 @@ import java.util.Locale;
  * {@code 컬럼} on its own is therefore not listed, because showing a column that already exists is
  * exactly what the demo asks for; only wording that clearly means creating one is.
  *
- * <p>Every phrase names an act, never just its subject. {@code 로그인} and {@code 배포} were once
+ * <p>Every rule names an act, never just its subject. {@code 로그인} and {@code 배포} were once
  * listed bare and refused "로그인 안내 문구를 바꿔줘" and "배포 소식 카드를 추가해 줘" - two requests
- * that only edit text on a page. A phrase that needs a following word to mean the forbidden thing
- * carries that word here.
+ * that only edit text on a page.
+ *
+ * <p>Naming the act as one string is not enough either, because Korean will put words between the
+ * two halves and conjugate the verb. "로그인 기능" missed "로그인할 수 있는 기능", measured on Job
+ * 594c6d6a, which is the same request with three syllables inserted. So a rule comes in two shapes:
+ * a {@code phrase} that is damning on its own ({@code api 키}), and a {@link Pairing} whose subject
+ * and act are matched separately, anywhere in the sentence.
  *
  * <p>Loosening this costs less than it appears, because it is not the control that protects
  * authentication. {@code src/features/auth} and {@code backend/auth} are hard-coded closed in
@@ -45,23 +50,29 @@ final class GuardrailRequestPrecheck {
                     "배포와 서버 설정은 개발자 작업입니다.",
                     List.of(
                             // The act, not the word: "배포 소식 카드" is a page of text.
-                            "배포해", "배포 해", "배포하", "배포 하", "배포를 ", "재배포",
+                            // Korean conjugates the verb, so each ending is its own string:
+                            // "배포할" does not contain "배포하".
+                            "배포해", "배포 해", "배포하", "배포 하", "배포할", "배포 할",
+                            "배포를 ", "재배포",
                             "서버 재시작", "서버 재기동", "포트 변경",
                             "도커", "docker", "compose", "nginx")),
             new Refusal(
                     "CODING_REQUEST_TOUCHES_AUTHENTICATION",
                     "로그인과 비밀 정보는 코딩 요청으로 바꿀 수 없습니다.",
+                    List.of("api 키", "api key", "시크릿", "secret", "토큰 발급"),
+                    // Listing "로그인 기능" as one string missed "로그인할 수 있는 기능", which is
+                    // the same request with three syllables in the middle. Korean puts words
+                    // between the two halves freely, so the halves are matched separately and
+                    // the sentence is refused when both are present. "로그인 안내 문구를 바꿔줘"
+                    // still passes: it names no mechanism.
                     List.of(
-                            // "로그인" alone also caught "로그인 안내 문구를 바꿔줘", which only
-                            // edits text on a page. What must be refused is the mechanism, so
-                            // the phrases name it. Anything that slips past still cannot land:
-                            // src/features/auth and backend/auth are hard-coded closed in
-                            // GuardrailPathPolicy and no setting opens them.
-                            "로그인 방식", "로그인 기능", "로그인 처리", "로그인 로직",
-                            "로그인 인증", "인증 방식", "인증 기능", "인증 로직",
-                            "비밀번호 정책", "비밀번호 규칙", "비밀번호 변경", "비밀번호 재설정",
-                            "비밀번호 암호", "패스워드 정책", "패스워드 규칙",
-                            "api 키", "api key", "시크릿", "secret", "토큰 발급")),
+                            new Pairing("로그인", List.of(
+                                    "기능", "방식", "처리", "로직", "인증", "연동", "구현", "붙여")),
+                            new Pairing("인증", List.of("기능", "방식", "처리", "로직", "구현")),
+                            new Pairing("비밀번호", List.of(
+                                    "정책", "규칙", "재설정", "변경", "암호", "검증")),
+                            new Pairing("패스워드", List.of(
+                                    "정책", "규칙", "재설정", "변경", "암호", "검증")))),
             new Refusal(
                     // A request to loosen the guardrail is not a coding task. The control cannot be
                     // widened from inside the thing it controls.
@@ -85,9 +96,30 @@ final class GuardrailRequestPrecheck {
                     return refusal;
                 }
             }
+            for (Pairing pairing : refusal.pairings()) {
+                if (!normalized.contains(pairing.subject())) {
+                    continue;
+                }
+                for (String act : pairing.acts()) {
+                    if (normalized.contains(act)) {
+                        return refusal;
+                    }
+                }
+            }
         }
         return null;
     }
 
-    record Refusal(String code, String message, List<String> phrases) { }
+    /**
+     * A subject and the acts that turn it into a forbidden request. Both halves must appear,
+     * anywhere in the sentence and in any order, because Korean puts words between them freely:
+     * "로그인할 수 있는 기능" and "로그인 기능" are the same ask.
+     */
+    record Pairing(String subject, List<String> acts) { }
+
+    record Refusal(String code, String message, List<String> phrases, List<Pairing> pairings) {
+        Refusal(String code, String message, List<String> phrases) {
+            this(code, message, phrases, List.of());
+        }
+    }
 }

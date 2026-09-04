@@ -15,6 +15,16 @@ import java.util.Locale;
  * false pass here: a pass still meets the post-check, while a refusal stops work that was fine.
  * {@code 컬럼} on its own is therefore not listed, because showing a column that already exists is
  * exactly what the demo asks for; only wording that clearly means creating one is.
+ *
+ * <p>Every phrase names an act, never just its subject. {@code 로그인} and {@code 배포} were once
+ * listed bare and refused "로그인 안내 문구를 바꿔줘" and "배포 소식 카드를 추가해 줘" - two requests
+ * that only edit text on a page. A phrase that needs a following word to mean the forbidden thing
+ * carries that word here.
+ *
+ * <p>Loosening this costs less than it appears, because it is not the control that protects
+ * authentication. {@code src/features/auth} and {@code backend/auth} are hard-coded closed in
+ * {@link GuardrailPathPolicy}: no guardrail setting opens them, so a request that slips past these
+ * phrases still cannot change a line of them.
  */
 final class GuardrailRequestPrecheck {
 
@@ -34,13 +44,23 @@ final class GuardrailRequestPrecheck {
                     "CODING_REQUEST_NEEDS_INFRASTRUCTURE",
                     "배포와 서버 설정은 개발자 작업입니다.",
                     List.of(
-                            "배포", "재배포", "서버 재시작", "포트 변경",
+                            // The act, not the word: "배포 소식 카드" is a page of text.
+                            "배포해", "배포 해", "배포하", "배포 하", "배포를 ", "재배포",
+                            "서버 재시작", "서버 재기동", "포트 변경",
                             "도커", "docker", "compose", "nginx")),
             new Refusal(
                     "CODING_REQUEST_TOUCHES_AUTHENTICATION",
                     "로그인과 비밀 정보는 코딩 요청으로 바꿀 수 없습니다.",
                     List.of(
-                            "로그인", "인증 방식", "비밀번호", "패스워드",
+                            // "로그인" alone also caught "로그인 안내 문구를 바꿔줘", which only
+                            // edits text on a page. What must be refused is the mechanism, so
+                            // the phrases name it. Anything that slips past still cannot land:
+                            // src/features/auth and backend/auth are hard-coded closed in
+                            // GuardrailPathPolicy and no setting opens them.
+                            "로그인 방식", "로그인 기능", "로그인 처리", "로그인 로직",
+                            "로그인 인증", "인증 방식", "인증 기능", "인증 로직",
+                            "비밀번호 정책", "비밀번호 규칙", "비밀번호 변경", "비밀번호 재설정",
+                            "비밀번호 암호", "패스워드 정책", "패스워드 규칙",
                             "api 키", "api key", "시크릿", "secret", "토큰 발급")),
             new Refusal(
                     // A request to loosen the guardrail is not a coding task. The control cannot be

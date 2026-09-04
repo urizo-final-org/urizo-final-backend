@@ -39,6 +39,9 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBinding
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingToolService {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingToolService.class);
+
     static final Map<String, String> CODING_TOOL_SCHEMA_DIGESTS = Map.of(
             "read_file", "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
             "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
@@ -51,6 +54,9 @@ public final class CodingToolService {
     /** A unified diff hunk header. The count is optional: git reads '@@ -73 +73 @@' as one line. */
     private static final Pattern UNIFIED_HUNK_HEADER =
             Pattern.compile("@@ -\\d+(?:,(\\d+))? \\+\\d+(?:,(\\d+))? @@.*");
+    /** The same header split for rewriting: old start, new start, and the trailing section text. */
+    private static final Pattern HUNK_HEADER_PARTS =
+            Pattern.compile("@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@(.*)");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "messageType", "requestId", "toolCallId", "jobId",
             "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep",
@@ -302,7 +308,16 @@ public final class CodingToolService {
             case "apply_patch" -> {
                 requireDiffDigest(binding);
                 arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
-                arguments.put("patch", text(request.arguments(), "patch"));
+                String patch = text(request.arguments(), "patch");
+                String normalized = normalizePatchText(patch);
+                if (!normalized.equals(patch)) {
+                    // The model's own text stays in coding_model_turn_idempotency; this
+                    // line is the only record that the counts it sent were not the counts
+                    // git received, which an audit of a changed file has to be able to see.
+                    LOG.warn("Coding apply_patch hunk counts rewritten: job={} toolCall={}",
+                            request.jobId(), request.toolCallId());
+                }
+                arguments.put("patch", normalized);
             }
             case "run_check" -> {
                 requireDiffDigest(binding);
@@ -667,7 +682,9 @@ public final class CodingToolService {
                     requireObjectFields(arguments, Set.of(), "tool arguments");
             case "apply_patch" -> {
                 requireObjectFields(arguments, Set.of("patch"), "tool arguments");
-                validatePatchText(text(arguments, "patch"));
+                // Rejects a malformed patch here; the normalized text it returns is
+                // rebuilt in execute(), which is where the MCP arguments are assembled.
+                normalizePatchText(text(arguments, "patch"));
             }
             case "run_check" -> {
                 requireObjectFields(arguments, Set.of("checkId"), "tool arguments");
@@ -693,7 +710,7 @@ public final class CodingToolService {
      * both are internal consistency of the patch text. Whether the line numbers and context
      * match the real file is git's judgement, not a guess this precheck should make.
      */
-    static void validatePatchText(String patch) {
+    static String normalizePatchText(String patch) {
         // The MCP workspace only applies a patch whose first line is a canonical
         // 'diff --git a/PATH b/PATH' header, so the precheck demands the same
         // start. The old '--- ' start could never pass the MCP policy.
@@ -705,11 +722,9 @@ public final class CodingToolService {
         int hunks = 0;
         boolean oldPathLine = false;
         boolean newPathLine = false;
-        // The hunk currently being read: where its header sits, what the header declared,
-        // and what its body actually carries. headerLine 0 means no hunk is open.
+        // The hunk currently being read: where its header sits and what its body carries.
+        // headerLine 0 means no hunk is open; -1 in a slot means "no count was written".
         int headerLine = 0;
-        int declaredOld = 0;
-        int declaredNew = 0;
         int actualOld = 0;
         int actualNew = 0;
         for (int index = 0; index < lines.length; index++) {
@@ -724,19 +739,16 @@ public final class CodingToolService {
             // Every body line carries a ' ', '+' or '-' prefix, so a line that opens at
             // column zero with '@@' can only be a hunk header.
             if (line.startsWith("@@")) {
-                Matcher header = UNIFIED_HUNK_HEADER.matcher(line);
-                if (!header.matches()) {
+                if (!UNIFIED_HUNK_HEADER.matcher(line).matches()) {
                     throw validation("apply_patch patch is invalid: line " + (index + 1)
                             + " is \"" + abbreviate(line) + "\", but a hunk header must carry "
                             + "the real line numbers of the file, as "
                             + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' - "
                             + "for example '@@ -73,7 +73,7 @@'.");
                 }
-                requireHunkCounts(headerLine, declaredOld, declaredNew, actualOld, actualNew);
+                rewriteCounts(lines, headerLine, actualOld, actualNew);
                 hunks++;
                 headerLine = index + 1;
-                declaredOld = header.group(1) == null ? 1 : Integer.parseInt(header.group(1));
-                declaredNew = header.group(2) == null ? 1 : Integer.parseInt(header.group(2));
                 actualOld = 0;
                 actualNew = 0;
                 continue;
@@ -744,8 +756,7 @@ public final class CodingToolService {
             if (headerLine > 0) {
                 if (line.startsWith("diff --git ")) {
                     // The next file begins, so the open hunk is complete.
-                    requireHunkCounts(
-                            headerLine, declaredOld, declaredNew, actualOld, actualNew);
+                    rewriteCounts(lines, headerLine, actualOld, actualNew);
                     headerLine = 0;
                 }
                 else if (line.startsWith("\\")) {
@@ -771,7 +782,7 @@ public final class CodingToolService {
             oldPathLine = oldPathLine || line.startsWith("--- ");
             newPathLine = newPathLine || line.startsWith("+++ ");
         }
-        requireHunkCounts(headerLine, declaredOld, declaredNew, actualOld, actualNew);
+        rewriteCounts(lines, headerLine, actualOld, actualNew);
         if (hunks == 0) {
             throw validation("apply_patch patch is invalid: it has no hunk. Add a "
                     + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' header "
@@ -781,17 +792,32 @@ public final class CodingToolService {
             throw validation("apply_patch patch is invalid: it must carry a '--- a/PATH' line "
                     + "and a '+++ b/PATH' line before the first hunk header.");
         }
+        return String.join("\n", lines);
     }
 
-    private static void requireHunkCounts(
-            int headerLine, int declaredOld, int declaredNew, int actualOld, int actualNew) {
-        if (headerLine == 0 || (declaredOld == actualOld && declaredNew == actualNew)) {
+    /**
+     * Writes the counted totals into the open hunk's header. A hunk's counts are not a
+     * safety check - they carry no information the body does not already hold, and git
+     * still matches every context line against the real file, so a body that says the
+     * wrong thing is refused whatever the header claims. Leaving the arithmetic to the
+     * model cost fifteen straight refusals on Job e0fb866f, where one context line ran
+     * to 1,387 characters. The start line is never touched: that is a claim about the
+     * file, only git can check it, and a guess here would edit the wrong place.
+     */
+    private static void rewriteCounts(
+            String[] lines, int headerLine, int actualOld, int actualNew) {
+        if (headerLine == 0) {
             return;
         }
-        throw validation("apply_patch patch is invalid: the hunk header at line " + headerLine
-                + " declares " + declaredOld + " old and " + declaredNew + " new lines, but "
-                + "its body has " + actualOld + " old and " + actualNew + " new. Recount the "
-                + "' ', '-' and '+' body lines and write the real totals in that header.");
+        String header = lines[headerLine - 1];
+        String suffix = header.endsWith("\r") ? "\r" : "";
+        Matcher parts = HUNK_HEADER_PARTS.matcher(
+                suffix.isEmpty() ? header : header.substring(0, header.length() - 1));
+        if (!parts.matches()) {
+            return;
+        }
+        lines[headerLine - 1] = "@@ -" + parts.group(1) + "," + actualOld
+                + " +" + parts.group(2) + "," + actualNew + " @@" + parts.group(3) + suffix;
     }
 
     private static String abbreviate(String line) {

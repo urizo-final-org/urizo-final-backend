@@ -27,6 +27,8 @@ class CodingApprovalReadinessTest {
             "sha1:1111111111111111111111111111111111111111";
     private static final String VALIDATION =
             "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    private static final String DEPLOY_VALIDATION =
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Test
@@ -79,6 +81,21 @@ class CodingApprovalReadinessTest {
                 jdbc(List.of(valid, valid)), OBJECT_MAPPER, JOB_ID, TRACE_ID, 8, 1)).isEmpty();
     }
 
+    @Test
+    void bindsDeployApprovalToTheStableDeploymentRequestWhenPresent() {
+        String nodeId = "deploy_approval";
+        UUID approvalId = CodingApprovalId.forStage(
+                JOB_ID, 1, nodeId, CodingHandlerContract.ApprovalStage.DEPLOY, 1);
+
+        assertThat(CodingApprovalReadiness.find(
+                jdbc(List.of(outcome(
+                        approvalId, nodeId, "DEPLOY", 1, "GENERAL_ADMIN").toString()), true),
+                OBJECT_MAPPER, JOB_ID, TRACE_ID, 8, 1))
+                .get()
+                .extracting(CodingApprovalReadiness.ReadyApproval::validationHash)
+                .isEqualTo(DEPLOY_VALIDATION);
+    }
+
     private static ObjectNode outcome(
             UUID approvalId,
             String nodeId,
@@ -102,6 +119,11 @@ class CodingApprovalReadinessTest {
 
     @SuppressWarnings("unchecked")
     private static JdbcTemplate jdbc(List<String> outcomes) {
+        return jdbc(outcomes, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static JdbcTemplate jdbc(List<String> outcomes, boolean deploymentRequest) {
         return mock(JdbcTemplate.class, invocation -> {
             Object[] arguments = invocation.getArguments();
             if ("query".equals(invocation.getMethod().getName())
@@ -122,6 +144,12 @@ class CodingApprovalReadinessTest {
                     ResultSet row = mock(ResultSet.class);
                     when(row.getString("candidate_sha")).thenReturn(CANDIDATE);
                     when(row.getString("validation_hash")).thenReturn(VALIDATION);
+                    return List.of(rowMapper.mapRow(row, 0));
+                }
+                if (deploymentRequest && sql.contains("handler_key = 'coding.deploy_request'")) {
+                    ResultSet row = mock(ResultSet.class);
+                    when(row.getString("candidate_sha")).thenReturn(CANDIDATE);
+                    when(row.getString("validation_hash")).thenReturn(DEPLOY_VALIDATION);
                     return List.of(rowMapper.mapRow(row, 0));
                 }
                 if (sql.contains("handler_key = ?")) {

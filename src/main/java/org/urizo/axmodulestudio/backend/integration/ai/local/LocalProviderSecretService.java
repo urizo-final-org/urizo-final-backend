@@ -43,6 +43,11 @@ public class LocalProviderSecretService {
                 .toList();
     }
 
+    public boolean hasVerifiedCredential(ModelProvider provider) {
+        return statuses().stream().anyMatch(status -> status.provider() == provider
+                && status.configured() && status.state() == ProviderCredentialState.VERIFIED);
+    }
+
     public ProviderCredentialStatus store(ModelProvider provider, String credential) {
         requireSupported(provider);
         validateCredential(provider, credential);

@@ -150,8 +150,8 @@ public class CodingModelTurnService {
                         "The bound model selection is invalid.");
             }
             try {
-                validated.add(capabilityRegistry.require(
-                        candidate.provider(), candidate.modelId(), useCase));
+                capabilityRegistry.require(candidate.provider(), candidate.modelId(), useCase);
+                validated.add(candidate);
             }
             catch (CapabilityRegistrationException failure) {
                 throw new ProviderGatewayException(failure.code(),
@@ -183,7 +183,8 @@ public class CodingModelTurnService {
                 normalizedMessages(request, requestOverhead(providerTools, responseFormat)),
                 providerTools,
                 responseFormat,
-                request.deadlineAt()));
+                request.deadlineAt(),
+                selected.inferenceSettings()));
         // Which of the four it was. They share one failure code, and the stored turn keeps
         // only that code, so a run that dies here leaves nothing to read. Measured
         // 2026-09-03: three providers failed on this code and none of them could be told

@@ -244,7 +244,7 @@ public class JdbcProfileVersionRepository implements ProfileVersionRepository {
         snapshot.put("profileKey", profileKey);
         snapshot.put("profileVersion", profileVersion);
         for (String field : List.of(
-                "nodes", "edges", "config", "modelBindings", "toolPolicy",
+                "nodes", "edges", "config", "modelBindings", "toolBindings", "toolPolicy",
                 "guardrailProfileKey")) {
             snapshot.set(field, authoringSnapshot.path(field).deepCopy());
         }

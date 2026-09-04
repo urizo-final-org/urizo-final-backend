@@ -856,9 +856,21 @@ function Invoke-CreatePullRequest {
     $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
     $branch = Get-PayloadValue -Payload $Payload -Name 'branch'
     $title = Get-PayloadValue -Payload $Payload -Name 'title'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    $expectedDiffDigest = Get-PayloadValue -Payload $Payload -Name 'diffDigest'
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
     if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
     if (-not $branch) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 branch 가 없습니다.' }
     if (-not $title) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 title 이 없습니다.' }
+    if ($workspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 workspaceId 형식이 올바르지 않습니다.'
+    }
+    if ($candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 candidateSha 형식이 올바르지 않습니다.'
+    }
+    if ($expectedDiffDigest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 diffDigest 형식이 올바르지 않습니다.'
+    }
 
     # Branch names are issued by Spring. Refusing anything else keeps a generated
     # payload from pushing to a name that looks like a person's work.
@@ -866,25 +878,19 @@ function Invoke-CreatePullRequest {
         throw "RUNNER_PAYLOAD_INVALID|허용되지 않은 브랜치 이름입니다: $branch"
     }
 
-    $worktree = Get-AiWorktreePath -Repository $repository
+    $worktree = Export-McpWorkspaceToHost `
+        -Repository $repository -WorkspaceId $workspaceId
+    $slug = Get-RemoteSlug -Worktree $worktree
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        # Nothing to review is not an error. It happens whenever the run produced
-        # no change, and failing here would retry a task that can never succeed.
-        $ahead = @(& git -C $worktree rev-list --count origin/dev..HEAD 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|커밋 수를 확인하지 못했습니다: $($ahead -join ' ')"
-        }
-        if ([int]"$($ahead[0])".Trim() -eq 0) {
-            return @{ repo = $repository; created = $false; reason = '커밋이 없어 PR 을 만들 수 없습니다.' }
-        }
-
-        # The same applies to a missing gh: report it and let the rest of the run
-        # stand, rather than throwing away work that already passed review.
         & gh --version 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            return @{ repo = $repository; created = $false; reason = 'gh 가 없어 PR 을 만들 수 없습니다.' }
+            throw 'RUNNER_PR_BLOCKED|gh 가 없어 PR 을 만들 수 없습니다.'
+        }
+        $baseHead = "$(@(& git -C $worktree rev-parse HEAD 2>&1)[0])".Trim()
+        if ("sha1:$baseHead" -ne $candidateSha) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|작업 폴더 HEAD 가 승인된 candidateSha 와 다릅니다.'
         }
 
         $current = "$(@(& git -C $worktree rev-parse --abbrev-ref HEAD 2>&1)[0])".Trim()
@@ -895,22 +901,343 @@ function Invoke-CreatePullRequest {
             }
         }
 
+        & git -C $worktree diff --cached --quiet --exit-code 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|승인된 staged 변경이 없어 PR 을 만들 수 없습니다.'
+        }
+        if ($LASTEXITCODE -ne 1) {
+            throw 'RUNNER_PR_FAILED|승인된 staged 변경을 확인하지 못했습니다.'
+        }
+        $actualDiffDigest = Get-StagedDiffDigest -Worktree $worktree
+        if ($actualDiffDigest -ne $expectedDiffDigest) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|staged Diff가 승인된 diffDigest와 다릅니다.'
+        }
+        $env:GIT_AUTHOR_DATE = '2000-01-01T00:00:00Z'
+        $env:GIT_COMMITTER_DATE = '2000-01-01T00:00:00Z'
+        try {
+            $committed = & git -C $worktree `
+                -c "user.name=AX Module Studio" `
+                -c "user.email=axms-system@localhost.invalid" `
+                commit --no-gpg-sign --no-verify -m $title 2>&1
+            $commitExit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+        }
+        if ($commitExit -ne 0) {
+            throw "RUNNER_PR_FAILED|Candidate commit 생성 실패: $(($committed | Select-Object -Last 2) -join ' ')"
+        }
+        $headSha = "$(@(& git -C $worktree rev-parse HEAD 2>&1)[0])".Trim()
+        $parentSha = "$(@(& git -C $worktree rev-parse HEAD^ 2>&1)[0])".Trim()
+        if ($parentSha -ne $baseHead -or $headSha -notmatch '^[0-9a-f]{40}$') {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|생성된 PR head가 승인 Candidate에 직접 연결되지 않았습니다.'
+        }
+
+        $existing = Get-ExactPullRequest -Slug $slug -Branch $branch `
+            -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
+            -Repository $repository
+        if ($null -ne $existing) { return $existing }
+
         $pushed = & git -C $worktree push -u origin $branch 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|push 실패: $(($pushed | Select-Object -Last 2) -join ' ')"
+            $detail = "$(($pushed | Select-Object -Last 3) -join ' ')"
+            if (Test-NetworkFailure -Detail $detail) {
+                throw "RUNNER_GITHUB_TRANSIENT|push 일시 실패: $detail"
+            }
+            throw "RUNNER_PR_BLOCKED|push 차단: $detail"
         }
 
         $body = Get-PayloadValue -Payload $Payload -Name 'body'
         if (-not $body) { $body = $title }
-        $created = & gh pr create --repo (Get-RemoteSlug -Worktree $worktree) --base dev --head $branch --title $title --body $body 2>&1
+        $created = & gh pr create --repo $slug --base dev --head $branch --title $title --body $body 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|PR 생성 실패: $(($created | Select-Object -Last 2) -join ' ')"
+            Throw-GitHubFailure -Output $created -Operation 'PR 생성'
+        }
+        $receipt = Get-ExactPullRequest -Slug $slug -Branch $branch `
+            -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
+            -Repository $repository
+        if ($null -eq $receipt) {
+            throw 'RUNNER_PR_BLOCKED|생성된 PR 을 정확히 다시 조회하지 못했습니다.'
         }
     }
     finally {
         $ErrorActionPreference = $previous
     }
-    return @{ repo = $repository; created = $true; url = "$(@($created)[-1])".Trim() }
+    return $receipt
+}
+
+function Get-StagedDiffDigest {
+    param([Parameter(Mandatory = $true)][string]$Worktree)
+
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'
+    $start.WorkingDirectory = $Worktree
+    $start.Arguments = 'diff --cached --no-ext-diff --no-textconv --no-color --text HEAD --'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        throw 'RUNNER_PR_FAILED|staged Diff 검증 프로세스를 시작하지 못했습니다.'
+    }
+    $bytes = [IO.MemoryStream]::new()
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($bytes)
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "RUNNER_PR_FAILED|staged Diff 검증 실패: $errorText"
+        }
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $hash.ComputeHash($bytes.ToArray())
+        }
+        finally { $hash.Dispose() }
+        return 'sha256:' + ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $bytes.Dispose()
+        $process.Dispose()
+    }
+}
+
+function Throw-GitHubFailure {
+    param($Output, [Parameter(Mandatory = $true)][string]$Operation)
+
+    $detail = "$(@($Output) -join ' ')".Trim()
+    if (Test-NetworkFailure -Detail $detail) {
+        throw "RUNNER_GITHUB_TRANSIENT|$Operation 일시 실패: $detail"
+    }
+    throw "RUNNER_GITHUB_BLOCKED|$Operation 차단: $detail"
+}
+
+function Test-NetworkFailure {
+    param([string]$Detail)
+
+    return $Detail -match '(?i)(rate limit|timed? out|timeout|temporar|HTTP 5\d\d|502|503|504|could not resolve host|connection (reset|refused|closed)|failed to connect|network is unreachable|TLS handshake)'
+}
+
+function Get-ExactPullRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Slug,
+        [Parameter(Mandatory = $true)][string]$Branch,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$ExpectedHeadSha,
+        [Parameter(Mandatory = $true)][string]$Repository
+    )
+
+    $raw = & gh pr list --repo $Slug --base dev --head $Branch --state all `
+        --json number,url,state,baseRefName,headRefName,headRefOid 2>&1
+    if ($LASTEXITCODE -ne 0) { Throw-GitHubFailure -Output $raw -Operation 'PR 조회' }
+    $items = @(("$($raw -join '')" | ConvertFrom-Json))
+    if ($items.Count -eq 0) { return $null }
+    if ($items.Count -ne 1) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|같은 base/head 조합의 PR 이 둘 이상입니다.'
+    }
+    $item = $items[0]
+    if ($item.baseRefName -ne 'dev' -or $item.headRefName -ne $Branch `
+            -or "sha1:$($item.headRefOid)" -ne $ExpectedHeadSha `
+            -or $item.state -notin @('OPEN', 'MERGED')) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|기존 PR 이 승인된 repository/base/head/candidate 와 다릅니다.'
+    }
+    return @{
+        repository = $Repository
+        base = 'dev'
+        head = $Branch
+        candidateSha = $CandidateSha
+        headSha = $ExpectedHeadSha
+        prNumber = [int]$item.number
+        prUrl = "$($item.url)"
+        state = "$($item.state)"
+        reused = $true
+    }
+}
+
+function Invoke-CheckDevMerge {
+    param($Payload)
+
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repository'
+    $prNumber = Get-PayloadValue -Payload $Payload -Name 'prNumber'
+    $head = Get-PayloadValue -Payload $Payload -Name 'head'
+    $headSha = Get-PayloadValue -Payload $Payload -Name 'headSha'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    if ($repository -ne 'backend' -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+            -or $head -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$' `
+            -or $headSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|dev merge 확인 payload 가 올바르지 않습니다.'
+    }
+    $worktree = Get-AiWorktreePath -Repository $repository
+    $slug = Get-RemoteSlug -Worktree $worktree
+    $raw = & gh pr view ([int]$prNumber) --repo $slug `
+        --json number,url,state,baseRefName,headRefName,headRefOid,mergeCommit 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $detail = "$(@($raw) -join ' ')".Trim()
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_GITHUB_TRANSIENT|dev merge 조회 일시 실패: $detail"
+        }
+        return @{
+            status = 'BLOCKED'; reason = 'GitHub 조회 권한 또는 PR 상태 확인이 차단되었습니다.'
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    $item = "$($raw -join '')" | ConvertFrom-Json
+    if ($item.baseRefName -ne 'dev' -or $item.headRefName -ne $head `
+            -or "sha1:$($item.headRefOid)" -ne $headSha) {
+        return @{
+            status = 'BLOCKED'; reason = 'PR base/head/candidate 불일치'
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    if ($item.state -eq 'MERGED') {
+        if ($null -eq $item.mergeCommit -or "$($item.mergeCommit.oid)" -notmatch '^[0-9a-f]{40}$') {
+            return @{
+                status = 'BLOCKED'; reason = 'merge commit 누락'
+                candidateSha = $candidateSha; head = $head; headSha = $headSha
+            }
+        }
+        return @{
+            status = 'MERGED'; mergeSha = "sha1:$($item.mergeCommit.oid)"
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    if ($item.state -eq 'OPEN') {
+        return @{
+            status = 'NOT_MERGED'; candidateSha = $candidateSha
+            head = $head; headSha = $headSha
+        }
+    }
+    return @{
+        status = 'BLOCKED'; reason = 'PR 이 merge 없이 닫혔습니다.'
+        candidateSha = $candidateSha; head = $head; headSha = $headSha
+    }
+}
+
+function Get-MergedDeployWorktree {
+    param([Parameter(Mandatory = $true)][string]$MergeSha)
+
+    $rawMergeSha = $MergeSha.Substring('sha1:'.Length)
+    $source = Get-RepositorySourcePath -Repository 'backend'
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|Backend canonical 저장소를 찾을 수 없습니다.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $fetched = & git -C $source fetch origin dev:refs/remotes/origin/dev 2>&1
+        $fetchExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($fetchExit -ne 0) {
+        $detail = "$(($fetched | Select-Object -Last 4) -join ' ')"
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_DEPLOY_TRANSIENT|origin/dev fetch 일시 실패: $detail"
+        }
+        throw "RUNNER_DEPLOY_BLOCKED|origin/dev fetch 차단: $detail"
+    }
+
+    & git -C $source cat-file -e "$rawMergeSha^{commit}" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_DEPLOY_BLOCKED|승인된 mergeSha commit을 찾을 수 없습니다.'
+    }
+    & git -C $source merge-base --is-ancestor $rawMergeSha origin/dev 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 1) {
+        throw 'RUNNER_DEPLOY_BLOCKED|승인된 mergeSha가 현재 origin/dev에 포함되지 않습니다.'
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_DEPLOY_BLOCKED|mergeSha와 origin/dev 관계를 확인하지 못했습니다.'
+    }
+
+    $resolvedWorkRoot = [IO.Path]::GetFullPath($WorkRoot)
+    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot 'deploy-backend'))
+    $prefix = $resolvedWorkRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) `
+        + [IO.Path]::DirectorySeparatorChar
+    if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|고정 deploy Worktree 경로가 WorkRoot 밖입니다.'
+    }
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            $inside = "$(@(& git -C $target rev-parse --is-inside-work-tree 2>&1)[0])".Trim()
+            if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
+                throw 'RUNNER_DEPLOY_BLOCKED|고정 deploy 경로가 관리되는 Git Worktree가 아닙니다.'
+            }
+            $dirty = @(& git -C $target status --porcelain 2>&1)
+            if ($LASTEXITCODE -ne 0 -or $dirty.Count -gt 0) {
+                throw 'RUNNER_DEPLOY_BLOCKED|deploy Worktree에 보존해야 할 로컬 변경이 있습니다.'
+            }
+            $current = "$(@(& git -C $target rev-parse HEAD 2>&1)[0])".Trim()
+            if ($current -ne $rawMergeSha) {
+                $checkedOut = & git -C $target checkout --detach $rawMergeSha 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "RUNNER_DEPLOY_BLOCKED|deploy Worktree 갱신 실패: $(($checkedOut | Select-Object -Last 3) -join ' ')"
+                }
+            }
+        }
+        else {
+            $created = & git -C $source worktree add --detach $target $rawMergeSha 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "RUNNER_DEPLOY_BLOCKED|deploy Worktree 생성 실패: $(($created | Select-Object -Last 3) -join ' ')"
+            }
+        }
+        $verified = "$(@(& git -C $target rev-parse HEAD 2>&1)[0])".Trim()
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($verified -ne $rawMergeSha) {
+        throw 'RUNNER_DEPLOY_BLOCKED|deploy Worktree가 승인된 mergeSha를 가리키지 않습니다.'
+    }
+    return $target
+}
+
+function Invoke-LocalDockerComposeDeployment {
+    param($Payload)
+
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repository'
+    $deploymentRequestId = Get-PayloadValue -Payload $Payload -Name 'deploymentRequestId'
+    $prNumber = Get-PayloadValue -Payload $Payload -Name 'prNumber'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    $mergeSha = Get-PayloadValue -Payload $Payload -Name 'mergeSha'
+    $validationHash = Get-PayloadValue -Payload $Payload -Name 'validationHash'
+    if ($repository -ne 'backend' `
+            -or $deploymentRequestId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' `
+            -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+            -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $mergeSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $validationHash -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|고정 로컬 배포의 승인 증거가 올바르지 않습니다.'
+    }
+    $sourceRoot = Get-MergedDeployWorktree -MergeSha $mergeSha
+    $masterScript = Join-Path (Split-Path -Parent $repositoryRoot) `
+        'urizo-final-master\scripts\rebuild-local-service.ps1'
+    if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $masterScript -Service spring-app -Profile full `
+            -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
+        $exit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($exit -ne 0) {
+        $detail = "$(($output | Select-Object -Last 4) -join ' ')"
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_DEPLOY_TRANSIENT|로컬 Compose 배포 일시 실패: $detail"
+        }
+        throw "RUNNER_DEPLOY_BLOCKED|로컬 Compose 배포 실패: $detail"
+    }
+    return @{
+        adapter = 'local-docker-compose'
+        target = 'full:backend:spring-app'
+        sourceSha = $mergeSha
+        status = 'COMPLETED'
+    }
 }
 
 function Get-RemoteSlug {
@@ -954,6 +1281,12 @@ function Complete-RunnerTask {
             'CREATE_PR' {
                 $result = Invoke-CreatePullRequest -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
+            'CHECK_DEV_MERGE' {
+                $result = Invoke-CheckDevMerge -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
+            }
+            'DEPLOY_LOCAL_COMPOSE' {
+                $result = Invoke-LocalDockerComposeDeployment -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
+            }
             default {
                 # Fixed allowlist: an unknown or not-yet-built command is refused
                 # rather than interpreted. The runner holds the Docker privilege.
@@ -963,8 +1296,11 @@ function Complete-RunnerTask {
     }
     catch {
         $parts = "$($_.Exception.Message)" -split '\|', 2
-        $outcome = 'PERMANENT_FAILURE'
         $errorCode = if ($parts[0] -match '^[A-Z][A-Z0-9_]{2,119}$') { $parts[0] } else { 'RUNNER_COMMAND_FAILED' }
+        $outcome = if ($errorCode -in @('RUNNER_GITHUB_TRANSIENT', 'RUNNER_DEPLOY_TRANSIENT')) {
+            'RETRYABLE_FAILURE'
+        }
+        else { 'PERMANENT_FAILURE' }
         $detail = if ($parts.Count -gt 1) { $parts[1] } else { "$($_.Exception.Message)" }
     }
 

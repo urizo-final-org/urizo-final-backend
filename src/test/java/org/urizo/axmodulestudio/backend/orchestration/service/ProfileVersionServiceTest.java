@@ -31,7 +31,9 @@ class ProfileVersionServiceTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final ProfileVersionRepository repository = mock(ProfileVersionRepository.class);
-    private final ProfileVersionService service = new ProfileVersionService(repository);
+    private final ProfileModelBindingService bindings = mock(ProfileModelBindingService.class);
+    private final ProfileVersionService service = new ProfileVersionService(repository,
+            bindings, mock(org.urizo.axmodulestudio.backend.integration.ai.local.LocalProviderSecretService.class));
 
     @Test
     void returnsActiveSnapshotsForBoundJobs() {
@@ -100,6 +102,36 @@ class ProfileVersionServiceTest {
         assertThat(created.snapshot().path("profileVersionId").asText())
                 .isEqualTo(created.profileVersionId().toString());
         assertThat(authoring.has("profileVersionId")).isFalse();
+        verify(bindings).validateCatalogSelections("LLM_OPS", authoring);
+    }
+
+    @Test
+    void createsAndActivatesADraftWithAnOptionalToolBindingSubset() throws Exception {
+        ObjectNode authoring = (ObjectNode) authoringSnapshot();
+        authoring.withObject("toolBindings").withObject("code").remove("apply_patch");
+        when(repository.createDraft(
+                org.mockito.ArgumentMatchers.eq("LLM_OPS"),
+                org.mockito.ArgumentMatchers.any(UUID.class),
+                org.mockito.ArgumentMatchers.eq(authoring))).thenAnswer(invocation -> {
+                    UUID id = invocation.getArgument(1);
+                    return adminVersion(id, "LLM_OPS", 3, "DRAFT",
+                            fullSnapshot(id, 3, authoring));
+                });
+
+        ProfileVersionRepository.AdminStoredProfileVersion draft =
+                service.createDraft("LLM_OPS", authoring);
+        ProfileVersionRepository.AdminStoredProfileVersion active = adminVersion(
+                draft.profileVersionId(), "LLM_OPS", 3, "ACTIVE", draft.snapshot());
+        when(repository.findAdminById(draft.profileVersionId()))
+                .thenReturn(Optional.of(draft));
+        when(repository.activate(draft.profileVersionId()))
+                .thenReturn(Optional.of(active));
+
+        assertThat(service.activate(draft.profileVersionId()).status()).isEqualTo("ACTIVE");
+        assertThat(draft.snapshot().path("toolPolicy").path("allowedTools"))
+                .anyMatch(tool -> "apply_patch".equals(tool.asText()));
+        assertThat(draft.snapshot().path("toolBindings").path("code").has("apply_patch"))
+                .isFalse();
     }
 
     @Test
@@ -188,6 +220,22 @@ class ProfileVersionServiceTest {
     }
 
     @Test
+    void rejectsLegacyDraftActivationWithoutChangingLegacyReadCompatibility() throws Exception {
+        JsonNode authoring = authoringSnapshot();
+        ObjectNode legacyDraft = (ObjectNode) fullSnapshot(
+                PROFILE_VERSION_ID, 2, authoring);
+        legacyDraft.remove("toolBindings");
+        when(repository.findAdminById(PROFILE_VERSION_ID)).thenReturn(Optional.of(adminVersion(
+                PROFILE_VERSION_ID, "LLM_OPS", 2, "DRAFT", legacyDraft)));
+
+        assertThatThrownBy(() -> service.activate(PROFILE_VERSION_ID))
+                .isInstanceOfSatisfying(ProfileVersionException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("CONTRACT_VALIDATION_FAILED"));
+        verify(repository, never()).activate(PROFILE_VERSION_ID);
+    }
+
+    @Test
     void activatesOnlyValidatedDraftsAndKeepsInactiveVersionsTerminal() throws Exception {
         JsonNode authoring = authoringSnapshot();
         ProfileVersionRepository.AdminStoredProfileVersion draft = adminVersion(
@@ -247,7 +295,7 @@ class ProfileVersionServiceTest {
         snapshot.put("profileKey", "LLM_OPS");
         snapshot.put("profileVersion", version);
         for (String field : List.of(
-                "nodes", "edges", "config", "modelBindings", "toolPolicy",
+                "nodes", "edges", "config", "modelBindings", "toolBindings", "toolPolicy",
                 "guardrailProfileKey")) {
             snapshot.set(field, authoring.path(field).deepCopy());
         }

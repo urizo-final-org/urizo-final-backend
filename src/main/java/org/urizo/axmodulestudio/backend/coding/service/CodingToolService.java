@@ -33,6 +33,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -85,6 +86,16 @@ public final class CodingToolService {
     }
 
     public CodingToolContract.Accepted submit(String authorization, JsonNode request) {
+        return submitInternal(authorization, request, null);
+    }
+
+    CodingToolContract.Accepted submitForNode(
+            String authorization, JsonNode request, String nodeId) {
+        return submitInternal(authorization, request, nodeId);
+    }
+
+    private CodingToolContract.Accepted submitInternal(
+            String authorization, JsonNode request, String nodeId) {
         ParsedRequest parsed = parse(request);
         byte[] credentialDigest = credentialDigest(authorization);
         byte[] requestDigest = sha256Bytes(canonical(request));
@@ -115,7 +126,7 @@ public final class CodingToolService {
                 ToolBinding toolBinding = mcpClients.getIfAvailable() == null
                         ? new ToolBinding(null, authority.baseSha(), null)
                         : toolBinding(parsed.jobId(), authority.baseSha());
-                validateAuthority(parsed, authority, toolBinding);
+                validateAuthority(parsed, authority, toolBinding, nodeId);
                 UUID executionId = UUID.randomUUID();
                 Instant now = Instant.now(clock);
                 ToolOutput output = execute(parsed, toolBinding);
@@ -214,7 +225,7 @@ public final class CodingToolService {
                         job.projectId(), job.repositoryId(), job.graphStep(), job.baseSha(),
                         job.contextDigest(), job.policyHash(), job.promptVersion(),
                         job.allowedCapabilities(), job.allowedNodes(), job.profileAllowedTools(),
-                        job.expiresAt(), job.profileVersionId());
+                        job.toolBindings(), job.expiresAt(), job.profileVersionId());
             });
             if (authority == null) {
                 throw unavailable();
@@ -425,7 +436,7 @@ public final class CodingToolService {
                             Set.of((String[]) rs.getArray(14).getArray()),
                             Set.of((String[]) rs.getArray(15).getArray()),
                             policy.allowedTools(), policy.guardrailProfileKey(),
-                            rs.getTimestamp(16).toInstant(),
+                            policy.toolBindings(), rs.getTimestamp(16).toInstant(),
                             rs.getObject(18, UUID.class));
                 }, jobId);
         if (rows.isEmpty()) {
@@ -446,15 +457,10 @@ public final class CodingToolService {
                     || !"central.default".equals(guardrail.textValue())) {
                 throw invalidRuntimePolicy();
             }
-            Set<String> tools = new HashSet<>();
-            for (JsonNode tool : allowed) {
-                if (!tool.isTextual()
-                        || !CODING_TOOL_SCHEMA_DIGESTS.containsKey(tool.textValue())
-                        || !tools.add(tool.textValue())) {
-                    throw invalidRuntimePolicy();
-                }
-            }
-            return new RuntimePolicy(tools, guardrail.textValue());
+            ProfileToolBindingPolicy bindings = ProfileToolBindingPolicy.decode(
+                    snapshot, CODING_TOOL_SCHEMA_DIGESTS.keySet());
+            return new RuntimePolicy(
+                    bindings.profileAllowedTools(), guardrail.textValue(), bindings);
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
             throw invalidRuntimePolicy();
@@ -462,10 +468,14 @@ public final class CodingToolService {
     }
 
     private void validateAuthority(
-            ParsedRequest request, JobAuthority job, ToolBinding toolBinding) {
+            ParsedRequest request,
+            JobAuthority job,
+            ToolBinding toolBinding,
+            String nodeId) {
         Instant now = Instant.now(clock);
         UUID expectedApproval = UUID.nameUUIDFromBytes(
                 (request.jobId() + ":approval").getBytes(StandardCharsets.UTF_8));
+        requireNodeToolAllowed(job.toolBindings(), nodeId, request.toolName());
         boolean matches = job.traceId().equals(request.traceId())
                 && "RUNNING".equals(job.status())
                 && "RUNNING".equals(request.jobState())
@@ -495,6 +505,23 @@ public final class CodingToolService {
             throw new CodingToolException(
                     "TOOL_NOT_ALLOWED",
                     "Spring rejected the tool candidate against authoritative job policy.",
+                    HttpStatus.FORBIDDEN);
+        }
+    }
+
+    static void requireNodeToolAllowed(
+            ProfileToolBindingPolicy policy, String nodeId, String toolName) {
+        if (!policy.legacy()
+                && (nodeId == null || !policy.toolsForNode(nodeId).contains(toolName))) {
+            throw new CodingToolException(
+                    "TOOL_NOT_ALLOWED",
+                    "The Coding Tool is not bound to the active Coding stage node.",
+                    HttpStatus.FORBIDDEN);
+        }
+        if (policy.legacy() && !policy.profileAllowedTools().contains(toolName)) {
+            throw new CodingToolException(
+                    "TOOL_NOT_ALLOWED",
+                    "The Coding Tool is not allowed by the legacy Profile policy.",
                     HttpStatus.FORBIDDEN);
         }
     }
@@ -927,22 +954,44 @@ public final class CodingToolService {
             String contextDigest, String policyHash, String promptVersion,
             Set<String> allowedCapabilities,
             Set<String> allowedNodes, Set<String> profileAllowedTools,
-            String guardrailProfileKey, Instant expiresAt, UUID profileVersionId) { }
-    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            String guardrailProfileKey, ProfileToolBindingPolicy toolBindings,
+            Instant expiresAt, UUID profileVersionId) { }
+    record RuntimePolicy(
+            Set<String> allowedTools,
+            String guardrailProfileKey,
+            ProfileToolBindingPolicy toolBindings) {
+        RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            this(allowedTools, guardrailProfileKey,
+                    ProfileToolBindingPolicy.legacy(allowedTools));
+        }
         RuntimePolicy {
             allowedTools = Set.copyOf(allowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
         }
     }
     record StageAuthority(
             UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
             UUID repositoryId, String graphStep, String baseSha, String contextDigest,
             String policyHash, String promptVersion, Set<String> allowedCapabilities,
-            Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt,
-            UUID profileVersionId) {
+            Set<String> allowedNodes, Set<String> profileAllowedTools,
+            ProfileToolBindingPolicy toolBindings, Instant expiresAt, UUID profileVersionId) {
+        StageAuthority(
+                UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
+                UUID repositoryId, String graphStep, String baseSha, String contextDigest,
+                String policyHash, String promptVersion, Set<String> allowedCapabilities,
+                Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt,
+                UUID profileVersionId) {
+            this(traceId, stateVersion, leaseId, actorId, projectId, repositoryId, graphStep,
+                    baseSha, contextDigest, policyHash, promptVersion, allowedCapabilities,
+                    allowedNodes, profileAllowedTools,
+                    ProfileToolBindingPolicy.legacy(profileAllowedTools),
+                    expiresAt, profileVersionId);
+        }
         StageAuthority {
             allowedCapabilities = Set.copyOf(allowedCapabilities);
             allowedNodes = Set.copyOf(allowedNodes);
             profileAllowedTools = Set.copyOf(profileAllowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
             Objects.requireNonNull(profileVersionId, "profileVersionId is required");
         }
     }

@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -14,6 +15,9 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -31,6 +35,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
+import org.urizo.axmodulestudio.backend.coding.integration.DeploymentAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
@@ -45,6 +50,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 class CodingHandlerStageServiceTest {
 
@@ -68,6 +74,11 @@ class CodingHandlerStageServiceTest {
             CodingHandlerContract.StageExecutionRequest request) { }
 
     private static StageFixture stageFixture(ObjectMapper mapper) {
+        return stageFixture(mapper, bindingPolicy(mapper));
+    }
+
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
@@ -91,7 +102,7 @@ class CodingHandlerStageServiceTest {
         when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), anyBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), anyBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -107,6 +118,7 @@ class CodingHandlerStageServiceTest {
                 Set.of("CHAT", "TOOL_CALLING"),
                 Set.of("coding"),
                 Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                toolBindings,
                 NOW.plusSeconds(60),
                 PROFILE);
         CodingHandlerContract.AttemptAggregateResponse aggregate =
@@ -180,7 +192,8 @@ class CodingHandlerStageServiceTest {
         StageFixture fixture = stageFixture(mapper);
         // The refused call never ran, so the loop must survive it: the refusal reason is
         // handed back and the corrected exchange finishes the stage.
-        when(fixture.toolService().submit(eq("Bearer worker"), any()))
+        when(fixture.toolService().submitForNode(
+                eq("Bearer worker"), any(), eq("code")))
                 .thenThrow(new CodingToolException(
                         "TOOL_RESULT_NOT_READY",
                         "read_diff must establish the current diff digest first.",
@@ -214,7 +227,8 @@ class CodingHandlerStageServiceTest {
     void aParallelToolBatchReplaysOnlyTheExecutedCall() {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper);
-        when(fixture.toolService().submit(eq("Bearer worker"), any()))
+        when(fixture.toolService().submitForNode(
+                eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(
                 new ProviderChatResponse(
@@ -254,13 +268,21 @@ class CodingHandlerStageServiceTest {
     }
 
     @Test
-    void boundCodingPolicyDecodeFailsClosedForMissingOrUnknownTools() {
+    void boundCodingPolicyDecodeFailsClosedForMissingOrUnknownTools() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         CodingToolService.RuntimePolicy valid = CodingToolService.decodeRuntimePolicy(
                 mapper,
                 "{\"toolPolicy\":{\"allowedTools\":[\"read_diff\"]},"
                         + "\"guardrailProfileKey\":\"central.default\"}");
         assertThat(valid.allowedTools()).containsExactly("read_diff");
+        assertThat(valid.toolBindings().legacy()).isTrue();
+
+        CodingToolService.RuntimePolicy bound = CodingToolService.decodeRuntimePolicy(
+                mapper, Files.readString(Path.of(
+                        "contracts/fixtures/orchestration/llm-ops-coding-handler.snapshot.valid.json")));
+        assertThat(bound.toolBindings().legacy()).isFalse();
+        assertThat(bound.toolBindings().modelToolsForNode("review"))
+                .doesNotContain("apply_patch");
 
         for (String invalid : List.of(
                 "{\"toolPolicy\":{},\"guardrailProfileKey\":\"central.default\"}",
@@ -270,6 +292,83 @@ class CodingHandlerStageServiceTest {
                     .isInstanceOfSatisfying(CodingToolException.class,
                             failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
         }
+    }
+
+    @Test
+    void nodeBindingsSeparateModelSchemasFromDeterministicPreviewTools() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ProfileToolBindingPolicy bindings = bindingPolicy(mapper);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1", Set.of("CHAT", "TOOL_CALLING"), Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                bindings, NOW.plusSeconds(60), PROFILE);
+        Set<String> reviewTools = Set.of(
+                "read_file", "search_code", "read_diff", "run_check",
+                "check_package_allowlist", "scan_changed_files");
+
+        assertThat(CodingHandlerStageService.modelTools(
+                authority, "code", CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()))
+                .containsExactlyInAnyOrderElementsOf(
+                        CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+        assertThat(CodingHandlerStageService.modelTools(authority, "review", reviewTools))
+                .containsExactlyInAnyOrderElementsOf(reviewTools)
+                .doesNotContain("apply_patch");
+        assertThat(bindings.modelToolsForNode("preview")).isEmpty();
+        assertThat(bindings.systemToolsForNode("preview")).containsExactlyInAnyOrder(
+                "read_diff", "run_check", "check_package_allowlist", "scan_changed_files");
+    }
+
+    @Test
+    void optionalCodeBindingSubsetControlsModelSchemaAndFinalToolAuthority()
+            throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode snapshot = (ObjectNode) mapper.readTree(Files.readString(Path.of(
+                "contracts/fixtures/orchestration/llm-ops-coding-handler.snapshot.valid.json")));
+        snapshot.withObject("toolBindings").withObject("code").remove("apply_patch");
+        ProfileToolBindingPolicy subset = ProfileToolBindingPolicy.decode(
+                snapshot, CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+        StageFixture fixture = stageFixture(mapper, subset);
+        when(fixture.toolService().submitForNode(
+                eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> request =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(request.capture());
+        assertThat(request.getAllValues().get(0).tools())
+                .extracting(tool -> tool.name())
+                .contains("read_file")
+                .doesNotContain("apply_patch");
+        assertThatThrownBy(() -> CodingToolService.requireNodeToolAllowed(
+                subset, "code", "apply_patch"))
+                .isInstanceOfSatisfying(CodingToolException.class,
+                        failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+        assertThatCode(() -> CodingToolService.requireNodeToolAllowed(
+                subset, "code", "read_file")).doesNotThrowAnyException();
+        assertThatThrownBy(() -> CodingToolService.requireNodeToolAllowed(
+                subset, "review", "apply_patch"))
+                .isInstanceOfSatisfying(CodingToolException.class,
+                        failure -> assertThat(failure.code()).isEqualTo("TOOL_NOT_ALLOWED"));
+        assertThatCode(() -> CodingToolService.requireNodeToolAllowed(
+                bindingPolicy(mapper), "code", "apply_patch"))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> CodingToolService.requireNodeToolAllowed(
+                ProfileToolBindingPolicy.legacy(Set.of("apply_patch")),
+                "unbound_legacy_node", "apply_patch"))
+                .doesNotThrowAnyException();
     }
 
     @Test
@@ -318,7 +417,7 @@ class CodingHandlerStageServiceTest {
                 "src/main/java/org/urizo/axmodulestudio/backend/cms/repository/CmsRepository.java"));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings,
                 selections,
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -512,7 +611,7 @@ class CodingHandlerStageServiceTest {
                 "src/main/java/org/urizo/axmodulestudio/backend/cms/repository/CmsRepository.java"));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings, selections,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings, selections,
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
@@ -592,7 +691,7 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -639,7 +738,8 @@ class CodingHandlerStageServiceTest {
                 assistantText("{\"port\":\"completed\","
                         + "\"payload\":{\"summary\":\"done\"}}"));
         AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
-        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+        when(toolService.submitForNode(
+                eq("Bearer worker"), any(), eq("code"))).thenAnswer(invocation -> {
             JsonNode request = invocation.getArgument(1);
             submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
             return new CodingToolContract.Accepted(
@@ -717,7 +817,7 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -767,7 +867,8 @@ class CodingHandlerStageServiceTest {
                                 + "\"payload\":{\"summary\":\"done\"}}",
                         12, 6, Duration.ofMillis(10)));
         AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
-        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+        when(toolService.submitForNode(
+                eq("Bearer worker"), any(), eq("code"))).thenAnswer(invocation -> {
             JsonNode request = invocation.getArgument(1);
             submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
             return new CodingToolContract.Accepted(
@@ -833,7 +934,7 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -883,7 +984,8 @@ class CodingHandlerStageServiceTest {
                                 + "\"payload\":{\"summary\":\"done\"}}",
                         12, 6, Duration.ofMillis(10)));
         AtomicReference<UUID> submittedToolCall = new AtomicReference<>();
-        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+        when(toolService.submitForNode(
+                eq("Bearer worker"), any(), eq("code"))).thenAnswer(invocation -> {
             JsonNode request = invocation.getArgument(1);
             submittedToolCall.set(UUID.fromString(request.path("toolCallId").asText()));
             return new CodingToolContract.Accepted(
@@ -941,7 +1043,8 @@ class CodingHandlerStageServiceTest {
         assertThat(replay).isEqualTo(response);
 
         ArgumentCaptor<JsonNode> toolRequest = ArgumentCaptor.forClass(JsonNode.class);
-        verify(toolService).submit(eq("Bearer worker"), toolRequest.capture());
+        verify(toolService).submitForNode(
+                eq("Bearer worker"), toolRequest.capture(), eq("code"));
         assertThat(toolRequest.getValue().path("tool").path("name").asText())
                 .isEqualTo("read_diff");
         assertThat(toolRequest.getValue().path("repository").path("candidateSha").asText())
@@ -1279,6 +1382,7 @@ class CodingHandlerStageServiceTest {
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
                 mock(CodingModelTurnService.class), runner,
+                mock(DeploymentAdapter.class),
                 mock(ProfileModelBindingService.class), selections, rules, mapper, clock);
 
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -1317,9 +1421,12 @@ class CodingHandlerStageServiceTest {
                         List.of(code, review), List.of(), List.of(), NOW, null));
 
         AtomicReference<String> pendingTool = new AtomicReference<>();
-        when(toolService.submit(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+        List<String> requestedTools = new ArrayList<>();
+        when(toolService.submitForNode(
+                eq("Bearer worker"), any(), eq("preview"))).thenAnswer(invocation -> {
             JsonNode submitted = invocation.getArgument(1);
             pendingTool.set(submitted.path("tool").path("name").asText());
+            requestedTools.add(pendingTool.get());
             return new CodingToolContract.Accepted(
                     "1.0", "TOOL_ACCEPTED",
                     UUID.fromString(submitted.path("requestId").asText()),
@@ -1358,9 +1465,15 @@ class CodingHandlerStageServiceTest {
                     "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
                     body.toString());
         });
-        return service.execute("Bearer worker", JOB, 1, RESULT,
+        CodingHandlerContract.StageExecutionResponse response = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
                 new CodingHandlerContract.StageExecutionRequest(
                         "1.0", TRACE, 4, 1, "coding.preview", RESULT));
+        assertThat(requestedTools).containsExactly(
+                "read_diff", "run_check", "check_package_allowlist", "scan_changed_files");
+        verify(toolService, times(4)).submitForNode(
+                eq("Bearer worker"), any(), eq("preview"));
+        return response;
     }
 
     /**
@@ -1513,7 +1626,7 @@ class CodingHandlerStageServiceTest {
                 .thenReturn(List.of(registration));
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
-                mock(CodingRunnerService.class), profileModelBindings,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class), profileModelBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -1589,5 +1702,245 @@ class CodingHandlerStageServiceTest {
         assertThat(system).contains("reportSummary").contains("criteriaResults");
         // And the criteria agreed at approval 1 actually reach the reviewer.
         assertThat(user).contains("acceptanceCriteria");
+    }
+
+    @Test
+    void v4DeploymentRequestIsStableAndDoesNotIncludeMergeSha() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        when(deployment.adapterKey()).thenReturn("local-docker-compose");
+        when(deployment.targetKey()).thenReturn("full:backend:spring-app");
+        when(deployment.configDigest()).thenReturn(DIFF_DIGEST);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), mock(CodingRunnerService.class), deployment,
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        ObjectNode prPayload = mapper.createObjectNode()
+                .put("repository", "backend")
+                .put("base", "dev")
+                .put("prNumber", 42);
+        CodingHandlerContract.HandlerResultResponse pullRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_complete",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, prPayload, NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "deploy it",
+                        List.of(pullRequest), List.of(), List.of(), NOW, null));
+
+        CodingHandlerContract.StageExecutionResponse first = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy_request",
+                        "coding.deploy_request", RESULT));
+        UUID replayResult = UUID.fromString("78787878-7878-4787-8787-787878787878");
+        CodingHandlerContract.StageExecutionResponse second = service.execute(
+                "Bearer worker", JOB, 1, replayResult,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy_request",
+                        "coding.deploy_request", replayResult));
+
+        assertThat(first.payload().path("deploymentRequestId").asText())
+                .isEqualTo(second.payload().path("deploymentRequestId").asText());
+        assertThat(first.validationHash()).isEqualTo(second.validationHash());
+        assertThat(first.payload().has("mergeSha")).isFalse();
+        assertThat(first.payload().path("targetKey").asText())
+                .isEqualTo("full:backend:spring-app");
+    }
+
+    @Test
+    void prCompletionQueuesTheBoundWorkspaceAndPersistsTheExactReceipt() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), runner, mock(DeploymentAdapter.class),
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        CodingHandlerContract.HandlerResultResponse requested =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_request",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "requested",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                        mapper.createObjectNode(), NOW);
+        CodingHandlerContract.ApprovalDecisionSummary githubApproval =
+                new CodingHandlerContract.ApprovalDecisionSummary(
+                        UUID.randomUUID(), "github_approval",
+                        CodingHandlerContract.ApprovalStage.GITHUB, 1,
+                        CodingHandlerContract.Decision.APPROVED,
+                        BASE_SHA, DIFF_DIGEST, null, UUID.randomUUID(),
+                        "SUPER_ADMIN", 4, null, NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "create pr",
+                        List.of(requested), List.of(), List.of(), NOW, null));
+
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete",
+                        "coding.pr_complete", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("approval");
+        verify(runner, never()).enqueue(eq(RESULT), eq("CREATE_PR"), any());
+
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "create pr",
+                        List.of(requested), List.of(), List.of(githubApproval), NOW, null));
+        when(resultService.jobRequestIdentity(JOB)).thenReturn(
+                new CodingHandlerResultService.JobRequestIdentity(
+                        "SYSTEM-LLMOPS-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "system-llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        String headSha = "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        when(runner.taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
+                        mapper.createObjectNode()
+                                .put("repository", "backend")
+                                .put("base", "dev")
+                                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("candidateSha", BASE_SHA)
+                                .put("headSha", headSha)
+                                .put("prNumber", 42)
+                                .put("prUrl", "https://github.example/pr/42")
+                                .put("state", "OPEN")));
+
+        CodingHandlerContract.StageExecutionResponse response = service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        ArgumentCaptor<JsonNode> command = ArgumentCaptor.forClass(JsonNode.class);
+        verify(runner).enqueue(eq(RESULT), eq("CREATE_PR"), command.capture());
+        assertThat(command.getValue().path("workspaceId").asText())
+                .isEqualTo(WORKSPACE.toString());
+        assertThat(command.getValue().path("diffDigest").asText())
+                .isEqualTo(DIFF_DIGEST);
+        assertThat(response.payload().path("headSha").asText()).isEqualTo(headSha);
+        assertThat(response.payload().path("prNumber").asInt()).isEqualTo(42);
+    }
+
+    @Test
+    void mergeCheckAndDeployStopBeforeSideEffectsWithoutDeployApproval() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), runner, deployment,
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        ObjectNode prPayload = mapper.createObjectNode()
+                .put("repository", "backend")
+                .put("base", "dev")
+                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .put("headSha", "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                .put("prNumber", 42)
+                .put("candidateSha", BASE_SHA);
+        CodingHandlerContract.HandlerResultResponse pullRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_complete",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, prPayload, NOW);
+        String deployHash =
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        ObjectNode deployPayload = mapper.createObjectNode()
+                .put("deploymentRequestId", "81818181-8181-4181-8181-818181818181")
+                .put("repository", "backend")
+                .put("prNumber", 42)
+                .put("candidateSha", BASE_SHA);
+        CodingHandlerContract.HandlerResultResponse deployRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.deploy_request",
+                        CodingHandlerContract.ResultType.DEPLOY_REQUEST, "recorded",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, deployHash, deployPayload, NOW);
+        CodingHandlerContract.HandlerResultResponse merged =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1,
+                        "coding.dev_merge_check", CodingHandlerContract.ResultType.DEV_MERGE,
+                        "merged", WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                        mapper.createObjectNode().put(
+                                "mergeSha", "sha1:cccccccccccccccccccccccccccccccccccccccc"),
+                        NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "deploy",
+                        List.of(pullRequest, deployRequest, merged),
+                        List.of(), List.of(), NOW, null));
+
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "dev_merge_check",
+                        "coding.dev_merge_check", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("approval");
+        UUID deployResult = UUID.fromString("79797979-7979-4797-8797-797979797979");
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, deployResult,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy", "coding.deploy", deployResult)))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("approval");
+
+        verify(runner, never()).enqueue(eq(RESULT), eq("CHECK_DEV_MERGE"), any());
+        verify(deployment, never()).deploy(any(), any());
+    }
+
+    private static ProfileToolBindingPolicy bindingPolicy(ObjectMapper mapper) {
+        try {
+            JsonNode snapshot = mapper.readTree(Files.readString(Path.of(
+                    "contracts/fixtures/orchestration/llm-ops-coding-handler.snapshot.valid.json")));
+            return ProfileToolBindingPolicy.decode(
+                    snapshot, CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+        }
+        catch (java.io.IOException failure) {
+            throw new AssertionError(failure);
+        }
     }
 }

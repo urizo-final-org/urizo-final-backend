@@ -47,6 +47,18 @@ class ProviderChatRequestTest {
     }
 
     @Test
+    void carriesImmutableInferenceSettingsAtTheProviderBoundary() {
+        ProviderChatRequest request = new ProviderChatRequest(
+                ModelProvider.OPENAI, "gpt-5.6-terra",
+                List.of(ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "fixture")),
+                List.of(), ProviderResponseFormat.text(), DEADLINE,
+                new InferenceSettings(InferenceSettings.ReasoningIntensity.HIGH, null));
+
+        assertThat(request.inferenceSettings().reasoningIntensity())
+                .isEqualTo(InferenceSettings.ReasoningIntensity.HIGH);
+    }
+
+    @Test
     void toolCallArgumentsCountTowardTheExistingInputBound() {
         String oversizedArguments = "{\"value\":\"" + "a".repeat(65_536) + "\"}";
         ProviderChatMessage assistant = ProviderChatMessage.assistant(

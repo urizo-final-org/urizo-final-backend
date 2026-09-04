@@ -14,7 +14,8 @@ public record ProviderChatRequest(
         List<ProviderChatMessage> messages,
         List<ProviderToolDefinition> tools,
         ProviderResponseFormat responseFormat,
-        Instant deadline) {
+        Instant deadline,
+        InferenceSettings inferenceSettings) {
 
     private static final int MAX_MESSAGES = 200;
     private static final int MAX_TOOLS = 50;
@@ -27,6 +28,7 @@ public record ProviderChatRequest(
         tools = List.copyOf(Objects.requireNonNull(tools, "tools are required"));
         responseFormat = Objects.requireNonNull(responseFormat, "responseFormat is required");
         deadline = Objects.requireNonNull(deadline, "deadline is required");
+        inferenceSettings = Objects.requireNonNull(inferenceSettings, "inferenceSettings is required");
         if (modelId.isBlank()) {
             throw new IllegalArgumentException("modelId cannot be blank");
         }
@@ -81,8 +83,19 @@ public record ProviderChatRequest(
             String modelId,
             List<ProviderChatMessage> messages,
             List<ProviderToolDefinition> tools,
+            ProviderResponseFormat responseFormat,
             Instant deadline) {
-        this(provider, modelId, messages, tools, ProviderResponseFormat.text(), deadline);
+        this(provider, modelId, messages, tools, responseFormat, deadline, InferenceSettings.none());
+    }
+
+    public ProviderChatRequest(
+            ModelProvider provider,
+            String modelId,
+            List<ProviderChatMessage> messages,
+            List<ProviderToolDefinition> tools,
+            Instant deadline) {
+        this(provider, modelId, messages, tools, ProviderResponseFormat.text(), deadline,
+                InferenceSettings.none());
     }
 
     public ProviderChatRequest(
@@ -90,7 +103,8 @@ public record ProviderChatRequest(
             String modelId,
             List<ProviderChatMessage> messages,
             Instant deadline) {
-        this(provider, modelId, messages, List.of(), ProviderResponseFormat.text(), deadline);
+        this(provider, modelId, messages, List.of(), ProviderResponseFormat.text(), deadline,
+                InferenceSettings.none());
     }
 
     public ProviderChatRequest(

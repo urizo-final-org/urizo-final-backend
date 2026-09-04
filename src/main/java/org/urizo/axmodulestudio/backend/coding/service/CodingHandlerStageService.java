@@ -25,6 +25,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
 import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
+import org.urizo.axmodulestudio.backend.coding.integration.DeploymentAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
@@ -105,6 +106,7 @@ public final class CodingHandlerStageService {
             new StructuredOutputGuard();
 
     private final CodingRunnerService runner;
+    private final DeploymentAdapter deploymentAdapter;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -114,12 +116,15 @@ public final class CodingHandlerStageService {
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
             CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
             ProfileModelBindingService profileModelBindings,
             GuardrailPathSelectionService guardrailSelections,
             GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
+        this.deploymentAdapter = Objects.requireNonNull(
+                deploymentAdapter, "deploymentAdapter is required");
         this.results = Objects.requireNonNull(results, "results are required");
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
@@ -165,18 +170,22 @@ public final class CodingHandlerStageService {
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.code" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), CODE_TOOLS),
+                    modelTools(authority, request.nodeId(), CODE_TOOLS),
                     Set.of("completed"));
             case "coding.review" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), REVIEW_TOOLS),
+                    modelTools(authority, request.nodeId(), REVIEW_TOOLS),
                     Set.of("passed", "changes_requested"));
             case "coding.preview" -> preview(
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.pr_request" -> sideEffect(
                     resultId, request, aggregate, "requested", "PR_REQUEST_RECORDED");
-            case "coding.deploy_request" -> sideEffect(
-                    resultId, request, aggregate, "recorded", "DEPLOY_REQUEST_RECORDED");
+            case "coding.pr_complete" -> completePullRequest(
+                    jobId, resultId, request, aggregate);
+            case "coding.dev_merge_check" -> checkDevMerge(resultId, request, aggregate);
+            case "coding.deploy_request" -> deployRequest(
+                    jobId, resultId, request, aggregate);
+            case "coding.deploy" -> deploy(resultId, request, aggregate);
             default -> throw contract("The Coding stage handler is not registered.");
         };
     }
@@ -391,6 +400,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        requireSystemTools(authority, request.nodeId(), Set.of(
+                "read_diff", "run_check", "check_package_allowlist", "scan_changed_files"));
         CodingHandlerContract.HandlerResultResponse code = latestResult(
                 aggregate, "coding.code", "completed");
         CodingHandlerContract.HandlerResultResponse review = latestResult(
@@ -671,6 +682,268 @@ public final class CodingHandlerStageService {
                 preview.validationHash(), payload);
     }
 
+    private CodingHandlerContract.StageExecutionResponse completePullRequest(
+            UUID jobId,
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse requested = latestResult(
+                aggregate, "coding.pr_request", "requested");
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.GITHUB,
+                requested.candidateSha(), requested.validationHash());
+        if (requested.diffDigest() == null
+                || !requested.diffDigest().matches("^sha256:[0-9a-f]{64}$")) {
+            throw conflict("The pull request has no approved Diff digest.");
+        }
+        CodingHandlerResultService.JobRequestIdentity identity = results.jobRequestIdentity(jobId);
+        String branch = "system/" + identity.workSlug().substring("system-".length());
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("repo", "backend");
+        command.put("branch", branch);
+        command.put("candidateSha", requested.candidateSha());
+        command.put("diffDigest", requested.diffDigest());
+        command.put("validationHash", requested.validationHash());
+        if (aggregate.workspaceId() == null) {
+            throw conflict("The pull request has no bound Coding workspace.");
+        }
+        command.put("workspaceId", aggregate.workspaceId().toString());
+        command.put("title", identity.systemWorkId() + " automated coding change");
+        command.put("body", "Automated Coding Job " + identity.systemWorkId()
+                + ". Candidate and validation evidence are recorded by the control plane.");
+        runner.enqueue(resultId, "CREATE_PR", command);
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
+        if (runnerPending(outcome)) {
+            throw runnerPending("Pull request creation is still pending.");
+        }
+        if (!"SUCCEEDED".equals(outcome.status())) {
+            throw new CodingWorkerException(
+                    outcome.errorCode() == null ? "PR_CREATION_BLOCKED" : outcome.errorCode(),
+                    "Pull request creation was blocked by the host runner.",
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        JsonNode receipt = outcome.result();
+        if (receipt == null
+                || !"backend".equals(receipt.path("repository").asText())
+                || !"dev".equals(receipt.path("base").asText())
+                || !branch.equals(receipt.path("head").asText())
+                || !requested.candidateSha().equals(receipt.path("candidateSha").asText())
+                || !receipt.path("headSha").asText().matches("^sha1:[0-9a-f]{40}$")
+                || !receipt.path("prNumber").canConvertToInt()
+                || receipt.path("prNumber").intValue() < 1
+                || !receipt.path("prUrl").isTextual()) {
+            throw contract("The pull request runner receipt is invalid.");
+        }
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("repository", "backend");
+        payload.put("base", "dev");
+        payload.put("head", branch);
+        payload.put("candidateSha", requested.candidateSha());
+        payload.put("headSha", receipt.path("headSha").asText());
+        payload.put("prNumber", receipt.path("prNumber").intValue());
+        payload.put("prUrl", receipt.path("prUrl").asText());
+        payload.put("state", receipt.path("state").asText("OPEN"));
+        return response(resultId, request.handlerKey(), "completed", aggregate.workspaceId(),
+                requested.candidateSha(), requested.diffDigest(), requested.validationHash(), payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse checkDevMerge(
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse pullRequest = latestResult(
+                aggregate, "coding.pr_complete", "completed");
+        CodingHandlerContract.HandlerResultResponse deployRequest = latestResult(
+                aggregate, "coding.deploy_request", "recorded");
+        requireV4DeploymentIdentity(pullRequest, deployRequest);
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.DEPLOY,
+                deployRequest.candidateSha(), deployRequest.validationHash());
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("repository", pullRequest.payload().path("repository").asText());
+        command.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        command.put("head", pullRequest.payload().path("head").asText());
+        command.put("headSha", pullRequest.payload().path("headSha").asText());
+        command.put("candidateSha", pullRequest.candidateSha());
+        runner.enqueue(resultId, "CHECK_DEV_MERGE", command);
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CHECK_DEV_MERGE");
+        if (runnerPending(outcome)) {
+            throw runnerPending("The dev merge check is still pending.");
+        }
+        if (!"SUCCEEDED".equals(outcome.status()) || outcome.result() == null) {
+            throw new CodingWorkerException(
+                    outcome.errorCode() == null ? "DEV_MERGE_CHECK_BLOCKED" : outcome.errorCode(),
+                    "The dev merge check failed at the host boundary.",
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        JsonNode receipt = outcome.result();
+        String status = receipt.path("status").asText();
+        if (!pullRequest.candidateSha().equals(receipt.path("candidateSha").asText())
+                || !pullRequest.payload().path("head").asText()
+                        .equals(receipt.path("head").asText())
+                || !pullRequest.payload().path("headSha").asText()
+                        .equals(receipt.path("headSha").asText())) {
+            throw contract("The dev merge runner receipt changed the PR subject.");
+        }
+        String port = switch (status) {
+            case "MERGED" -> "merged";
+            case "NOT_MERGED" -> "not_merged";
+            case "BLOCKED" -> "blocked";
+            default -> throw contract("The dev merge receipt is invalid.");
+        };
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("repository", pullRequest.payload().path("repository").asText());
+        payload.put("base", "dev");
+        payload.put("head", pullRequest.payload().path("head").asText());
+        payload.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        payload.put("candidateSha", pullRequest.candidateSha());
+        payload.put("headSha", pullRequest.payload().path("headSha").asText());
+        payload.put("status", status);
+        if ("merged".equals(port)) {
+            String mergeSha = receipt.path("mergeSha").asText();
+            if (!mergeSha.matches("^sha1:[0-9a-f]{40}$")) {
+                throw contract("The merged dev receipt has no valid merge SHA.");
+            }
+            payload.put("mergeSha", mergeSha);
+        }
+        putOptional(payload, "reason", receipt.path("reason").textValue());
+        return response(resultId, request.handlerKey(), port, aggregate.workspaceId(),
+                pullRequest.candidateSha(), pullRequest.diffDigest(),
+                pullRequest.validationHash(), payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse deployRequest(
+            UUID jobId,
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse pullRequest = latestResultOrNull(
+                aggregate, "coding.pr_complete", "completed");
+        if (pullRequest == null) {
+            return sideEffect(resultId, request, aggregate,
+                    "recorded", "DEPLOY_REQUEST_RECORDED");
+        }
+        ObjectNode subject = objectMapper.createObjectNode();
+        subject.put("jobId", jobId.toString());
+        subject.put("pipelineAttempt", aggregate.pipelineAttempt());
+        subject.put("repository", pullRequest.payload().path("repository").asText());
+        subject.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        subject.put("candidateSha", pullRequest.candidateSha());
+        subject.put("sourceValidationHash", pullRequest.validationHash());
+        subject.put("adapterKey", deploymentAdapter.adapterKey());
+        subject.put("targetKey", deploymentAdapter.targetKey());
+        subject.put("configDigest", deploymentAdapter.configDigest());
+        String subjectHash = digest(subject);
+        UUID deploymentRequestId = UUID.nameUUIDFromBytes(
+                ("deployment-request:" + subjectHash).getBytes(StandardCharsets.UTF_8));
+        ObjectNode payload = subject.deepCopy();
+        payload.put("deploymentRequestId", deploymentRequestId.toString());
+        payload.put("status", "DEPLOY_REQUEST_RECORDED");
+        return response(resultId, request.handlerKey(), "recorded", aggregate.workspaceId(),
+                pullRequest.candidateSha(), pullRequest.diffDigest(), subjectHash, payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse deploy(
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse deployRequest = latestResult(
+                aggregate, "coding.deploy_request", "recorded");
+        CodingHandlerContract.HandlerResultResponse merge = latestResult(
+                aggregate, "coding.dev_merge_check", "merged");
+        requireV4DeploymentIdentity(
+                latestResult(aggregate, "coding.pr_complete", "completed"), deployRequest);
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.DEPLOY,
+                deployRequest.candidateSha(), deployRequest.validationHash());
+        String mergeSha = merge.payload().path("mergeSha").asText();
+        String deploymentRequestId = deployRequest.payload()
+                .path("deploymentRequestId").asText();
+        if (!deploymentAdapter.adapterKey().equals(
+                    deployRequest.payload().path("adapterKey").asText())
+                || !deploymentAdapter.targetKey().equals(
+                    deployRequest.payload().path("targetKey").asText())
+                || !deploymentAdapter.configDigest().equals(
+                    deployRequest.payload().path("configDigest").asText())) {
+            throw conflict("The server deployment adapter changed after approval was requested.");
+        }
+        if (!mergeSha.matches("^sha1:[0-9a-f]{40}$")
+                || !deploymentRequestId.matches("^[0-9a-f-]{36}$")
+                || !Objects.equals(deployRequest.candidateSha(), merge.candidateSha())) {
+            throw conflict("The deployment evidence is incomplete or stale.");
+        }
+        UUID executionId = UUID.nameUUIDFromBytes(
+                ("deployment-execution:" + deploymentRequestId + ":" + mergeSha)
+                        .getBytes(StandardCharsets.UTF_8));
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("deploymentRequestId", deploymentRequestId);
+        command.put("repository", deployRequest.payload().path("repository").asText());
+        command.put("prNumber", deployRequest.payload().path("prNumber").asInt());
+        command.put("candidateSha", deployRequest.candidateSha());
+        command.put("mergeSha", mergeSha);
+        command.put("validationHash", deployRequest.validationHash());
+        DeploymentAdapter.DeploymentOutcome outcome = deploymentAdapter.deploy(
+                executionId, command);
+        if (outcome.status() == DeploymentAdapter.Status.PENDING) {
+            throw runnerPending("The allowlisted deployment is still pending.");
+        }
+        String port = outcome.status() == DeploymentAdapter.Status.COMPLETED
+                ? "completed" : "blocked";
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("deploymentRequestId", deploymentRequestId);
+        payload.put("deploymentExecutionId", executionId.toString());
+        payload.put("adapterKey", deploymentAdapter.adapterKey());
+        payload.put("targetKey", deploymentAdapter.targetKey());
+        payload.put("configDigest", deploymentAdapter.configDigest());
+        payload.put("mergeSha", mergeSha);
+        payload.put("status", port.toUpperCase(java.util.Locale.ROOT));
+        putOptional(payload, "errorCode", outcome.errorCode());
+        if (outcome.payload() != null && outcome.payload().isObject()) {
+            payload.set("receipt", outcome.payload().deepCopy());
+        }
+        return response(resultId, request.handlerKey(), port, aggregate.workspaceId(),
+                deployRequest.candidateSha(), deployRequest.diffDigest(),
+                deployRequest.validationHash(), payload);
+    }
+
+    private static boolean runnerPending(CodingRunnerService.TaskOutcome outcome) {
+        return "PENDING".equals(outcome.status()) || "RUNNING".equals(outcome.status());
+    }
+
+    private static void requireApproved(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            CodingHandlerContract.ApprovalStage stage,
+            String candidateSha,
+            String validationHash) {
+        CodingHandlerContract.ApprovalDecisionSummary latest = null;
+        for (CodingHandlerContract.ApprovalDecisionSummary decision : aggregate.decisions()) {
+            if (decision.stage() == stage) {
+                latest = decision;
+            }
+        }
+        if (latest == null
+                || latest.decision() != CodingHandlerContract.Decision.APPROVED
+                || !Objects.equals(candidateSha, latest.candidateSha())
+                || !Objects.equals(validationHash, latest.validationHash())) {
+            throw conflict("The required Coding approval is missing or stale.");
+        }
+    }
+
+    private static void requireV4DeploymentIdentity(
+            CodingHandlerContract.HandlerResultResponse pullRequest,
+            CodingHandlerContract.HandlerResultResponse deployRequest) {
+        if (!deployRequest.payload().hasNonNull("deploymentRequestId")
+                || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
+                || !Objects.equals(pullRequest.payload().path("repository").asText(),
+                        deployRequest.payload().path("repository").asText())
+                || pullRequest.payload().path("prNumber").asInt(-1)
+                        != deployRequest.payload().path("prNumber").asInt(-2)) {
+            throw conflict("The deployment request is not bound to the completed pull request.");
+        }
+    }
+
+    private static CodingWorkerException runnerPending(String message) {
+        return new CodingWorkerException(
+                "RUNNER_TASK_PENDING", message, HttpStatus.SERVICE_UNAVAILABLE, true, 1_000L);
+    }
+
     private CodingModelTurnContract.Response modelTurn(
             String authorization,
             UUID jobId,
@@ -784,7 +1057,8 @@ public final class CodingHandlerStageService {
             CodingModelTurnContract.ToolCall call) {
         ObjectNode request = toolRequest(
                 jobId, stage, authority, aggregate, resultId, sequence, call);
-        CodingToolContract.Accepted accepted = tools.submit(authorization, request);
+        CodingToolContract.Accepted accepted =
+                tools.submitForNode(authorization, request, stage.nodeId());
         return tools.result(authorization, accepted.executionId());
     }
 
@@ -1079,6 +1353,27 @@ public final class CodingHandlerStageService {
         return Set.copyOf(allowed);
     }
 
+    static Set<String> modelTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> stageTools) {
+        if (authority.toolBindings().legacy()) {
+            return allowedTools(authority.profileAllowedTools(), stageTools);
+        }
+        return allowedTools(
+                authority.toolBindings().modelToolsForNode(nodeId), stageTools);
+    }
+
+    private static void requireSystemTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> requiredTools) {
+        if (authority.toolBindings().legacy()) return;
+        if (!authority.toolBindings().systemToolsForNode(nodeId).equals(requiredTools)) {
+            throw forbidden("The Coding node system Tool binding is incomplete.");
+        }
+    }
+
     /** Every diff-bound tool is refused until read_diff has established the current diff. */
     private static final String AFTER_READ_DIFF =
             "Call read_diff first in this stage; this tool is refused until the current diff "
@@ -1252,13 +1547,25 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             String handlerKey,
             String port) {
+        CodingHandlerContract.HandlerResultResponse result = latestResultOrNull(
+                aggregate, handlerKey, port);
+        if (result != null) {
+            return result;
+        }
+        throw conflict("The Coding stage prerequisite result is missing.");
+    }
+
+    private static CodingHandlerContract.HandlerResultResponse latestResultOrNull(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            String handlerKey,
+            String port) {
         for (int index = aggregate.results().size() - 1; index >= 0; index--) {
             CodingHandlerContract.HandlerResultResponse result = aggregate.results().get(index);
             if (handlerKey.equals(result.handlerKey()) && port.equals(result.resultPort())) {
                 return result;
             }
         }
-        throw conflict("The Coding stage prerequisite result is missing.");
+        return null;
     }
 
     private static String latestCandidate(
@@ -1288,7 +1595,10 @@ public final class CodingHandlerStageService {
             case "coding.review" -> CodingHandlerContract.ResultType.REVIEW;
             case "coding.preview" -> CodingHandlerContract.ResultType.DIFF;
             case "coding.pr_request" -> CodingHandlerContract.ResultType.PULL_REQUEST;
+            case "coding.pr_complete" -> CodingHandlerContract.ResultType.PULL_REQUEST;
+            case "coding.dev_merge_check" -> CodingHandlerContract.ResultType.DEV_MERGE;
             case "coding.deploy_request" -> CodingHandlerContract.ResultType.DEPLOY_REQUEST;
+            case "coding.deploy" -> CodingHandlerContract.ResultType.DEPLOYMENT;
             default -> throw contract("The Coding stage handler is not registered.");
         };
         if (matches.size() != 1
@@ -1317,11 +1627,27 @@ public final class CodingHandlerStageService {
         try {
             return "sha256:" + java.util.HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256")
-                            .digest(objectMapper.writeValueAsBytes(value)));
+                            .digest(objectMapper.writeValueAsBytes(canonical(value))));
         }
         catch (JsonProcessingException | NoSuchAlgorithmException failure) {
             throw new IllegalStateException("SHA-256 or JSON encoding is unavailable.", failure);
         }
+    }
+
+    private JsonNode canonical(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            java.util.TreeSet<String> fields = new java.util.TreeSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            fields.forEach(field -> sorted.set(field, canonical(value.get(field))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode ordered = objectMapper.createArrayNode();
+            value.forEach(item -> ordered.add(canonical(item)));
+            return ordered;
+        }
+        return value.deepCopy();
     }
 
     private static String hash(String value) {

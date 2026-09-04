@@ -157,6 +157,41 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     @Test
+    void leavesAnthropicThinkingUnsetForProviderDefaultModelsAcrossPromptShapes()
+            throws Exception {
+        SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
+                mock(ProviderCredentialResolver.class), List.of(), Clock.fixed(NOW, ZoneOffset.UTC));
+        for (String modelId : List.of(
+                Stage2ProviderModels.ANTHROPIC_OPUS_5,
+                Stage2ProviderModels.ANTHROPIC_SONNET_5)) {
+            List<ProviderChatRequest> requests = List.of(
+                    new ProviderChatRequest(ModelProvider.ANTHROPIC, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Reply with OK.")),
+                            List.of(), ProviderResponseFormat.text(), NOW.plusSeconds(30),
+                            InferenceSettings.none()),
+                    new ProviderChatRequest(ModelProvider.ANTHROPIC, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Read the approved file.")),
+                            List.of(new ProviderToolDefinition(
+                                    "read_file", "Read one approved file.", readFileSchema())),
+                            ProviderResponseFormat.text(), NOW.plusSeconds(30),
+                            InferenceSettings.none()),
+                    new ProviderChatRequest(ModelProvider.ANTHROPIC, modelId,
+                            List.of(ProviderChatMessage.plain(
+                                    ProviderChatMessage.Role.USER, "Return JSON.")),
+                            List.of(), ProviderResponseFormat.jsonSchema(readFileSchema()),
+                            NOW.plusSeconds(30), InferenceSettings.none()));
+
+            for (ProviderChatRequest request : requests) {
+                AnthropicChatOptions options = (AnthropicChatOptions) promptFor(
+                        adapter, request, InferenceSupport.disabled()).getOptions();
+                assertThat(options.getThinking()).isNull();
+            }
+        }
+    }
+
+    @Test
     void neverCombinesGoogleThinkingLevelAndBudgetForBudgetBasedModels() throws Exception {
         SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
                 mock(ProviderCredentialResolver.class), List.of(), Clock.fixed(NOW, ZoneOffset.UTC));

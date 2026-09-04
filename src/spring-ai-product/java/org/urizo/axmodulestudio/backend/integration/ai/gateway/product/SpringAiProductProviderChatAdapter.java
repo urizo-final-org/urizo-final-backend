@@ -218,9 +218,13 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     }
 
     private static void applyInference(AnthropicChatOptions options, InferenceSettings settings) {
+        if (settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE) {
+            // Spring AI 1.1.8 cannot encode Anthropic adaptive thinking. Leaving the
+            // field absent preserves the provider default used by Opus 5 and Sonnet 5.
+            return;
+        }
         options.setThinking(new AnthropicApi.ChatCompletionRequest.ThinkingConfig(
-                settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE
-                        ? AnthropicApi.ThinkingType.DISABLED : AnthropicApi.ThinkingType.ENABLED,
+                AnthropicApi.ThinkingType.ENABLED,
                 settings.reasoningBudgetTokens()));
     }
 

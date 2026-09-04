@@ -46,7 +46,7 @@ class AdminModelCatalogControllerTest {
 
         assertThat(result.models()).singleElement().satisfies(model -> {
             assertThat(model.selectionId()).isEqualTo("google-genai-gemini-test");
-            assertThat(model.inference().reasoningIntensity()).containsExactly("HIGH", "NONE");
+            assertThat(model.inference().reasoningIntensity()).containsExactly("HIGH");
             assertThat(model.inference().reasoningBudgetTokens()).isNull();
         });
     }

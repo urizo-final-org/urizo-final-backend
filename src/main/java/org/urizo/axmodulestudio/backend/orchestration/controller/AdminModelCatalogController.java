@@ -9,6 +9,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.local.LocalProviderSecretService;
@@ -43,6 +45,8 @@ public class AdminModelCatalogController {
                         model.inferenceSettings().reasoningIntensity().name(),
                         model.inferenceSettings().reasoningBudgetTokens()),
                         model.inferenceSupport().reasoningIntensities().stream()
+                                .filter(intensity -> model.provider() != ModelProvider.GOOGLE_GENAI
+                                        || intensity != InferenceSettings.ReasoningIntensity.NONE)
                                 .map(Enum::name).sorted().toList(),
                         model.inferenceSupport().reasoningBudgetTokens() == null ? null
                                 : new BudgetView(

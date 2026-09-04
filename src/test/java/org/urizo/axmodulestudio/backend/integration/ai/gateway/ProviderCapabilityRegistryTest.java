@@ -171,6 +171,30 @@ class ProviderCapabilityRegistryTest {
                 ProviderLane.PRODUCT, policy,
                 ProviderCapabilityConfiguration.registrations(ProviderLane.PRODUCT));
 
+        assertThat(registry.registrations())
+                .extracting(ProviderModelRegistration::provider,
+                        ProviderModelRegistration::modelId)
+                .containsExactlyInAnyOrder(
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_TERRA),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI,
+                                Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_7),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI,
+                                Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.GOOGLE_GENAI,
+                                Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_OPUS_5),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_SONNET_5),
+                        org.assertj.core.groups.Tuple.tuple(
+                                ModelProvider.ANTHROPIC, Stage2ProviderModels.ANTHROPIC_CHAT));
+
         assertThat(registry.require(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT,
                 ModelUseCase.CHAT).inferenceSupport().reasoningIntensities())
                 .containsExactly(InferenceSettings.ReasoningIntensity.NONE);
@@ -181,10 +205,42 @@ class ProviderCapabilityRegistryTest {
                         InferenceSettings.ReasoningIntensity.LOW,
                         InferenceSettings.ReasoningIntensity.MEDIUM,
                         InferenceSettings.ReasoningIntensity.HIGH);
-        assertThat(registry.require(ModelProvider.GOOGLE_GENAI,
-                Stage2ProviderModels.GOOGLE_GENAI_CHAT, ModelUseCase.TOOL_CALL)
-                .inferenceSupport().reasoningBudgetTokens())
-                .isNull();
+        ProviderModelRegistration flash37 = registry.require(ModelProvider.GOOGLE_GENAI,
+                Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_7, ModelUseCase.TOOL_CALL);
+        assertThat(flash37.inferenceSettings().reasoningIntensity())
+                .isEqualTo(InferenceSettings.ReasoningIntensity.MEDIUM);
+        assertThat(flash37.inferenceSupport().reasoningIntensities())
+                .containsExactlyInAnyOrder(InferenceSettings.ReasoningIntensity.NONE,
+                        InferenceSettings.ReasoningIntensity.LOW,
+                        InferenceSettings.ReasoningIntensity.MEDIUM,
+                        InferenceSettings.ReasoningIntensity.HIGH);
+
+        ProviderModelRegistration flash36 = registry.require(ModelProvider.GOOGLE_GENAI,
+                Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6, ModelUseCase.TOOL_CALL);
+        assertThat(flash36.inferenceSettings().reasoningIntensity())
+                .isEqualTo(InferenceSettings.ReasoningIntensity.MEDIUM);
+        assertThat(flash36.inferenceSupport().reasoningIntensities())
+                .containsExactlyInAnyOrder(InferenceSettings.ReasoningIntensity.NONE,
+                        InferenceSettings.ReasoningIntensity.MINIMAL,
+                        InferenceSettings.ReasoningIntensity.LOW,
+                        InferenceSettings.ReasoningIntensity.MEDIUM,
+                        InferenceSettings.ReasoningIntensity.HIGH);
+
+        ProviderModelRegistration flashLite = registry.require(ModelProvider.GOOGLE_GENAI,
+                Stage2ProviderModels.GOOGLE_GENAI_CHAT, ModelUseCase.TOOL_CALL);
+        assertThat(flashLite.inferenceSettings().reasoningIntensity())
+                .isEqualTo(InferenceSettings.ReasoningIntensity.MINIMAL);
+        assertThat(flashLite.inferenceSupport().reasoningBudgetTokens()).isNull();
+
+        for (String providerDefaultModel : List.of(
+                Stage2ProviderModels.ANTHROPIC_OPUS_5,
+                Stage2ProviderModels.ANTHROPIC_SONNET_5)) {
+            ProviderModelRegistration registration = registry.require(ModelProvider.ANTHROPIC,
+                    providerDefaultModel, ModelUseCase.STRUCTURED_OUTPUT);
+            assertThat(registration.inferenceSupport().reasoningIntensities())
+                    .containsExactly(InferenceSettings.ReasoningIntensity.NONE);
+            assertThat(registration.inferenceSupport().reasoningBudgetTokens()).isNull();
+        }
         assertThat(registry.require(ModelProvider.ANTHROPIC,
                 Stage2ProviderModels.ANTHROPIC_CHAT, ModelUseCase.STRUCTURED_OUTPUT)
                 .inferenceSupport().reasoningIntensities())

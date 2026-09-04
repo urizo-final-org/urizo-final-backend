@@ -144,6 +144,35 @@ class ProfileModelBindingServiceTest {
     }
 
     @Test
+    void resolvesTheNewGemini36CatalogSelectionWithoutChangingLegacyAliases() throws Exception {
+        ProfileModelBindingService service = service(registry(
+                registration(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6),
+                registration(ModelProvider.GOOGLE_GENAI,
+                        Stage2ProviderModels.GOOGLE_GENAI_CHAT)));
+        JsonNode selected = snapshot("""
+                {
+                  "analyze":{"primary":"google-genai-gemini-3-6-flash","fallback":[],
+                    "selections":{"google-genai-gemini-3-6-flash":{
+                      "provider":"GOOGLE_GENAI","model":"gemini-3.6-flash",
+                      "inference":{"reasoningIntensity":"NONE"}}}},
+                  "review":{"primary":"llm-ops-review","fallback":[]}
+                }
+                """);
+
+        assertThat(service.resolve(
+                selected, PROFILE, "analyze", "coding.analyze", ModelUseCase.CHAT))
+                .singleElement()
+                .extracting(ProviderModelRegistration::modelId)
+                .isEqualTo(Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6);
+        assertThat(service.resolve(
+                selected, PROFILE, "review", "coding.review", ModelUseCase.CHAT))
+                .singleElement()
+                .extracting(ProviderModelRegistration::modelId)
+                .isEqualTo(Stage2ProviderModels.GOOGLE_GENAI_CHAT);
+    }
+
+    @Test
     void acceptsLegacyAliasesButRequiresRegistryCatalogMetadataForCatalogSelections()
             throws Exception {
         ProfileModelBindingService service = service(registry(catalogRegistration()));

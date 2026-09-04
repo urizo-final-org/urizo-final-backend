@@ -325,16 +325,72 @@ public final class NaturalCmsStageService {
         if (job.approvalFeedback() != null) {
             context.put("approvalFeedback", job.approvalFeedback());
         }
+        ObjectNode reference = resources.promptContext(job.resource());
+        if (reference != null && !reference.isEmpty()) {
+            context.set("reference", reference);
+        }
         String instruction = commandStage
-                ? "Create one " + job.resource().type() + " UPDATE command. "
-                    + "Call validate_cms_command exactly once with the UPDATE command. "
-                    + "fields may use only names from editableFields."
-                : "Decide feasibility. Return only JSON with exactly fields port and payload; "
-                    + "port must be feasible or infeasible and payload must be an object.";
+                ? commandInstruction(job.resource().type())
+                : feasibilityInstruction(job.resource().type());
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
                         .put("content", encode(context)));
+    }
+
+    /**
+     * 리소스마다 열린 operation이 다르므로 지시문도 갈린다.
+     *
+     * <p>메뉴만 {@code CREATE}·{@code DELETE}까지 열려 있어(`AI05-006`·`AI05-007`) 첫 문장이 다르다.
+     * 나머지 셋은 `AI05-013`이 정한 {@code UPDATE} 문구를 그대로 쓰고 공통 규칙만 덧붙인다.
+     *
+     * <p>Tool Call 한 번으로 명령을 받는 구조는 `AI05-013`을 그대로 따른다. Tool Schema의
+     * {@code operation}은 자유 문자열이라 이 지시문만으로 세 operation을 모두 표현할 수 있다.
+     */
+    private static String commandInstruction(String resourceType) {
+        String changedFieldsOnly = " Send only the fields the request changes. Every field you"
+                + " send is written and a field you leave out keeps its current value, so never"
+                + " repeat a value that is already correct.";
+        if (!"MENU".equals(resourceType)) {
+            return "Create one " + resourceType + " UPDATE command. "
+                    + "Call validate_cms_command exactly once with the UPDATE command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly;
+        }
+        return "Create one MENU command with operation CREATE, UPDATE or DELETE. "
+                + "Call validate_cms_command exactly once with that command. "
+                + "fields may use only names from editableFields."
+                + changedFieldsOnly
+                + " Renaming sends name alone. Linking sends targetType and targetId alone and"
+                + " never changes the name. A path starts with /. parentId is null for a top menu."
+                + " position is the 1-based place among menus that share the same parentId; never"
+                + " send displayOrder and never compute menu numbers."
+                + " targetType is NONE, CONTENT or BOARD, and targetId is null unless the type is"
+                + " CONTENT or BOARD."
+                + " CREATE sends at least name, path and parentId."
+                + " DELETE carries no fields and its fields object stays empty."
+                + " Take every id from the reference lists and never invent one.";
+    }
+
+    /**
+     * 화면이 다루는 범위를 알려주지 않으면 범위 밖 요청도 feasible로 판정한다.
+     *
+     * <p>실제로 메뉴 화면에서 게시글 등록 요청이 통과해 명령 단계에서 계약 밖 형식으로 멈췄다.
+     * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
+     */
+    private static String feasibilityInstruction(String resourceType) {
+        String scope = "MENU".equals(resourceType)
+                ? "menus only: a menu's name, path, parent, order among siblings, and which "
+                    + "content or board it links to. Creating and deleting a menu is included"
+                : "the selected content's title and body only";
+        return "Decide whether this request can be done on this screen. Return only JSON with "
+                + "exactly fields port and payload; port must be feasible or infeasible and "
+                + "payload must be an object. This screen changes " + scope + ". "
+                + "Anything else is infeasible even when it sounds related, including writing "
+                + "posts, editing article bodies, templates and members. When the port is "
+                + "infeasible put a short Korean sentence in payload.reason saying what this "
+                + "screen cannot do. A request this screen can do stays feasible even when it "
+                + "needs several fields or a confirmation.";
     }
 
     private JsonNode callTool(

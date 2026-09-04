@@ -128,10 +128,16 @@ class NaturalCmsStageServiceTest {
                     ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
             verify(harness.models).executeNaturalCms(request.capture(), any());
             List<JsonNode> messages = request.getValue().messages();
+            // 메뉴만 CREATE·DELETE까지 열려 있어(AI05-006·AI05-007) 첫 문장이 다르다.
+            // 나머지 셋은 AI05-013이 정한 UPDATE 문구를 그대로 쓴다.
+            String opening = "MENU".equals(promptCase.resource().type())
+                    ? "Create one MENU command with operation CREATE, UPDATE or DELETE"
+                    : "Create one " + promptCase.resource().type() + " UPDATE command";
             assertThat(messages.get(0).path("content").asText())
-                    .contains("Create one " + promptCase.resource().type() + " UPDATE command")
+                    .contains(opening)
                     .contains("Call validate_cms_command exactly once")
                     .contains("fields may use only names from editableFields")
+                    .contains("Send only the fields the request changes")
                     .doesNotContain("Finish with only JSON");
 
             assertThat(request.getValue().requiredCapabilities())
@@ -360,6 +366,75 @@ class NaturalCmsStageServiceTest {
 
         verify(harness.mcp).callTool(eq("revalidate_cms_preview"), any());
         verify(harness.resources, never()).apply(RESOURCE, command);
+    }
+
+    /**
+     * 판정 지시문이 화면 범위를 알려주는지 본다.
+     *
+     * <p>범위를 주지 않았을 때 메뉴 화면에서 게시글 등록 요청이 feasible로 통과해
+     * 명령 단계에서 계약 밖 형식으로 멈췄다. 거부 안내가 화면에 뜨지 않은 원인이다.
+     */
+    @Test
+    void feasibilityPromptNamesWhatTheScreenCanAndCannotChange() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 7));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("title and body only")
+                .contains("Anything else is infeasible")
+                .contains("payload.reason");
+    }
+
+    /**
+     * 명령 지시문이 바뀌는 필드만 보내라고 하는지 본다.
+     *
+     * <p>전체 필드를 채워 보내던 탓에 연결 요청이 이름까지 바꾸고 이름 변경이 연결을 지웠다.
+     */
+    @Test
+    void menuCommandPromptSeparatesRenameFromLinkAndKeepsDeleteEmpty() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        ObjectNode state = harness.mapper.createObjectNode()
+                .put("id", 3).put("name", "소개").put("path", "/about")
+                .put("position", 1).put("targetType", "NONE");
+        when(harness.resources.snapshot(menu)).thenReturn(state);
+        when(harness.resources.validateCommand(eq(menu), any()))
+                .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+        ObjectNode command = harness.mapper.createObjectNode()
+                .put("operation", "UPDATE");
+        command.putObject("fields").put("position", 3);
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                toolResponse("validate_cms_command", command));
+        stubPreviewTools(harness, state);
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.preview", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("Renaming sends name alone")
+                .contains("Linking sends targetType and targetId alone and never changes the name")
+                .contains("DELETE carries no fields")
+                .contains("never send displayOrder");
+    }
+
+    private static String system(CodingModelTurnContract.Request request) {
+        return request.messages().stream()
+                .filter(message -> "system".equals(message.path("role").asText()))
+                .map(message -> message.path("content").asText())
+                .findFirst()
+                .orElse("");
     }
 
     private static NaturalCmsContract.JobResponse activeJob() throws Exception {

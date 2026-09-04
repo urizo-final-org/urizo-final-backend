@@ -95,19 +95,34 @@ public class CodingConsoleService {
     public CodingConsoleContract.JobDetail cancel(
             UUID jobId, String idempotencyKey, AdminRole role) {
         List<CancelRow> rows = jdbc.query("""
-                SELECT trace_id, status, state_version
+                SELECT trace_id, status, state_version, now() >= expires_at AS expired
                 FROM app.coding_job
                 WHERE job_id = ?
                 """,
                 (rs, row) -> new CancelRow(
                         rs.getObject("trace_id", UUID.class),
                         rs.getString("status"),
-                        rs.getInt("state_version")),
+                        rs.getInt("state_version"),
+                        rs.getBoolean("expired")),
                 jobId);
         if (rows.isEmpty()) {
             return null;
         }
         CancelRow job = rows.get(0);
+        // Checked before the status, because an expired Job still reads WAITING_APPROVAL and
+        // would otherwise pass to the state machine, which refuses every target but EXPIRED -
+        // in English, written for the worker that normally reads it. That sentence reached a
+        // general administrator's screen on 2026-09-04 as "The coding job must transition to
+        // EXPIRED." Nothing here decides anything the state machine does not; it only says the
+        // same thing first, in words the reader can act on.
+        if (job.expired()) {
+            throw new CodingJobLifecycleException(
+                    "CODING_JOB_EXPIRED",
+                    "요청한 지 오래되어 자동으로 종료된 요청입니다. 새로 요청해 주세요.",
+                    HttpStatus.CONFLICT,
+                    false,
+                    null);
+        }
         if (!CANCELLABLE.contains(job.status())) {
             // Worded for the person reading the screen: they need to know whether waiting
             // will help, which is the only difference that matters between these two.
@@ -130,7 +145,8 @@ public class CodingConsoleService {
         return detail(jobId, role);
     }
 
-    private record CancelRow(UUID traceId, String status, int stateVersion) { }
+    private record CancelRow(
+            UUID traceId, String status, int stateVersion, boolean expired) { }
 
     /** Newest first. A console list is read far more often than it is paged. */
     public CodingConsoleContract.JobList list(int limit) {

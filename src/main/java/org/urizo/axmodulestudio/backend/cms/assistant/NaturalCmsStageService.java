@@ -95,13 +95,14 @@ public final class NaturalCmsStageService {
 
         if ("cms.apply".equals(request.handlerKey())) {
             JsonNode approvedCommand = revalidateApply(job, request, toolPolicy);
+            UUID actorId = store.actorId(authorization, jobId);
             NaturalCmsContract.HandlerResult stored = store.recordApplied(
                     authorization,
                     jobId,
                     pipelineAttempt,
                     resultId,
                     request.expectedStateVersion(),
-                    () -> apply(job, request, resultId, approvedCommand));
+                    () -> apply(job, request, resultId, approvedCommand, actorId));
             return response(stored);
         }
 
@@ -252,8 +253,9 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId,
-            JsonNode command) {
-        JsonNode applied = resources.apply(job.resource(), command);
+            JsonNode command,
+            UUID actorId) {
+        JsonNode applied = resources.apply(job.resource(), command, actorId);
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "APPLIED");
         payload.set("resource", applied);
@@ -330,8 +332,8 @@ public final class NaturalCmsStageService {
             context.set("reference", reference);
         }
         String instruction = commandStage
-                ? commandInstruction(job.resource().type())
-                : feasibilityInstruction(job.resource().type());
+                ? commandInstruction(job.resource())
+                : feasibilityInstruction(job.resource());
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
@@ -341,16 +343,41 @@ public final class NaturalCmsStageService {
     /**
      * 리소스마다 열린 operation이 다르므로 지시문도 갈린다.
      *
-     * <p>메뉴만 {@code CREATE}·{@code DELETE}까지 열려 있어(`AI05-006`·`AI05-007`) 첫 문장이 다르다.
-     * 나머지 셋은 `AI05-013`이 정한 {@code UPDATE} 문구를 그대로 쓰고 공통 규칙만 덧붙인다.
+     * <p>메뉴(`AI05-006`·`AI05-007`)와 게시판·게시물(`AI05-014`)은 {@code CREATE}·{@code DELETE}까지
+     * 열려 있어 첫 문장이 다르다. 나머지는 `AI05-013`이 정한 {@code UPDATE} 문구를 그대로 쓰고
+     * 공통 규칙만 덧붙인다.
      *
      * <p>Tool Call 한 번으로 명령을 받는 구조는 `AI05-013`을 그대로 따른다. Tool Schema의
      * {@code operation}은 자유 문자열이라 이 지시문만으로 세 operation을 모두 표현할 수 있다.
      */
-    private static String commandInstruction(String resourceType) {
+    private static String commandInstruction(NaturalCmsContract.ResourceRef resource) {
+        String resourceType = resource.type();
         String changedFieldsOnly = " Send only the fields the request changes. Every field you"
                 + " send is written and a field you leave out keeps its current value, so never"
                 + " repeat a value that is already correct.";
+        String emptyDelete =
+                " DELETE carries no fields and its fields object stays empty.";
+        if (NaturalCmsResourceService.isPost(resource)) {
+            return "Create one POST command with operation CREATE, UPDATE or DELETE. "
+                    + "Call validate_cms_command exactly once with that command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly
+                    + " CREATE sends title and body."
+                    + emptyDelete
+                    + " The post stays in the board it is already in, so never send a board"
+                    + " field. A body may use headings (##), emphasis (**text**) and list"
+                    + " items (-) only.";
+        }
+        if ("BOARD".equals(resourceType)) {
+            return "Create one BOARD command with operation CREATE, UPDATE or DELETE. "
+                    + "Call validate_cms_command exactly once with that command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly
+                    + " CREATE sends at least name and leaves description out when the request"
+                    + " does not give one."
+                    + emptyDelete
+                    + " A board that still has posts cannot be deleted.";
+        }
         if (!"MENU".equals(resourceType)) {
             return "Create one " + resourceType + " UPDATE command. "
                     + "Call validate_cms_command exactly once with the UPDATE command. "
@@ -368,7 +395,7 @@ public final class NaturalCmsStageService {
                 + " targetType is NONE, CONTENT or BOARD, and targetId is null unless the type is"
                 + " CONTENT or BOARD."
                 + " CREATE sends at least name, path and parentId."
-                + " DELETE carries no fields and its fields object stays empty."
+                + emptyDelete
                 + " Take every id from the reference lists and never invent one.";
     }
 
@@ -378,16 +405,31 @@ public final class NaturalCmsStageService {
      * <p>실제로 메뉴 화면에서 게시글 등록 요청이 통과해 명령 단계에서 계약 밖 형식으로 멈췄다.
      * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
      */
-    private static String feasibilityInstruction(String resourceType) {
-        String scope = "MENU".equals(resourceType)
-                ? "menus only: a menu's name, path, parent, order among siblings, and which "
-                    + "content or board it links to. Creating and deleting a menu is included"
-                : "the selected content's title and body only";
+    private static String feasibilityInstruction(NaturalCmsContract.ResourceRef resource) {
+        String scope = "the selected content's title and body only";
+        String excluded = "writing posts, editing article bodies, templates and members";
+        if ("MENU".equals(resource.type())) {
+            scope = "menus only: a menu's name, path, parent, order among siblings, and which "
+                    + "content or board it links to. Creating and deleting a menu is included";
+        }
+        else if (NaturalCmsResourceService.isPost(resource)) {
+            // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
+            scope = "the posts of the selected board: writing a new post and changing or "
+                    + "deleting a post's title and body";
+            excluded = "changing the board itself, menus, static content pages, templates "
+                    + "and members";
+        }
+        else if ("BOARD".equals(resource.type())) {
+            scope = "boards only: a board's name and description. Creating a board and "
+                    + "deleting an empty board is included";
+            excluded = "writing or editing posts, menus, static content pages, templates "
+                    + "and members";
+        }
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "
-                + "Anything else is infeasible even when it sounds related, including writing "
-                + "posts, editing article bodies, templates and members. When the port is "
+                + "Anything else is infeasible even when it sounds related, including "
+                + excluded + ". When the port is "
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation.";

@@ -218,6 +218,52 @@ class CodingHandlerStageServiceTest {
     }
 
     /**
+     * An empty diff has two very different causes and the person is told which. Job b4c9a477
+     * looked and the change was already there; Job a15a51b1 tried eight patches, landed none,
+     * and the screen still said the change was already there. The model reaching for an edit
+     * is what separates them.
+     */
+    @Test
+    void anEmptyDiffAfterAFailedEditIsNotCalledAlreadyDone() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        // Every patch is refused, so nothing lands and the diff stays empty.
+        when(fixture.toolService().submitForNode(
+                eq("Bearer worker"), any(), eq("code")))
+                .thenThrow(new CodingToolException(
+                        "TOOL_EXECUTION_FAILED",
+                        "The MCP coding tool refused the call. git: error: patch failed",
+                        org.springframework.http.HttpStatus.BAD_GATEWAY))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("apply_patch", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "{\"patch\":\"diff\"}"),
+                toolCallReply("read_diff", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "{}"),
+                terminalReply());
+        when(fixture.toolService().result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent(
+                        "1.0",
+                        UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        fixture.submittedToolCall().get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION,
+                        "application/json", 120,
+                        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                        "{\"workspaceId\":\"" + WORKSPACE + "\","
+                                + "\"baseSha\":\"" + BASE_SHA + "\","
+                                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                                + "\"digest\":\"sha256:e3b0c44298fc1c149afbf4c8996fb92427"
+                                + "ae41e4649b934ca495991b7852b855\","
+                                + "\"changedPaths\":[]}"));
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request()))
+                .isInstanceOf(CodingWorkerException.class)
+                .satisfies(failure -> assertThat(((CodingWorkerException) failure).code())
+                        .isEqualTo("CODING_PATCH_NOT_APPLIED"))
+                .hasMessageContaining("attempted an edit but no change was applied");
+    }
+
+    /**
      * Job cb3cd98b applied a working patch and then kept editing - thirteen apply_patch calls,
      * one of which reverted its own work - and burned the whole turn budget without ever
      * reaching the checks. Nothing told it the edit had landed or what came next. The same

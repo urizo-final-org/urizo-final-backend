@@ -289,6 +289,10 @@ public final class CodingHandlerStageService {
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
         ModelOutcome terminalOutcome = null;
+        // Whether the model ever reached for an edit. An empty diff means one of two very
+        // different things - it looked and the change was already there, or it tried and
+        // could not land one - and only this tells them apart.
+        boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(authority, request, schemas.isEmpty()
@@ -324,6 +328,7 @@ public final class CodingHandlerStageService {
                 }
             }
             CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
+            patchAttempted = patchAttempted || "apply_patch".equals(call.name());
             if (!allowedTools.contains(call.name())) {
                 throw contract("The model selected a tool outside the stage allowlist.");
             }
@@ -391,11 +396,19 @@ public final class CodingHandlerStageService {
             diffDigest = resultDigest(latestDiff);
             if (EMPTY_DIFF_DIGEST.equals(diffDigest)) {
                 // Reached only after the model stopped calling tools and declared itself
-                // done, so every retry it had is already spent.
-                throw new CodingWorkerException(
-                        "CODING_DIFF_EMPTY",
-                        "The Coding stage finished without changing any file.",
-                        HttpStatus.UNPROCESSABLE_ENTITY);
+                // done, so every retry it had is already spent. Which of the two empty
+                // endings it was decides what the person is told, and telling them apart
+                // matters: Job a15a51b1 tried eight patches, could not land one, and the
+                // screen still said the change was already there.
+                throw patchAttempted
+                        ? new CodingWorkerException(
+                                "CODING_PATCH_NOT_APPLIED",
+                                "The Coding stage attempted an edit but no change was applied.",
+                                HttpStatus.UNPROCESSABLE_ENTITY)
+                        : new CodingWorkerException(
+                                "CODING_DIFF_EMPTY",
+                                "The Coding stage finished without changing any file.",
+                                HttpStatus.UNPROCESSABLE_ENTITY);
             }
         }
         else {

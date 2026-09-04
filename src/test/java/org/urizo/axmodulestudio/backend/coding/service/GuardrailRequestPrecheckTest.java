@@ -44,10 +44,44 @@ class GuardrailRequestPrecheckTest {
             "인증 방식을 바꿔줘",
             "비밀번호 정책을 바꿔줘",
             "비밀번호 재설정 기능을 추가해줘",
-            "API 키를 새로 발급해줘"})
+            "API 키를 새로 발급해줘",
+            // Measured on Job 594c6d6a: this reached the model because the list held
+            // "로그인 기능" as one string and the sentence puts three syllables between
+            // the halves. The analyst refused it on its own, but the cheap gate should have.
+            "카카오 계정으로 로그인할 수 있는 기능을 만들어 줘",
+            "구글 로그인 연동해줘",
+            "소셜 로그인을 붙여줘"})
     @DisplayName("로그인과 비밀 정보 요청은 막힌다")
     void refusesAuthenticationRequests(String requestText) {
         assertThat(GuardrailRequestPrecheck.refusalFor(requestText)).isNotNull();
+    }
+
+    /**
+     * The gap this pairing shape exists to close. Korean inserts words between a subject and its
+     * act and conjugates the verb, so a single string only ever catches one phrasing of the same
+     * request. Both halves are matched separately instead - and a sentence carrying only the
+     * subject still passes, which is what keeps "로그인 안내 문구" working.
+     */
+    @Test
+    @DisplayName("낱말 사이에 다른 말이 끼어도 같은 요청으로 잡는다")
+    void catchesTheSameAskWithWordsBetween() {
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인 기능 만들어줘")).isNotNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인할 수 있는 기능 만들어줘")).isNotNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인을 새로 구현해줘")).isNotNull();
+
+        // Subject alone is not a request about the mechanism.
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인 안내 문구를 바꿔줘")).isNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인 화면 제목을 바꿔줘")).isNull();
+    }
+
+    /** The same conjugation trap on the infrastructure side: "배포할" is not "배포하". */
+    @Test
+    @DisplayName("배포는 어미가 바뀌어도 잡고, 화면 글자로 쓰인 것은 통과한다")
+    void catchesConjugatedDeployment() {
+        assertThat(GuardrailRequestPrecheck.refusalFor("운영 서버에 배포해줘")).isNotNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("지금 배포할 수 있게 해줘")).isNotNull();
+
+        assertThat(GuardrailRequestPrecheck.refusalFor("배포 소식 카드를 추가해 줘")).isNull();
     }
 
     @ParameterizedTest

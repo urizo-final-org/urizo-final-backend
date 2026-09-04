@@ -41,10 +41,33 @@ public final class CodingHandlerStageService {
     /**
      * A complete code exchange already spends about seven turns - read_diff, read_file,
      * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
-     * bound of eight left no room for a single re-asked miss. Twelve keeps the loop
-     * bounded while allowing the re-ask layer the handful of turns it exists to spend.
+     * bound of eight left no room for a single re-asked miss. Twelve then proved too
+     * tight for a request that has to find its files first. Measured runs: a trivial
+     * one-line edit closed its code stage in six turns, of which the patch-verify-reply
+     * tail is three; the first real multi-file request died at eleven productive turns
+     * with its files found but nothing patched, so its measured floor was fourteen.
+     * Sixteen was that floor plus two spare turns for one rejected patch - not a proven
+     * ceiling, only a bound the recorded runs fit under.
+     *
+     * <p>2026-09-03: sixteen stopped fitting. The first screen requests to reach a real
+     * page file - src/features/site/PublicSite.tsx, 21 KB holding every public page -
+     * died three times in a row, each at turn seventeen. The third had already finished
+     * the work: twelve tool calls ending in apply_patch, two run_check, scan_changed_files
+     * and check_package_allowlist, with only the terminal reply left to write. A bound
+     * that stops a run after it has patched and passed its own checks throws the work
+     * away for nothing. Twenty-four is that measured run plus room for one rejected patch
+     * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
      */
-    private static final int MAX_MODEL_TURNS = 12;
+    private static final int MAX_MODEL_TURNS = 24;
+    /**
+     * The digest of an empty diff - SHA-256 over zero bytes. Every apply_patch of Job
+     * 7e600583 was refused, yet read_diff, the package check and the guardrail scan all
+     * reported success because each of them examined that empty diff, and the Job reached
+     * approval carrying no change at all. A stage that changed nothing is not a stage that
+     * succeeded, so the Coding stage refuses to report one.
+     */
+    private static final String EMPTY_DIFF_DIGEST =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     /** Tool refusals the model itself caused and can correct when told why. */
     private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
@@ -55,9 +78,10 @@ public final class CodingHandlerStageService {
      * the context needs to be pointed at the real bytes, not just told to try again.
      */
     private static final String APPLY_PATCH_RETRY_HINT =
-            " If the patch did not apply, call read_file on the target file first and "
-            + "rebuild the patch against its exact current content: correct @@ line "
-            + "numbers, context lines copied verbatim, and no added trailing whitespace.";
+            " If a diff you wrote did not apply, do not rewrite it. Call read_file on the "
+            + "target file and send path, oldText and newText instead: copy the exact text "
+            + "to replace out of what read_file returned as oldText, and the server builds "
+            + "the diff. Retyping a long line is what fails.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
     /**
@@ -186,8 +210,67 @@ public final class CodingHandlerStageService {
         ModelOutcome outcome = parseOutcome(
                 structured.structuredOutput(),
                 Set.of("feasible", "infeasible"));
+        JsonNode payload = withCheckedTargetFiles(jobId, outcome.payload());
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
-                null, null, null, outcome.payload());
+                null, null, null, payload);
+    }
+
+    /**
+     * Removes target files the analyst did not get from the fence.
+     *
+     * <p>Dropped rather than refused: this stage is a single model call with no re-ask, so
+     * rejecting the answer would end the job at planning - a worse outcome than the searching
+     * this hint exists to save. A wrong path costs the coding stage a failed read; the same
+     * stage still finds its own way when the list comes back empty.
+     */
+    private JsonNode withCheckedTargetFiles(UUID jobId, JsonNode payload) {
+        if (payload == null || !payload.isObject() || !payload.path("targetFiles").isArray()) {
+            return payload;
+        }
+        List<String> allowedPaths = guardrailSelections.jobSnapshot(jobId);
+        List<String> known = guardrailSelections.jobFiles(jobId);
+        // An open system has neither fence nor list, and nothing to judge a path against.
+        if (allowedPaths.isEmpty() && known.isEmpty()) {
+            return payload;
+        }
+        List<String> folders = allowedPaths.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        ObjectNode checked = ((ObjectNode) payload).deepCopy();
+        ArrayNode kept = checked.putArray("targetFiles");
+        for (JsonNode candidate : payload.path("targetFiles")) {
+            if (!candidate.isTextual()) {
+                continue;
+            }
+            String path = normalizedPath(candidate.asText());
+            // A file that exists inside the fence, or a new file the change would create
+            // there. The second case is why the folder test is here: the post-check on the
+            // finished candidate accepts a created file, so refusing to name one would
+            // contradict the rule that actually decides.
+            boolean real = known.contains(path);
+            boolean insideFence = folders.stream().anyMatch(
+                    folder -> path.equals(folder) || path.startsWith(folder + "/"));
+            if (real || insideFence) {
+                kept.add(path);
+            }
+        }
+        return checked;
+    }
+
+    /**
+     * The path as the file list spells it. Only shapes that mean the same file are repaired -
+     * letter case is left alone, because on a case-sensitive checkout it names another file.
+     */
+    private static String normalizedPath(String path) {
+        String normalized = path.trim().replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
     }
 
     private CodingHandlerContract.StageExecutionResponse modelToolStage(
@@ -206,6 +289,11 @@ public final class CodingHandlerStageService {
         List<JsonNode> messages = new ArrayList<>(
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
+        ModelOutcome terminalOutcome = null;
+        // Whether the model ever reached for an edit. An empty diff means one of two very
+        // different things - it looked and the change was already there, or it tried and
+        // could not land one - and only this tells them apart.
+        boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(authority, request, schemas.isEmpty()
@@ -217,9 +305,31 @@ public final class CodingHandlerStageService {
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
             if (modelResponse.toolCalls().isEmpty()) {
-                break;
+                try {
+                    terminalOutcome = parseOutcome(
+                            request.handlerKey(), modelResponse.assistant().content(), ports);
+                    break;
+                }
+                catch (CodingWorkerException failure) {
+                    // Measured on Job f2b48a5e: the model finished the work - patch
+                    // applied, checks green - then closed with a prose summary instead
+                    // of the declared stage result, and the whole Job died on that one
+                    // formality. A format miss the model caused is handed back once as
+                    // feedback, exactly like a refused tool call.
+                    if (turn == MAX_MODEL_TURNS) {
+                        throw failure;
+                    }
+                    messages.add(plainAssistantMessage(modelResponse));
+                    messages.add(userMessage("Your reply was not the stage result "
+                            + "contract. The work you already completed stays; only this "
+                            + "final message was rejected. Reply again with exactly one "
+                            + "JSON object and nothing else - no prose, no code fence: "
+                            + "{\"port\":\"<one of " + ports + ">\",\"payload\":{...}}."));
+                    continue;
+                }
             }
             CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
+            patchAttempted = patchAttempted || "apply_patch".equals(call.name());
             if (!allowedTools.contains(call.name())) {
                 throw contract("The model selected a tool outside the stage allowlist.");
             }
@@ -244,12 +354,28 @@ public final class CodingHandlerStageService {
                         + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
                 continue;
             }
-            messages.add(assistantToolMessage(modelResponse));
+            messages.add(assistantToolMessage(modelResponse, call));
             messages.add(toolMessage(toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
             if (Set.of("read_diff", "apply_patch",
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
                 latestDiff = decoded;
+            }
+            if ("apply_patch".equals(call.name())) {
+                // Measured on Job cb3cd98b: the model applied a working patch, then kept
+                // editing - thirteen apply_patch calls, one of which reverted its own work -
+                // and spent the whole turn budget without ever reaching the checks. Nothing
+                // told it the edit had landed and what came next, so it kept polishing. The
+                // same run a day earlier finished in two patches: this is model variance,
+                // not a broken pipeline, which is why the nudge states the next step
+                // instead of forbidding a second patch that a two-part change still needs.
+                messages.add(userMessage(
+                        "apply_patch succeeded and the change is now in the workspace. If the "
+                        + "requested change is complete, stop editing and verify it: call "
+                        + "run_check, then check_package_allowlist and scan_changed_files, and "
+                        + "finish with the stage result. Call apply_patch again only for a part "
+                        + "of the request that is still missing - do not re-edit work that is "
+                        + "already correct."));
             }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(
@@ -257,11 +383,10 @@ public final class CodingHandlerStageService {
                         "Coding Model exceeded the bounded tool loop.");
             }
         }
-        if (modelResponse == null || !modelResponse.toolCalls().isEmpty()) {
+        if (terminalOutcome == null) {
             throw contract("The Coding Model did not produce a terminal stage result.");
         }
-        ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), modelResponse.assistant().content(), ports);
+        ModelOutcome outcome = terminalOutcome;
         String candidateSha;
         String diffDigest;
         if ("coding.code".equals(request.handlerKey())) {
@@ -270,6 +395,22 @@ public final class CodingHandlerStageService {
             }
             candidateSha = authority.baseSha();
             diffDigest = resultDigest(latestDiff);
+            if (EMPTY_DIFF_DIGEST.equals(diffDigest)) {
+                // Reached only after the model stopped calling tools and declared itself
+                // done, so every retry it had is already spent. Which of the two empty
+                // endings it was decides what the person is told, and telling them apart
+                // matters: Job a15a51b1 tried eight patches, could not land one, and the
+                // screen still said the change was already there.
+                throw patchAttempted
+                        ? new CodingWorkerException(
+                                "CODING_PATCH_NOT_APPLIED",
+                                "The Coding stage attempted an edit but no change was applied.",
+                                HttpStatus.UNPROCESSABLE_ENTITY)
+                        : new CodingWorkerException(
+                                "CODING_DIFF_EMPTY",
+                                "The Coding stage finished without changing any file.",
+                                HttpStatus.UNPROCESSABLE_ENTITY);
+            }
         }
         else {
             CodingHandlerContract.HandlerResultResponse code = latestResult(
@@ -335,10 +476,15 @@ public final class CodingHandlerStageService {
                             + String.join(", ", denied),
                     HttpStatus.UNPROCESSABLE_ENTITY);
         }
+        // Which repository this Job works in is recorded on the Job itself. Both the fence
+        // below and the queued build need it: the fence to read this repository's folders
+        // rather than every repository's, and the build to check out the right one. It used to
+        // be assumed to be the Backend, because there was nothing else it could be.
+        String repository = results.jobRepository(jobId);
         // The second layer: the folders the administrator chose when this job was created. The
         // copy taken then is used, not what the setting says now.
         List<String> outside = outsideAllowedFolders(
-                guardrailSelections.jobSnapshot(jobId), diff, scan);
+                repository, guardrailSelections.jobSnapshot(jobId), diff, scan);
         if (!outside.isEmpty()) {
             throw new CodingWorkerException(
                     "CODING_GUARDRAIL_PATH_NOT_SELECTED",
@@ -369,12 +515,28 @@ public final class CodingHandlerStageService {
         // --no-build and the runner claims one PENDING row at a time in order.
         String workspaceId = aggregate.workspaceId() == null
                 ? null : aggregate.workspaceId().toString();
-        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", "backend");
+        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", repository);
         if (workspaceId != null) {
             runnerPayload.put("workspaceId", workspaceId);
         }
         runner.enqueue("BUILD", runnerPayload);
-        ObjectNode previewPayload = objectMapper.createObjectNode();
+        // The frontend runtime image installs and serves; it never compiles or tests what it
+        // serves, so a broken screen would reach the person asked to approve it. The backend
+        // has to compile to become an image at all. Queued between BUILD and PREVIEW_UP: the
+        // runner takes one pending row at a time in order, so the image it checks is the one
+        // BUILD just made.
+        if (CodingRepositories.FRONTEND.equals(repository)) {
+            // workspaceId is not read by the check itself. It is what ties the queued row back
+            // to this Job, which is how the approval screen finds out whether it passed.
+            ObjectNode checkPayload = objectMapper.createObjectNode().put("repo", repository);
+            if (workspaceId != null) {
+                checkPayload.put("workspaceId", workspaceId);
+            }
+            runner.enqueue("TEST", checkPayload);
+        }
+        // The preview needs the repository too: a frontend Job's changed screen only reaches
+        // 18081 if the preview is pointed at that Job's checkout rather than a stale one.
+        ObjectNode previewPayload = objectMapper.createObjectNode().put("repo", repository);
         if (workspaceId != null) {
             previewPayload.put("workspaceId", workspaceId);
         }
@@ -409,22 +571,30 @@ public final class CodingHandlerStageService {
      * the fixed Denylist applies. Refusing everything instead would stop ordinary work the moment
      * nobody had filled the screen in, while the paths that actually matter stay closed either way.
      *
-     * <p>The allow list entries are {@code repository:path}; only the path is compared. The Coding
-     * pipeline works on the Backend checkout today and a job carries no repository name, while the
-     * two repositories' folder shapes do not overlap - Backend selections sit under
-     * {@code src/main/java/...} and Frontend ones under {@code src/features/...}, {@code src/app},
-     * {@code src/shared/...} and {@code src/styles}. When the pipeline gains a second repository,
-     * the repository has to come from the job rather than from the shape of the path.
+     * <p>The allow list entries are {@code repository:path} and only this repository's are read.
+     * That used to be left to the shape of the paths - the two repositories' folders do not
+     * overlap - which held only while every Job was a Backend Job. It is no longer true and the
+     * comparison is no longer a coincidence.
+     *
+     * <p>An allow list with nothing for this repository is not an empty allow list. The
+     * administrator filled the screen in and left this repository closed, so everything changed
+     * here is outside the fence. Reading it as "nothing chosen, therefore open" would turn a
+     * closed repository into an unguarded one, which is the opposite of what was chosen.
      */
     static List<String> outsideAllowedFolders(
-            List<String> allowedPaths, JsonNode... toolResults) {
+            String repository, List<String> allowedPaths, JsonNode... toolResults) {
         if (allowedPaths.isEmpty()) {
             return List.of();
         }
+        String prefix = repository + ":";
         List<String> folders = allowedPaths.stream()
-                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(entry -> entry.startsWith(prefix))
+                .map(entry -> entry.substring(prefix.length()))
                 .filter(folder -> !folder.isBlank())
                 .toList();
+        if (folders.isEmpty()) {
+            return changedPaths(toolResults);
+        }
         return changedPaths(toolResults).stream()
                 .filter(path -> folders.stream().noneMatch(
                         folder -> path.equals(folder) || path.startsWith(folder + "/")))
@@ -871,6 +1041,15 @@ public final class CodingHandlerStageService {
                 authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
     }
 
+    /**
+     * The analyze response format.
+     *
+     * <p>Every object is closed and every field required, because a provider running strict
+     * structured output refuses a schema that leaves either open. An open payload also let the
+     * model answer with an empty object that satisfied "must be an object" while telling the
+     * approver nothing, so the two fields the approval screen reads are named here rather than
+     * asked for in prose alone.
+     */
     private JsonNode outcomeResponseFormat() {
         ObjectNode schema = objectMapper.createObjectNode()
                 .put("type", "object")
@@ -881,8 +1060,19 @@ public final class CodingHandlerStageService {
         ObjectNode payload = properties.putObject("payload")
                 .put("type", "object")
                 .put("additionalProperties", false);
-        payload.putArray("required").add("summary");
-        payload.putObject("properties").putObject("summary").put("type", "string");
+        // Every property is required and the object is closed: OpenAI's strict structured
+        // output refuses anything else, and the coding stage depends on targetFiles being
+        // present rather than optional.
+        payload.putArray("required")
+                .add("planSummary").add("acceptanceCriteria").add("targetFiles");
+        ObjectNode payloadProperties = payload.putObject("properties");
+        payloadProperties.putObject("planSummary").put("type", "string");
+        payloadProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        payloadProperties.putObject("targetFiles")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
         return ProviderResponseFormat.jsonSchema(schema).requestContract();
     }
 
@@ -995,7 +1185,20 @@ public final class CodingHandlerStageService {
                 result.putArray("roots").add(source.path("scope").asText("."));
             }
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
-            case "apply_patch" -> result.put("patch", source.path("patch").asText());
+            case "apply_patch" -> {
+                if (source.has("patch")) {
+                    result.put("patch", source.path("patch").asText());
+                }
+                else {
+                    // Copied field by field so an incomplete call reaches the Gateway as
+                    // what the model actually sent, and is named back to it there.
+                    for (String field : List.of("path", "oldText", "newText")) {
+                        if (source.has(field)) {
+                            result.put(field, source.path(field).asText());
+                        }
+                    }
+                }
+            }
             case "run_check" -> result.put("checkId", source.path("profile").asText());
             default -> throw contract("The model selected an unregistered Coding tool.");
         }
@@ -1007,6 +1210,45 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
+        // The analyst is designed to refuse a request that clearly needs work outside the
+        // fence, before the expensive coding stage runs. It can only do that if it is shown
+        // the fence: the job's own snapshot, so a mid-run settings change cannot move the
+        // rules under it. An empty snapshot means an open system, and injecting a fabricated
+        // restriction into an open system would refuse work the post-check would have passed.
+        if ("coding.analyze".equals(handlerKey)) {
+            List<String> allowed = guardrailSelections.jobSnapshot(aggregate.jobId());
+            if (allowed != null && !allowed.isEmpty()) {
+                ObjectNode guardrail = context.putObject("guardrail");
+                // The fence is shown as labels, not paths. planSummary is read by a general
+                // administrator, so a refusal must be worded in the administrator's own labels,
+                // and a model does not quote what it was never shown. The denied side is the
+                // fact that stops optimism: shown only the allowed folders, the analyst twice
+                // waved through requests by hoping their files lived inside one of them.
+                GuardrailPathSelectionService.JobAreas areas =
+                        guardrailSelections.jobAreas(aggregate.jobId());
+                ArrayNode allowedAreas = guardrail.putArray("allowedAreas");
+                // A snapshot taken before labels existed has none; the paths are then the only
+                // truthful names, and injecting nothing would read as "everything is refused".
+                (areas.allowed().isEmpty() ? allowed : areas.allowed())
+                        .forEach(allowedAreas::add);
+                ArrayNode deniedAreas = guardrail.putArray("deniedAreas");
+                areas.denied().forEach(deniedAreas::add);
+                // The analyst has no tools, so without this it can only guess at file names
+                // and the coding stage pays for the guess in search turns. Paths are safe
+                // here and nowhere else: this context never reaches an approval screen, and
+                // planSummary is separately forbidden from naming them.
+                List<String> files = guardrailSelections.jobFiles(aggregate.jobId());
+                if (!files.isEmpty()) {
+                    ArrayNode fenceFiles = guardrail.putArray("files");
+                    files.forEach(fenceFiles::add);
+                }
+                guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
+                    guardrail.put("allowNewDependency", rules.allowNewDependency());
+                    guardrail.put("maxChangedFiles", rules.maxChangedFiles());
+                    guardrail.put("maxChangedLines", rules.maxChangedLines());
+                });
+            }
+        }
         ArrayNode prior = context.putArray("priorResults");
         aggregate.results().stream()
                 .skip(Math.max(0, aggregate.results().size() - 20L))
@@ -1017,6 +1259,13 @@ public final class CodingHandlerStageService {
                     putOptional(item, "candidateSha", result.candidateSha());
                     putOptional(item, "diffDigest", result.diffDigest());
                     putOptional(item, "validationHash", result.validationHash());
+                    // The payload carries the plain-language plan and the acceptance criteria
+                    // agreed at approval 1. Without it a later stage cannot judge the request
+                    // against what was promised, so the approval screens have nothing to
+                    // place side by side.
+                    if (result.payload() != null && result.payload().isObject()) {
+                        item.set("payload", result.payload().deepCopy());
+                    }
                 });
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -1033,16 +1282,88 @@ public final class CodingHandlerStageService {
             case "coding.review" -> "\"passed\" or \"changes_requested\"";
             default -> throw contract("The Coding Model stage is not registered.");
         };
+        // The approval screens are read by a general administrator who cannot read code, so
+        // the payload fields are named here rather than left to the model. An empty payload
+        // still satisfies "must be an object", which is exactly what the model returned before
+        // these names existed.
+        String payloadFields = switch (handlerKey) {
+            case "coding.analyze" -> "payload must contain \"planSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, \"acceptanceCriteria\", an "
+                    + "array of short plain-language statements that will each be true once the "
+                    + "request is done, and \"targetFiles\", the files the change will edit. "
+                    // The analyst reads the fence's file list and the coding stage inherits
+                    // this answer, which is the whole point: the stage that has tools should
+                    // spend its turns editing, not discovering what the analyst could see.
+                    + "Fill targetFiles by choosing from guardrail.files, copying each path "
+                    + "exactly; never invent a path that is not listed there. Name every file "
+                    + "the change plausibly touches, most likely first, and prefer naming one "
+                    + "file too many over leaving the list empty. When the request is "
+                    + "infeasible, or the context lists no files, answer with an empty array. "
+                    // The early block the design asks of the analyst. The post-check on the
+                    // finished candidate remains the authority; this only saves the coding
+                    // stage's cost when the refusal is obvious from the request alone.
+                    + "When the context contains guardrail.allowedAreas, the request may only "
+                    + "change the work areas named there, and every area named in "
+                    + "guardrail.deniedAreas is recorded as not allowed. That record is a "
+                    + "fact, not a guess: do not assume the files such a request needs happen "
+                    + "to live inside an allowed area. Judge by the area the request names. "
+                    + "When it needs a denied area, or an area not listed as allowed, answer "
+                    + "port \"infeasible\". planSummary must then read as a refusal from its "
+                    // Live run 2026-09-03: an infeasible answer whose summary said "기능을
+                    // 개선합니다" reached the screen, where it read as an accepted request.
+                    + "first sentence - say that the request cannot be carried out and why, "
+                    + "and never describe the work as if it were going ahead. Explain in the "
+                    + "language of the "
+                    + "request, naming the areas only by the guardrail labels, and end that "
+                    + "refusal by asking the reader to request a guardrail change from the "
+                    // Live run 2026-09-02: without this clause the refusal ending leaked into
+                    // a feasible plan, which told the reader to escalate work that had just
+                    // been accepted.
+                    + "super administrator if the work is still wanted; a feasible answer "
+                    + "must not mention the super administrator or the guardrail. planSummary "
+                    + "is read by a non-developer: never mention folder paths, file names, or "
+                    + "technical vocabulary. If it is genuinely unclear, proceed as feasible. ";
+            case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, and \"criteriaResults\", an "
+                    + "array of objects each holding \"criterion\", copied verbatim from the "
+                    + "acceptanceCriteria in the coding.analyze payload you were given, and "
+                    + "\"met\", either true or false. ";
+            default -> "";
+        };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
-                + "synonym or rewording, and payload must be an object. "
-                + ("coding.analyze".equals(handlerKey)
-                    ? "For this analyze stage, payload must contain exactly the string field "
-                        + "summary. "
-                    : "")
+                + "synonym or rewording, and payload must be an object. " + payloadFields
                 + ("coding.code".equals(handlerKey)
-                    ? "Use read_diff before any diff-bound tool and again after the final change. "
+                    // One call per answer is the pipeline's contract: the loop runs the first
+                    // call alone and the history records only that one, so a batch of calls
+                    // silently loses all but its head unless the model is told.
+                    ? "Request one tool call per answer; when an answer carries several, only "
+                        + "the first is executed. "
+                        + "Use read_diff before any diff-bound tool and again after the final change. "
+                        // A measured failure spent four of its turns on a natural-language
+                        // query that can never match code and on near-duplicate retries of
+                        // searches that had already answered. The budget and the search
+                        // discipline have to be said out loud - searching feels like
+                        // progress to a model.
+                        + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
+                        + "answer spends one whether it searches or edits. The coding.analyze "
+                        + "payload in priorResults carries targetFiles, the files chosen for "
+                        + "this change from the guardrail's own list: read those with "
+                        + "read_file and start editing. Do not search to confirm what "
+                        + "targetFiles already names. Search only when those files turn out "
+                        + "not to hold the change, and then search for code identifiers in "
+                        + "English (class, field, and path names), never for words of the "
+                        + "request's own language - those match nothing. Do not rerun a "
+                        + "search that already answered with a slight variation of itself, "
+                        + "and do not reword a search that found nothing - open the most "
+                        + "likely file instead. Once the files to change are in hand, stop "
+                        + "exploring and edit with apply_patch, sending path, oldText and "
+                        + "newText rather than writing a diff yourself; an edit can be "
+                        + "corrected after the next read_diff, but a spent answer cannot be "
+                        + "recovered. "
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -1054,7 +1375,7 @@ public final class CodingHandlerStageService {
                         .put("content", encode(context)));
     }
 
-    private List<JsonNode> toolSchemas(Set<String> names) {
+    List<JsonNode> toolSchemas(Set<String> names) {
         List<JsonNode> schemas = new ArrayList<>();
         for (String name : CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet().stream()
                 .sorted().toList()) {
@@ -1113,11 +1434,20 @@ public final class CodingHandlerStageService {
             case "read_file" -> "Read one repository-relative text file.";
             case "search_code" -> "Search the repository for a literal string.";
             case "read_diff" -> "Read the workspace diff as it stands now.";
-            case "apply_patch" -> "Apply one unified diff to the workspace. " + AFTER_READ_DIFF
-                    + " Every file in the patch starts with a line 'diff --git a/PATH b/PATH' "
-                    + "carrying the same repository-relative path twice, then '--- a/PATH', "
-                    + "then '+++ b/PATH', then its @@ hunks. Rename, copy, mode and binary "
-                    + "diffs are refused.";
+            case "apply_patch" -> "Edit the workspace, in either of two ways. "
+                    + AFTER_READ_DIFF
+                    + " Preferred: send path, oldText and newText, and the server writes the "
+                    + "diff for you. oldText is the exact text to replace, copied character "
+                    + "for character out of read_file and appearing exactly once in the file; "
+                    + "newText is what takes its place, or \"\" to delete it. Use this "
+                    + "whenever you are changing text inside a file - it is the only way "
+                    + "that works on long lines, because you never retype the parts you are "
+                    + "keeping. Otherwise: send patch alone, a unified diff, when one call "
+                    + "must touch several files or add or delete a whole file. Every file in "
+                    + "such a patch starts with 'diff --git a/PATH b/PATH' carrying the same "
+                    + "repository-relative path twice, then '--- a/PATH', then '+++ b/PATH', "
+                    + "then its @@ hunks. Rename, copy, mode and binary diffs are refused. "
+                    + "Never send patch together with the other three fields.";
             case "run_check" -> "Run one approved check over the changed files. Call it "
                     + "with exactly {\"profile\":\"git-diff-check\"} or "
                     + "{\"profile\":\"python-syntax\"}; an empty argument object is "
@@ -1142,7 +1472,16 @@ public final class CodingHandlerStageService {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");
             }
-            case "apply_patch" -> stringProperty(properties, required, "patch");
+            // Two shapes, one tool: 'patch' alone, or path/oldText/newText together.
+            // JSON Schema cannot say "exactly one of these sets" in the subset the
+            // provider gateway accepts, so nothing is required here and
+            // CodingToolService names the missing half in words the model can act on.
+            case "apply_patch" -> {
+                properties.putObject("patch").put("type", "string");
+                properties.putObject("path").put("type", "string");
+                properties.putObject("oldText").put("type", "string");
+                properties.putObject("newText").put("type", "string");
+            }
             case "run_check" -> stringProperty(properties, required, "profile");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");
@@ -1173,17 +1512,21 @@ public final class CodingHandlerStageService {
                 .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
     }
 
-    private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
+    /**
+     * Replays only the call that actually ran. A model may hand back several tool calls in one
+     * answer, but this loop executes the first alone - replaying the rest would leave the next
+     * turn declaring calls that have no result, which the message contract rightly refuses.
+     * The history must record what the pipeline did, not what the model asked for.
+     */
+    private ObjectNode assistantToolMessage(
+            CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "assistant");
         message.put("content", response.assistant().content());
-        ArrayNode calls = message.putArray("toolCalls");
-        for (CodingModelTurnContract.ToolCall call : response.toolCalls()) {
-            ObjectNode value = calls.addObject();
-            value.put("toolCallId", call.toolCallId().toString());
-            value.put("name", call.name());
-            value.set("arguments", call.arguments());
-        }
+        ObjectNode value = message.putArray("toolCalls").addObject();
+        value.put("toolCallId", executed.toolCallId().toString());
+        value.put("name", executed.name());
+        value.set("arguments", executed.arguments());
         return message;
     }
 

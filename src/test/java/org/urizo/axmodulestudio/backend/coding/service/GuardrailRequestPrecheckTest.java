@@ -39,8 +39,11 @@ class GuardrailRequestPrecheckTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
-            "로그인 화면 문구를 바꿔줘",
+            "로그인 방식을 카카오 계정으로 바꿔줘",
+            "로그인 처리를 새로 만들어줘",
+            "인증 방식을 바꿔줘",
             "비밀번호 정책을 바꿔줘",
+            "비밀번호 재설정 기능을 추가해줘",
             "API 키를 새로 발급해줘"})
     @DisplayName("로그인과 비밀 정보 요청은 막힌다")
     void refusesAuthenticationRequests(String requestText) {
@@ -79,6 +82,26 @@ class GuardrailRequestPrecheckTest {
     void separatesShowingAColumnFromCreatingOne() {
         assertThat(GuardrailRequestPrecheck.refusalFor("날짜 컬럼 보여주세요")).isNull();
         assertThat(GuardrailRequestPrecheck.refusalFor("날짜 컬럼 추가해주세요")).isNotNull();
+    }
+
+    /**
+     * The same rule one layer up: a phrase is refused for the act it names, not for a word that
+     * merely appears in it. Measured on the running system - "로그인 안내 문구를 바꿔줘" was
+     * refused as an authentication change when it only edits text on a page, and a demo cannot
+     * be written around a rule that arbitrary. Letting these through is safe because
+     * {@code src/features/auth} and {@code backend/auth} are hard-coded closed further down.
+     */
+    @Test
+    @DisplayName("낱말이 들어 있을 뿐인 화면 글자 수정은 통과한다")
+    void separatesTheMechanismFromTextThatMentionsIt() {
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인 안내 문구를 바꿔줘")).isNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("로그인 방식을 바꿔줘")).isNotNull();
+
+        assertThat(GuardrailRequestPrecheck.refusalFor("배포 소식 카드를 추가해 줘")).isNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("운영 서버에 배포해줘")).isNotNull();
+
+        assertThat(GuardrailRequestPrecheck.refusalFor("비밀번호 찾기 안내 문구를 바꿔줘")).isNull();
+        assertThat(GuardrailRequestPrecheck.refusalFor("비밀번호 정책을 바꿔줘")).isNotNull();
     }
 
     @Test

@@ -217,6 +217,12 @@ services:
       AXMS_MCP_PLATFORM_ENABLED: "true"
       AXMS_MCP_PLATFORM_ENDPOINT: http://mcp-server:8091/mcp
       AXMS_MCP_PLATFORM_CREDENTIAL_FILE: /run/secrets/mcp_service_token
+      # read_file wraps the file twice - once in content[].text, once in
+      # structuredContent - so a 36 KB screen comes back as a 76 KB response and the
+      # 64 KB default refused it. The refusal is retryable, so the stage retried it
+      # every two seconds until the job deadline and left the job RUNNING forever.
+      # The largest source file today is 42 KB; this holds it with room to spare.
+      AXMS_MCP_PLATFORM_MAX_RESPONSE_BYTES: "262144"
     depends_on:
       database:
         condition: service_healthy

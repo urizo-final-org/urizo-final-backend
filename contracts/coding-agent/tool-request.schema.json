@@ -142,21 +142,45 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["name", "arguments"],
+      "description": "One workspace edit, carried either as a diff the caller wrote or as the exact text to replace. In the replacement form the Tool Gateway reads the file, locates oldText, and builds the unified diff itself; the workspace then applies an ordinary patch either way.",
       "properties": {
         "name": { "type": "string", "const": "apply_patch" },
         "arguments": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["patch"],
-          "properties": {
-            "patch": {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 50000,
-              "pattern": "^--- ",
-              "description": "UTF-8 unified diff with raw POSIX paths in ---/+++ headers; every target is revalidated against requestedPaths."
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["patch"],
+              "properties": {
+                "patch": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 50000,
+                  "pattern": "^--- ",
+                  "description": "UTF-8 unified diff with raw POSIX paths in ---/+++ headers; every target is revalidated against requestedPaths."
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["path", "oldText", "newText"],
+              "properties": {
+                "path": { "$ref": "#/$defs/RelativePath" },
+                "oldText": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000,
+                  "description": "The exact current text to replace. Refused unless it occurs exactly once in the file."
+                },
+                "newText": {
+                  "type": "string",
+                  "maxLength": 8000,
+                  "description": "The text that takes its place. Empty deletes oldText."
+                }
+              }
             }
-          }
+          ]
         }
       }
     },

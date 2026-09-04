@@ -294,9 +294,27 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         }
         AssistantMessage output = response.getResult().getOutput();
-        String content = output.getText() == null ? "" : output.getText();
+        // An answer can arrive split across several generations - a text block, then the
+        // tool_use block. Reading only the first one reported stop_reason 'tool_use' with zero
+        // tool calls, and the turn was refused as incomplete, so every generation is merged
+        // before the answer is judged.
+        StringBuilder mergedContent = new StringBuilder();
+        List<AssistantMessage.ToolCall> mergedNativeCalls = new ArrayList<>();
+        for (org.springframework.ai.chat.model.Generation generation : response.getResults()) {
+            if (generation == null || generation.getOutput() == null) {
+                continue;
+            }
+            AssistantMessage part = generation.getOutput();
+            if (part.getText() != null) {
+                mergedContent.append(part.getText());
+            }
+            if (part.getToolCalls() != null) {
+                mergedNativeCalls.addAll(part.getToolCalls());
+            }
+        }
+        String content = mergedContent.toString();
         List<ProviderChatMessage.ToolCall> toolCalls = nativeToolCalls(
-                request, content, output.getToolCalls());
+                request, content, mergedNativeCalls);
         storeThoughtSignatures(request, output, toolCalls);
         String compatibleContent = request.legacyToolEnvelope()
                 ? legacyEnvelope(content, toolCalls) : content;

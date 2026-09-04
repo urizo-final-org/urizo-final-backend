@@ -58,6 +58,27 @@ public class GuardrailPathSelectionService {
         return new GuardrailSelectionContract.SelectionList(repository, stored);
     }
 
+    /**
+     * Whether the administrator has chosen folders but none of them in this repository.
+     *
+     * <p>Not the same as an unconfigured fence. With nothing chosen anywhere the pipeline
+     * treats the system as open and the path check does not run at all - refusing then would
+     * stop ordinary work the moment nobody had filled the screen in. With folders chosen
+     * elsewhere, every change in this repository lands outside the fence, so the only thing a
+     * request here can do is spend a whole pipeline discovering that.
+     */
+    public boolean closedTo(String repository) {
+        requireKnownRepository(repository);
+        List<Boolean> rows = jdbc.query(
+                "SELECT EXISTS (SELECT 1 FROM app.guardrail_path_selection WHERE enabled) "
+                        + "AS chosen_anywhere, "
+                        + "EXISTS (SELECT 1 FROM app.guardrail_path_selection "
+                        + "WHERE enabled AND repository = ?) AS chosen_here",
+                (row, index) -> row.getBoolean("chosen_anywhere") && !row.getBoolean("chosen_here"),
+                repository);
+        return !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0));
+    }
+
     public GuardrailSelectionContract.SelectionList save(
             GuardrailSelectionContract.SaveRequest request) {
         String repository = request.repository();
@@ -99,6 +120,36 @@ public class GuardrailPathSelectionService {
         Objects.requireNonNull(jobId, "jobId is required");
         List<String> stored = jdbc.queryForList(
                 "SELECT jsonb_array_elements_text(snapshot_json -> 'allowedPaths') "
+                        + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
+                String.class, jobId);
+        return List.copyOf(stored);
+    }
+
+    /**
+     * The labels of both sides of the job's fence, in the administrator's words.
+     *
+     * <p>Both lists are empty when the snapshot predates the labels, which the caller must not
+     * read as "everything is refused".
+     */
+    public record JobAreas(List<String> allowed, List<String> denied) { }
+
+    public JobAreas jobAreas(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        return new JobAreas(areaLabels(jobId, "allowedAreas"), areaLabels(jobId, "deniedAreas"));
+    }
+
+    /**
+     * The files inside the job's fence, as the scan saw them when the job was created. Empty
+     * for a job created before the list existed, or when the runner could not produce one.
+     */
+    public List<String> jobFiles(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        return areaLabels(jobId, "files");
+    }
+
+    private List<String> areaLabels(UUID jobId, String field) {
+        List<String> stored = jdbc.queryForList(
+                "SELECT jsonb_array_elements_text(snapshot_json -> '" + field + "') "
                         + "FROM app.guardrail_job_snapshot WHERE job_id = ?",
                 String.class, jobId);
         return List.copyOf(stored);

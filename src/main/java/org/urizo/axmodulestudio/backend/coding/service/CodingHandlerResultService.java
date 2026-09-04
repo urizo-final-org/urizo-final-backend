@@ -711,6 +711,25 @@ public final class CodingHandlerResultService {
                 recordedAt);
     }
 
+    /**
+     * The repository this Job works in.
+     *
+     * <p>The stage that queues the build has to name a repository, and a Job's own row is the
+     * only place that answer is recorded. Read here rather than carried through the aggregate
+     * response: the worker contract is shared with the Python runtime, and a field only the
+     * build stage reads does not belong in it.
+     */
+    public String jobRepository(UUID jobId) {
+        List<UUID> identifiers = jdbc.query(
+                "SELECT repository_id FROM app.coding_job WHERE job_id = ?",
+                (rs, row) -> rs.getObject("repository_id", UUID.class), jobId);
+        if (identifiers.size() != 1) {
+            throw new CodingWorkerException(
+                    "JOB_NOT_FOUND", "Authoritative Coding Job not found.", HttpStatus.NOT_FOUND);
+        }
+        return CodingRepositories.nameOf(identifiers.get(0));
+    }
+
     private JobAuthority requireJob(UUID jobId) {
         List<JobAuthority> jobs = jdbc.query("""
                 SELECT trace_id, status, state_version

@@ -105,8 +105,12 @@ class ProviderChatGatewayTest {
                 .isInstanceOfSatisfying(ProviderGatewayException.class, failure -> {
                     assertThat(failure.code()).isEqualTo(
                             ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
-                    assertThat(failure.getMessage()).isEqualTo(
-                            "Model provider returned an incomplete response.");
+                    // The ending itself, not only that there was one. Every non-"stop"
+                    // ending shares this code, and the stored turn keeps the code alone,
+                    // so the message is the only place the difference survives.
+                    assertThat(failure.getMessage())
+                            .startsWith("Model provider returned an incomplete response:")
+                            .contains("LENGTH_LIMIT");
                 });
         verify(adapter).chat(registration, request);
     }

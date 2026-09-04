@@ -30,6 +30,9 @@ public class CodingRunnerService {
 
     private static final Duration DEFAULT_LEASE = Duration.ofMinutes(2);
 
+    /** Silence longer than this is judged as the runner being off (guide: two minutes). */
+    private static final Duration LIVENESS_THRESHOLD = Duration.ofMinutes(2);
+
     private static final Map<String, Duration> LEASE_BY_KIND = Map.of(
             "CREATE_WORKTREE", Duration.ofMinutes(2),
             "PREPARE_SCAN_WORKTREE", Duration.ofMinutes(2),
@@ -45,6 +48,16 @@ public class CodingRunnerService {
     private final TransactionTemplate transactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+
+    /**
+     * When the runner last authenticated on one of its own endpoints. Kept in memory, not in
+     * the database: the runner polls claim every couple of seconds, and the point is only
+     * "is it there right now", which does not survive a server restart anyway. The runner
+     * shares its stored credential with the Python worker, so the credential's own
+     * last_used_at cannot answer this — these endpoints are the only runner-exclusive trace.
+     */
+    private final java.util.concurrent.atomic.AtomicReference<Instant> lastSeenAt =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     CodingRunnerService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
@@ -263,11 +276,24 @@ public class CodingRunnerService {
         return rows.get(0);
     }
 
+    /** The screen's answer to "is the runner on": last contact, and the verdict on it. */
+    public record Liveness(Instant lastSeenAt, boolean alive) { }
+
+    public Liveness liveness() {
+        Instant seen = lastSeenAt.get();
+        boolean alive = seen != null
+                && !Instant.now(clock).isAfter(seen.plus(LIVENESS_THRESHOLD));
+        return new Liveness(seen, alive);
+    }
+
     private <T> T authenticated(String authorization, java.util.function.Supplier<T> action) {
         byte[] credentialDigest = credentialDigest(authorization);
         try {
             return transactions.execute(status -> {
                 authenticate(credentialDigest);
+                // An authenticated call on a runner endpoint is proof of life even when the
+                // queue is empty and the action itself returns nothing.
+                lastSeenAt.set(Instant.now(clock));
                 return action.get();
             });
         }

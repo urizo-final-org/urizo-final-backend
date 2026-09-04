@@ -217,6 +217,42 @@ class CodingHandlerStageServiceTest {
                 .contains("read_diff must establish the current diff digest first.");
     }
 
+    /**
+     * Job cb3cd98b applied a working patch and then kept editing - thirteen apply_patch calls,
+     * one of which reverted its own work - and burned the whole turn budget without ever
+     * reaching the checks. Nothing told it the edit had landed or what came next. The same
+     * request had finished in two patches the day before, so the nudge names the next step
+     * rather than forbidding a second patch a two-part change still needs.
+     */
+    @Test
+    void aSucceededPatchIsToldTheEditLandedAndWhatComesNext() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submitForNode(
+                eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("apply_patch", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                        "{\"patch\":\"diff\"}"),
+                toolCallReply("read_diff", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "{}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(1).prompt())
+                .contains("apply_patch succeeded")
+                .contains("run_check")
+                .contains("do not re-edit work that is already correct");
+        // One patch landed, so the nudge is said once. read_diff is not an edit and adds none.
+        assertThat(routed.getAllValues().get(2).prompt().split("apply_patch succeeded", -1))
+                .hasSize(2);
+    }
+
     /*
      * A model may hand back several tool calls in one answer; the loop executes the first
      * alone. Replaying the whole batch left the next turn declaring calls that had no result,

@@ -355,6 +355,22 @@ public final class CodingHandlerStageService {
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
                 latestDiff = decoded;
             }
+            if ("apply_patch".equals(call.name())) {
+                // Measured on Job cb3cd98b: the model applied a working patch, then kept
+                // editing - thirteen apply_patch calls, one of which reverted its own work -
+                // and spent the whole turn budget without ever reaching the checks. Nothing
+                // told it the edit had landed and what came next, so it kept polishing. The
+                // same run a day earlier finished in two patches: this is model variance,
+                // not a broken pipeline, which is why the nudge states the next step
+                // instead of forbidding a second patch that a two-part change still needs.
+                messages.add(userMessage(
+                        "apply_patch succeeded and the change is now in the workspace. If the "
+                        + "requested change is complete, stop editing and verify it: call "
+                        + "run_check, then check_package_allowlist and scan_changed_files, and "
+                        + "finish with the stage result. Call apply_patch again only for a part "
+                        + "of the request that is still missing - do not re-edit work that is "
+                        + "already correct."));
+            }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,

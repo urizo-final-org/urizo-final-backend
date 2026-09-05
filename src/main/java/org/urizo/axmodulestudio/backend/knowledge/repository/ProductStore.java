@@ -206,8 +206,11 @@ public class ProductStore {
     }
 
     public ProductApiContract.RagQueryResponse query(
-            UUID chatbotId, UUID traceId, ProductApiContract.RagQueryRequest request) {
-        return rag.query(chatbotId, traceId, request);
+            UUID chatbotId,
+            UUID traceId,
+            ProductApiContract.RagQueryRequest request,
+            List<String> category) {
+        return rag.query(chatbotId, traceId, request, category);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID jobId, UUID traceId) {

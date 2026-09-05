@@ -110,6 +110,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/health", "/api/readiness",
                                 "/api/auth/login", "/api/auth/refresh").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/site/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/public/**").permitAll()
                         .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()
                         .requestMatchers("/api/admin/cms/**").hasRole("SUPER_ADMIN")
                         .requestMatchers("/api/cms/**")

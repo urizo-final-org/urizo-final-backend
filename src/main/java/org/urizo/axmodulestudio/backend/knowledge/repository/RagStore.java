@@ -8,6 +8,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -96,7 +97,10 @@ public class RagStore {
     }
 
     public ProductApiContract.RagQueryResponse query(
-            UUID chatbotId, UUID traceId, ProductApiContract.RagQueryRequest request) {
+            UUID chatbotId,
+            UUID traceId,
+            ProductApiContract.RagQueryRequest request,
+            List<String> category) {
         ActiveKnowledge active = one(jdbc.query(
                 "SELECT kb.active_version_id FROM app.chatbot_config cb "
                         + "JOIN app.knowledge_base kb ON kb.knowledge_base_id = cb.knowledge_base_id "
@@ -112,17 +116,28 @@ public class RagStore {
         int topK = request.topK() == null ? 10 : request.topK();
         // 질의 임베딩은 HTTP 호출이므로 한 번만 계산해 정렬과 점수 계산에 함께 쓴다.
         String queryVector = embeddings.queryVector(request.query());
+        // 탭 필터(F6)는 WHERE에 건다. ORDER BY·LIMIT보다 먼저 평가되므로 "필터 후 상위 K건"이
+        // 성립한다. 조회 뒤 자바에서 거르면 K건이 탭 밖 문서로 채워져 결과가 비게 된다.
+        List<String> prefixes = categoryPrefixes(category);
+        List<Object> arguments = new ArrayList<>();
+        arguments.add(queryVector);
+        arguments.add(active.versionId());
+        prefixes.forEach(prefix -> arguments.add(prefix + "%"));
+        arguments.add(queryVector);
+        arguments.add(topK);
         List<GroundingRow> rows = jdbc.query(
                 "SELECT sd.external_document_id, sd.title, sd.source_url, dc.content, "
-                        + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score "
+                        + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score, "
+                        + "sd.category "
                         + "FROM app.document_chunk dc JOIN app.source_document sd "
                         + "ON sd.source_document_id = dc.source_document_id "
-                        + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL "
-                        + "ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
+                        + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL"
+                        + categoryCondition(prefixes)
+                        + " ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
                 (rs, row) -> new GroundingRow(
                         rs.getString(1), rs.getString(2), URI.create(rs.getString(3)),
-                        rs.getString(4), rs.getDouble(5)),
-                queryVector, active.versionId(), queryVector, topK);
+                        rs.getString(4), rs.getDouble(5), rs.getString(6)),
+                arguments.toArray());
         List<GroundingRow> grounded = rows.stream()
                 .filter(row -> DeterministicConnectorFixture.hasGroundingOverlap(
                         request.query(), row.content()))
@@ -150,7 +165,7 @@ public class RagStore {
         List<ProductApiContract.Citation> citations = displayed.stream()
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
-                        excerpt(row.content()), row.score()))
+                        excerpt(row.content()), row.score(), categoryLabel(row.category())))
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
@@ -257,10 +272,47 @@ public class RagStore {
         return ProductApiContract.SCHEMA_VERSION;
     }
 
+    /**
+     * 탭 필터 값 정리. category_id 접두만 받는다(contenttypeid 사용 금지 — 함정 23).
+     * null·빈 목록은 "전체" 탭이고 필터를 걸지 않는다.
+     */
+    static List<String> categoryPrefixes(List<String> category) {
+        if (category == null) {
+            return List.of();
+        }
+        return category.stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(String::trim)
+                .toList();
+    }
+
+    /** 접두 하나당 LIKE 하나. 값은 전부 바인딩 파라미터로 나가고 SQL에 끼워 넣지 않는다. */
+    static String categoryCondition(List<String> prefixes) {
+        if (prefixes.isEmpty()) {
+            return "";
+        }
+        return " AND (" + String.join(
+                " OR ", Collections.nCopies(prefixes.size(), "sd.category LIKE ?")) + ")";
+    }
+
+    /**
+     * source_document.category는 로더가 {@code "category_id,category_label"}로 결합해
+     * 저장한다(TourismSampleDocumentLoader). 공개 응답에는 라벨만 싣는다.
+     * 콤마가 없는 값(fixture의 policy·safety·tourism)은 그대로 둔다.
+     */
+    static String categoryLabel(String category) {
+        if (category == null) {
+            return null;
+        }
+        int separator = category.indexOf(',');
+        return separator < 0 ? category : category.substring(separator + 1);
+    }
+
     private record ActiveKnowledge(UUID versionId) {
     }
 
     private record GroundingRow(
-            String documentId, String title, URI sourceUrl, String content, double score) {
+            String documentId, String title, URI sourceUrl, String content, double score,
+            String category) {
     }
 }

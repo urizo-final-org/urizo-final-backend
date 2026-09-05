@@ -5,12 +5,19 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.opentelemetry.api.OpenTelemetry;
 import io.opentelemetry.api.common.AttributeKey;
 import io.opentelemetry.api.common.Attributes;
@@ -35,6 +42,15 @@ import org.springframework.ai.chat.prompt.DefaultChatOptions;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.mock.web.MockHttpServletResponse;
+import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
+import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelCapability;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityPolicy;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 
 class LangfuseModelObservationHandlerTest {
 
@@ -46,6 +62,8 @@ class LangfuseModelObservationHandlerTest {
             UUID.fromString("99999999-9999-4999-8999-999999999999");
     private static final String OTEL_TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
     private static final String PARENT_SPAN_ID = "00f067aa0ba902b7";
+    private static final String LLM_OPS_STAGE_NODE_ID = "llm_ops_stage_node";
+    private static final Instant NOW = Instant.parse("2026-09-06T00:00:00Z");
 
     @Test
     void successfulProviderObservationContinuesTraceparentWithOnlyAllowlistedData()
@@ -65,8 +83,11 @@ class LangfuseModelObservationHandlerTest {
                     "00-" + OTEL_TRACE_ID + "-" + PARENT_SPAN_ID + "-01");
 
             filter.doFilter(request, new MockHttpServletResponse(), (ignoredRequest, ignoredResponse) -> {
-                try (ModelObservationScope ignored = ModelObservationScope.open(
-                        JOB_ID, BUSINESS_TRACE_ID, PROFILE_VERSION_ID, "coding_code")) {
+                try (ModelObservationScope stageScope = ModelObservationScope.open(
+                        JOB_ID, BUSINESS_TRACE_ID, PROFILE_VERSION_ID,
+                        LLM_OPS_STAGE_NODE_ID);
+                        ModelObservationScope modelTurnScope = ModelObservationScope.open(
+                                JOB_ID, BUSINESS_TRACE_ID, null, null)) {
                     ChatModelObservationContext context = context("gpt-test");
                     context.setResponse(new ChatResponse(
                             List.of(new Generation(new AssistantMessage("secret completion"))),
@@ -97,7 +118,8 @@ class LangfuseModelObservationHandlerTest {
                 assertThat(string(span, "langfuse.observation.metadata.profileVersionId"))
                         .isEqualTo(PROFILE_VERSION_ID.toString());
                 assertThat(string(span, "langfuse.observation.metadata.nodeId"))
-                        .isEqualTo("coding_code");
+                        .isEqualTo(LLM_OPS_STAGE_NODE_ID)
+                        .isNotEqualTo("coding_code");
                 assertThat(number(span, "gen_ai.usage.input_tokens")).isEqualTo(12L);
                 assertThat(number(span, "gen_ai.usage.output_tokens")).isEqualTo(4L);
                 assertThat(span.getAttributes().asMap().keySet())
@@ -120,6 +142,73 @@ class LangfuseModelObservationHandlerTest {
                         "secret completion", "secret prompt", "stackTrace");
             });
         }
+    }
+
+    @Test
+    void modelTurnEntrypointsPreserveOuterStageIdentityInExportedSpans() {
+        String naturalCmsStageNodeId = "natural_cms_stage_node";
+        CollectingExporter exporter = new CollectingExporter(false);
+        try (SdkTracerProvider provider = provider(exporter)) {
+            LangfuseModelObservationHandler handler = new LangfuseModelObservationHandler(
+                    provider.get("test"));
+            ProviderModelRegistration model = new ProviderModelRegistration(
+                    ModelProvider.OPENAI,
+                    "gpt-test",
+                    Set.of(ModelCapability.CHAT),
+                    Duration.ofSeconds(30),
+                    1);
+            ProviderCapabilityRegistry registry = new ProviderCapabilityRegistry(
+                    ProviderLane.PRODUCT,
+                    ProviderCapabilityPolicy.stage2Baseline(),
+                    List.of(model));
+            CodingModelTurnService service = new CodingModelTurnService(
+                    registry,
+                    ignored -> {
+                        ChatModelObservationContext context = context("gpt-test");
+                        handler.onStart(context);
+                        handler.onStop(context);
+                        return new ProviderChatResponse(
+                                ModelProvider.OPENAI,
+                                "gpt-test",
+                                "hidden response",
+                                1,
+                                1,
+                                Duration.ZERO);
+                    },
+                    new ObjectMapper(),
+                    Clock.fixed(NOW, ZoneOffset.UTC),
+                    false);
+
+            try (ModelObservationScope stageScope = ModelObservationScope.open(
+                    JOB_ID, BUSINESS_TRACE_ID, PROFILE_VERSION_ID,
+                    LLM_OPS_STAGE_NODE_ID)) {
+                service.execute(modelTurnRequest("coding_code"), List.of(model));
+                assertThat(ModelObservationScope.current().nodeId())
+                        .isEqualTo(LLM_OPS_STAGE_NODE_ID);
+            }
+            try (ModelObservationScope stageScope = ModelObservationScope.open(
+                    JOB_ID, BUSINESS_TRACE_ID, PROFILE_VERSION_ID,
+                    naturalCmsStageNodeId)) {
+                service.executeNaturalCms(
+                        modelTurnRequest("natural_cms_handler"), List.of(model));
+                assertThat(ModelObservationScope.current().nodeId())
+                        .isEqualTo(naturalCmsStageNodeId);
+            }
+
+            assertThat(exporter.spans).hasSize(2);
+            assertThat(exporter.spans)
+                    .extracting(span -> string(
+                            span, "langfuse.observation.metadata.profileVersionId"))
+                    .containsExactly(
+                            PROFILE_VERSION_ID.toString(), PROFILE_VERSION_ID.toString());
+            assertThat(exporter.spans)
+                    .extracting(span -> string(
+                            span, "langfuse.observation.metadata.nodeId"))
+                    .containsExactly(LLM_OPS_STAGE_NODE_ID, naturalCmsStageNodeId)
+                    .doesNotContain("coding_code", "natural_cms_handler");
+        }
+
+        assertThat(ModelObservationScope.current()).isNull();
     }
 
     @Test
@@ -245,6 +334,31 @@ class LangfuseModelObservationHandlerTest {
                 .prompt(new Prompt("secret prompt", options))
                 .provider(provider)
                 .build();
+    }
+
+    private static CodingModelTurnContract.Request modelTurnRequest(String nodeName) {
+        JsonNode system = JsonNodeFactory.instance.objectNode()
+                .put("role", "system")
+                .put("content", "Stay in scope.");
+        JsonNode user = JsonNodeFactory.instance.objectNode()
+                .put("role", "user")
+                .put("content", "Summarize the approved contract.");
+        return new CodingModelTurnContract.Request(
+                "1.0",
+                UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                JOB_ID,
+                BUSINESS_TRACE_ID,
+                "observability.model.turn.0001",
+                1,
+                4,
+                nodeName,
+                "observability-test-v1",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                List.of("CHAT"),
+                List.of(system, user),
+                List.of(),
+                JsonNodeFactory.instance.objectNode().put("type", "TEXT"),
+                NOW.plusSeconds(60));
     }
 
     private static String string(SpanData span, String key) {

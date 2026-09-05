@@ -75,24 +75,24 @@ public class CodingModelTurnService {
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
-        return execute(request, false, null, null, request.nodeName());
+        return execute(request, false, null, null, null);
     }
 
     public CodingModelTurnContract.Response execute(
             CodingModelTurnContract.Request request,
             List<ProviderModelRegistration> boundModels) {
-        return execute(request, false, List.copyOf(boundModels), null, request.nodeName());
+        return execute(request, false, List.copyOf(boundModels), null, null);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request) {
-        return execute(request, true, null, null, request.nodeName());
+        return execute(request, true, null, null, null);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request,
             List<ProviderModelRegistration> boundModels) {
-        return execute(request, true, List.copyOf(boundModels), null, request.nodeName());
+        return execute(request, true, List.copyOf(boundModels), null, null);
     }
 
     private CodingModelTurnContract.Response execute(
@@ -109,6 +109,7 @@ public class CodingModelTurnService {
             case NONE, LOCAL_FIXTURE -> ModelUseCase.CHAT;
         };
         List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
+        // The outer Stage scope owns profile/node identity; nodeName is only a handler label.
         try (ModelObservationScope ignored = ModelObservationScope.open(
                 request.jobId(), request.traceId(), profileVersionId, nodeId)) {
             ProviderGatewayException lastFailure = null;

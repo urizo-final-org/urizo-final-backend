@@ -184,7 +184,20 @@ public final class ProductService implements
         return store.idempotent("QUERY_CHATBOT", key,
                 new ScopedRequest(chatbotId, request), 200,
                 ProductApiContract.RagQueryResponse.class,
-                () -> store.query(chatbotId, traceId, request));
+                () -> store.query(chatbotId, traceId, request, null));
+    }
+
+    /**
+     * 공개 경로는 읽기 전용 조회라 멱등 보장이 필요 없다. 관리자 경로처럼
+     * {@code store.idempotent}로 감싸면 (a) 익명 브라우저에 Idempotency-Key 헤더를
+     * 요구해야 하고 (b) 공개 호출마다 product_idempotency_command 행이 무한히 쌓인다.
+     */
+    public ProductApiContract.RagQueryResponse publicQuery(
+            UUID chatbotId,
+            UUID traceId,
+            ProductApiContract.RagQueryRequest request,
+            List<String> category) {
+        return store.query(chatbotId, traceId, request, category);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

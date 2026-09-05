@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.knowledge.dto;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -24,10 +25,16 @@ public final class PublicChatContract {
     /**
      * schemaVersion과 topK를 받지 않는다. 공개 호출자가 검색 폭을 늘려 DB 작업량을
      * 키울 수 없고, 브라우저 클라이언트에 계약 버전을 요구하지도 않는다.
+     *
+     * <p>category는 포털 탭 필터(F6)다. category_id 접두 목록을 받는다 — 확정된 탭 8종 중
+     * 둘(체험·레저 = LS + EX, 관광지 잔여 = NA + HS + VE)이 접두 여러 개라 단일 값으로는
+     * 표현되지 않는다. 생략·null·빈 목록은 "전체" 탭이며 필터를 걸지 않는다.
+     * contenttypeid는 받지 않는다(함정 23).
      */
     public record PublicChatQueryRequest(
             @NotBlank @Size(max = 4000) String query,
-            UUID conversationId) {
+            UUID conversationId,
+            @Size(max = 8) List<@Size(max = 40) String> category) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -46,10 +53,19 @@ public final class PublicChatContract {
     }
 
     /**
-     * sourceUrl은 담지 않는다. 현재 값은 원본 홈페이지 URL이 아니라 해석되지 않는
-     * 합성 URL이라(예: {@code https://fixture.invalid/documents/...}) 공개 화면에서
-     * 죽은 링크가 된다. 원본 URL은 본문에 남아 excerpt로 전달된다.
+     * F10(2026-09-04 승인) 범위 — sourceUrl과 categoryLabel만 통과시킨다.
+     * queryId · knowledgeVersionId · documentId · score는 계속 차단한다
+     * (score 차단은 F2 미표시 확정과 정합).
+     *
+     * <p>categoryLabel은 {@code source_document.category}의 라벨 부분이다. 저장 형식이
+     * {@code "category_id,category_label"}이라 첫 콤마 기준으로 나눈다. 접두 ID는 싣지
+     * 않는다 — 탭이 이미 그 값으로 필터를 걸고 있다.
+     *
+     * <p>sourceUrl은 스킴이 https이나 현재 코퍼스 값은 로더가 만든 합성 주소
+     * ({@code https://api-test.local/documents/{id}})라 브라우저에서 열리지 않는다.
+     * 실제 원문 주소를 채우는 것은 수집 단계의 일이며 이 계약의 범위가 아니다.
      */
-    public record PublicCitation(String title, String excerpt) {
+    public record PublicCitation(
+            String title, String excerpt, URI sourceUrl, String categoryLabel) {
     }
 }

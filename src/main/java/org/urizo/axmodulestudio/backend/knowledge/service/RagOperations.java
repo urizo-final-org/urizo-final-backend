@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.knowledge.service;
 
+import java.util.List;
 import java.util.UUID;
 
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
@@ -26,5 +27,6 @@ public interface RagOperations {
     ProductApiContract.RagQueryResponse publicQuery(
             UUID chatbotId,
             UUID traceId,
-            ProductApiContract.RagQueryRequest request);
+            ProductApiContract.RagQueryRequest request,
+            List<String> category);
 }

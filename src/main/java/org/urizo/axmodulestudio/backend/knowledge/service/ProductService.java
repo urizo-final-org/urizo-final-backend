@@ -184,7 +184,7 @@ public final class ProductService implements
         return store.idempotent("QUERY_CHATBOT", key,
                 new ScopedRequest(chatbotId, request), 200,
                 ProductApiContract.RagQueryResponse.class,
-                () -> store.query(chatbotId, traceId, request));
+                () -> store.query(chatbotId, traceId, request, null));
     }
 
     /**
@@ -195,8 +195,9 @@ public final class ProductService implements
     public ProductApiContract.RagQueryResponse publicQuery(
             UUID chatbotId,
             UUID traceId,
-            ProductApiContract.RagQueryRequest request) {
-        return store.query(chatbotId, traceId, request);
+            ProductApiContract.RagQueryRequest request,
+            List<String> category) {
+        return store.query(chatbotId, traceId, request, category);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

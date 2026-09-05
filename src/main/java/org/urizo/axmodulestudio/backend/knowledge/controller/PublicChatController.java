@@ -70,10 +70,11 @@ public class PublicChatController {
                         ProductApiContract.SCHEMA_VERSION,
                         body.query(),
                         body.conversationId(),
-                        null)));
+                        null),
+                body.category()));
     }
 
-    /** 관리자 전용 값(queryId, knowledgeVersionId, documentId, sourceUrl, score)을 떨어뜨린다. */
+    /** 관리자 전용 값(queryId, knowledgeVersionId, documentId, score)을 떨어뜨린다. */
     static PublicChatContract.PublicChatResponse toPublic(
             ProductApiContract.RagQueryResponse answer) {
         return new PublicChatContract.PublicChatResponse(
@@ -84,7 +85,8 @@ public class PublicChatController {
                 answer.answer(),
                 answer.citations().stream()
                         .map(citation -> new PublicChatContract.PublicCitation(
-                                citation.title(), citation.excerpt()))
+                                citation.title(), citation.excerpt(),
+                                citation.sourceUrl(), citation.categoryLabel()))
                         .toList(),
                 answer.generatedAt());
     }

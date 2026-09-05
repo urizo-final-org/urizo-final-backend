@@ -26,6 +26,11 @@ services:
     image: axms/preview-backend:latest
 
   mcp-server:
+    # Repeated from compose.dev.yaml on purpose. An override that names a service
+    # without profiles makes it unconditional, so the preview started raising an MCP
+    # server under spring-core and failed on an image nothing builds. Master's rule is
+    # that spring-core does not require the MCP Server, and this keeps it that way.
+    profiles: ["coding-agent", "full"]
     image: axms/preview-mcp-server:latest
     build:
       context: ${AXMS_PREVIEW_MCP_SOURCE:-../urizo-final-mcp-server}

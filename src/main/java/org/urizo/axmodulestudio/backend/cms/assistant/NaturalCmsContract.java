@@ -19,14 +19,18 @@ public final class NaturalCmsContract {
             "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$");
     private static final Pattern HANDLER_KEY = Pattern.compile(
             "^cms\\.(analyze|preview|discard|apply)$");
+    private static final Pattern NODE_ID = Pattern.compile("^[a-z][a-z0-9_-]{0,63}$");
     private static final Pattern SHA256 = Pattern.compile("^sha256:[0-9a-f]{64}$");
     private static final Set<String> DECISIONS = Set.of("APPROVED", "REJECTED");
+    /** 화면 단위 Resource. 게시물은 별도 Resource가 아니라 {@code BOARD}에 포함한다. */
+    private static final Set<String> RESOURCE_TYPES =
+            Set.of("MENU", "BOARD", "CONTENT", "TEMPLATE");
 
     private NaturalCmsContract() { }
 
     public record ResourceRef(@NotBlank String type, @NotBlank String id) {
         public ResourceRef {
-            if (!"CONTENT".equals(type)
+            if (!RESOURCE_TYPES.contains(type)
                     || id == null
                     || RESOURCE_ID.matcher(id).matches() == false) {
                 throw new IllegalArgumentException("Natural CMS resource is invalid.");
@@ -69,16 +73,32 @@ public final class NaturalCmsContract {
             @NotNull UUID profileVersionId,
             int expectedStateVersion,
             int executionAttempt,
+            @NotBlank String nodeId,
             @NotBlank String handlerKey,
             @NotNull UUID resultId) {
         public StageExecutionRequest {
             requireVersion(schemaVersion);
             if (expectedStateVersion < 1
                     || executionAttempt < 1
+                    || nodeId == null
+                    || NODE_ID.matcher(nodeId).matches() == false
                     || handlerKey == null
                     || HANDLER_KEY.matcher(handlerKey).matches() == false) {
                 throw new IllegalArgumentException("Natural CMS stage request is invalid.");
             }
+        }
+
+        public StageExecutionRequest(
+                String schemaVersion,
+                UUID traceId,
+                UUID profileVersionId,
+                int expectedStateVersion,
+                int executionAttempt,
+                String handlerKey,
+                UUID resultId) {
+            this(schemaVersion, traceId, profileVersionId, expectedStateVersion,
+                    executionAttempt, NaturalCmsContract.nodeId(handlerKey),
+                    handlerKey, resultId);
         }
     }
 
@@ -182,6 +202,11 @@ public final class NaturalCmsContract {
         if (!SCHEMA_VERSION.equals(version)) {
             throw new IllegalArgumentException("Unsupported Natural CMS schemaVersion.");
         }
+    }
+
+    private static String nodeId(String handlerKey) {
+        return handlerKey != null && handlerKey.startsWith("cms.")
+                ? handlerKey.substring("cms.".length()) : null;
     }
 
     private static void requireDigest(String value, String field) {

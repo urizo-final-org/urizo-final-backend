@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -22,18 +23,75 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingToolContract;
+import org.urizo.axmodulestudio.backend.coding.dto.GuardrailRuleContract;
 import org.urizo.axmodulestudio.backend.coding.repository.CodingModelTurnGuard;
+import org.urizo.axmodulestudio.backend.coding.integration.DeploymentAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingHandlerStageService {
 
-    private static final int MAX_MODEL_TURNS = 8;
+    /**
+     * A complete code exchange already spends about seven turns - read_diff, read_file,
+     * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
+     * bound of eight left no room for a single re-asked miss. Twelve then proved too
+     * tight for a request that has to find its files first. Measured runs: a trivial
+     * one-line edit closed its code stage in six turns, of which the patch-verify-reply
+     * tail is three; the first real multi-file request died at eleven productive turns
+     * with its files found but nothing patched, so its measured floor was fourteen.
+     * Sixteen was that floor plus two spare turns for one rejected patch - not a proven
+     * ceiling, only a bound the recorded runs fit under.
+     *
+     * <p>2026-09-03: sixteen stopped fitting. The first screen requests to reach a real
+     * page file - src/features/site/PublicSite.tsx, 21 KB holding every public page -
+     * died three times in a row, each at turn seventeen. The third had already finished
+     * the work: twelve tool calls ending in apply_patch, two run_check, scan_changed_files
+     * and check_package_allowlist, with only the terminal reply left to write. A bound
+     * that stops a run after it has patched and passed its own checks throws the work
+     * away for nothing. Twenty-four is that measured run plus room for one rejected patch
+     * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
+     */
+    private static final int MAX_MODEL_TURNS = 24;
+    /**
+     * The digest of an empty diff - SHA-256 over zero bytes. Every apply_patch of Job
+     * 7e600583 was refused, yet read_diff, the package check and the guardrail scan all
+     * reported success because each of them examined that empty diff, and the Job reached
+     * approval carrying no change at all. A stage that changed nothing is not a stage that
+     * succeeded, so the Coding stage refuses to report one.
+     */
+    private static final String EMPTY_DIFF_DIGEST =
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    /** Tool refusals the model itself caused and can correct when told why. */
+    private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
+            "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
+            "TOOL_ARGUMENTS_INVALID");
+    /**
+     * The workspace applies a patch with git apply --check --whitespace=error-all, so a
+     * hunk is refused unless its context matches the file exactly. A model that guessed
+     * the context needs to be pointed at the real bytes, not just told to try again.
+     */
+    private static final String APPLY_PATCH_RETRY_HINT =
+            " If a diff you wrote did not apply, do not rewrite it. Call read_file on the "
+            + "target file and send path, oldText and newText instead: copy the exact text "
+            + "to replace out of what read_file returned as oldText, and the server builds "
+            + "the diff. Retyping a long line is what fails.";
     private static final Set<String> CODE_TOOLS = Set.copyOf(
             CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+    /**
+     * The files that declare a dependency. Lock files are included: a library arrives through
+     * one just as surely as through the manifest that names it.
+     */
+    private static final Set<String> DEPENDENCY_MANIFESTS = Set.of(
+            "pom.xml", "package.json", "package-lock.json",
+            "pnpm-lock.yaml", "yarn.lock");
+
     private static final Set<String> REVIEW_TOOLS = Set.of(
             "read_file", "search_code", "read_diff", "run_check",
             "check_package_allowlist", "scan_changed_files");
@@ -42,9 +100,14 @@ public final class CodingHandlerStageService {
     private final CodingToolService tools;
     private final CodingModelTurnGuard modelGuard;
     private final CodingModelTurnService models;
+    private final ProfileModelBindingService profileModelBindings;
+    private final GuardrailPathSelectionService guardrailSelections;
+    private final GuardrailRuleService guardrailRules;
     private static final StructuredOutputGuard STRUCTURED_OUTPUT_GUARD =
             new StructuredOutputGuard();
 
+    private final CodingRunnerService runner;
+    private final DeploymentAdapter deploymentAdapter;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -53,12 +116,26 @@ public final class CodingHandlerStageService {
             CodingToolService tools,
             CodingModelTurnGuard modelGuard,
             CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
+        this.runner = Objects.requireNonNull(runner, "runner is required");
+        this.deploymentAdapter = Objects.requireNonNull(
+                deploymentAdapter, "deploymentAdapter is required");
         this.results = Objects.requireNonNull(results, "results are required");
         this.tools = Objects.requireNonNull(tools, "tools are required");
         this.modelGuard = Objects.requireNonNull(modelGuard, "modelGuard is required");
         this.models = Objects.requireNonNull(models, "models are required");
+        this.profileModelBindings = Objects.requireNonNull(
+                profileModelBindings, "profileModelBindings are required");
+        this.guardrailSelections = Objects.requireNonNull(
+                guardrailSelections, "guardrailSelections are required");
+        this.guardrailRules = Objects.requireNonNull(
+                guardrailRules, "guardrailRules are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -94,18 +171,22 @@ public final class CodingHandlerStageService {
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.code" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), CODE_TOOLS),
+                    modelTools(authority, request.nodeId(), CODE_TOOLS),
                     Set.of("completed"));
             case "coding.review" -> modelToolStage(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    allowedTools(authority.profileAllowedTools(), REVIEW_TOOLS),
+                    modelTools(authority, request.nodeId(), REVIEW_TOOLS),
                     Set.of("passed", "changes_requested"));
             case "coding.preview" -> preview(
                     authorization, jobId, resultId, request, authority, aggregate);
             case "coding.pr_request" -> sideEffect(
                     resultId, request, aggregate, "requested", "PR_REQUEST_RECORDED");
-            case "coding.deploy_request" -> sideEffect(
-                    resultId, request, aggregate, "recorded", "DEPLOY_REQUEST_RECORDED");
+            case "coding.pr_complete" -> completePullRequest(
+                    jobId, resultId, request, aggregate);
+            case "coding.dev_merge_check" -> checkDevMerge(resultId, request, aggregate);
+            case "coding.deploy_request" -> deployRequest(
+                    jobId, resultId, request, aggregate);
+            case "coding.deploy" -> deploy(resultId, request, aggregate);
             default -> throw contract("The Coding stage handler is not registered.");
         };
     }
@@ -119,12 +200,77 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate));
+                1, List.of(), initialMessages(request.handlerKey(), aggregate),
+                outcomeResponseFormat(),
+                modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
+        if (!(response.responseFormat()
+                instanceof CodingModelTurnContract.JsonSchemaResponseFormat structured)) {
+            throw contract("The Coding analyze result is not structured output.");
+        }
         ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), response.assistant().content(),
+                structured.structuredOutput(),
                 Set.of("feasible", "infeasible"));
+        JsonNode payload = withCheckedTargetFiles(jobId, outcome.payload());
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
-                null, null, null, outcome.payload());
+                null, null, null, payload);
+    }
+
+    /**
+     * Removes target files the analyst did not get from the fence.
+     *
+     * <p>Dropped rather than refused: this stage is a single model call with no re-ask, so
+     * rejecting the answer would end the job at planning - a worse outcome than the searching
+     * this hint exists to save. A wrong path costs the coding stage a failed read; the same
+     * stage still finds its own way when the list comes back empty.
+     */
+    private JsonNode withCheckedTargetFiles(UUID jobId, JsonNode payload) {
+        if (payload == null || !payload.isObject() || !payload.path("targetFiles").isArray()) {
+            return payload;
+        }
+        List<String> allowedPaths = guardrailSelections.jobSnapshot(jobId);
+        List<String> known = guardrailSelections.jobFiles(jobId);
+        // An open system has neither fence nor list, and nothing to judge a path against.
+        if (allowedPaths.isEmpty() && known.isEmpty()) {
+            return payload;
+        }
+        List<String> folders = allowedPaths.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        ObjectNode checked = ((ObjectNode) payload).deepCopy();
+        ArrayNode kept = checked.putArray("targetFiles");
+        for (JsonNode candidate : payload.path("targetFiles")) {
+            if (!candidate.isTextual()) {
+                continue;
+            }
+            String path = normalizedPath(candidate.asText());
+            // A file that exists inside the fence, or a new file the change would create
+            // there. The second case is why the folder test is here: the post-check on the
+            // finished candidate accepts a created file, so refusing to name one would
+            // contradict the rule that actually decides.
+            boolean real = known.contains(path);
+            boolean insideFence = folders.stream().anyMatch(
+                    folder -> path.equals(folder) || path.startsWith(folder + "/"));
+            if (real || insideFence) {
+                kept.add(path);
+            }
+        }
+        return checked;
+    }
+
+    /**
+     * The path as the file list spells it. Only shapes that mean the same file are repaired -
+     * letter case is left alone, because on a case-sensitive checkout it names another file.
+     */
+    private static String normalizedPath(String path) {
+        String normalized = path.trim().replace('\\', '/');
+        while (normalized.startsWith("./")) {
+            normalized = normalized.substring(2);
+        }
+        while (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        return normalized;
     }
 
     private CodingHandlerContract.StageExecutionResponse modelToolStage(
@@ -143,27 +289,93 @@ public final class CodingHandlerStageService {
         List<JsonNode> messages = new ArrayList<>(
                 initialMessages(request.handlerKey(), aggregate));
         JsonNode latestDiff = null;
+        ModelOutcome terminalOutcome = null;
+        // Whether the model ever reached for an edit. An empty diff means one of two very
+        // different things - it looked and the change was already there, or it tried and
+        // could not land one - and only this tells them apart.
+        boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(authority, request, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             modelResponse = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages);
+                    turn, schemas, messages,
+                    objectMapper.createObjectNode().put("type", "TEXT"),
+                    modelBindings);
             if (modelResponse.toolCalls().isEmpty()) {
-                break;
+                try {
+                    terminalOutcome = parseOutcome(
+                            request.handlerKey(), modelResponse.assistant().content(), ports);
+                    break;
+                }
+                catch (CodingWorkerException failure) {
+                    // Measured on Job f2b48a5e: the model finished the work - patch
+                    // applied, checks green - then closed with a prose summary instead
+                    // of the declared stage result, and the whole Job died on that one
+                    // formality. A format miss the model caused is handed back once as
+                    // feedback, exactly like a refused tool call.
+                    if (turn == MAX_MODEL_TURNS) {
+                        throw failure;
+                    }
+                    messages.add(plainAssistantMessage(modelResponse));
+                    messages.add(userMessage("Your reply was not the stage result "
+                            + "contract. The work you already completed stays; only this "
+                            + "final message was rejected. Reply again with exactly one "
+                            + "JSON object and nothing else - no prose, no code fence: "
+                            + "{\"port\":\"<one of " + ports + ">\",\"payload\":{...}}."));
+                    continue;
+                }
             }
             CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
+            patchAttempted = patchAttempted || "apply_patch".equals(call.name());
             if (!allowedTools.contains(call.name())) {
                 throw contract("The model selected a tool outside the stage allowlist.");
             }
-            CodingToolContract.ResultContent toolResult = executeTool(
-                    authorization, jobId, request, authority, aggregate,
-                    resultId, turn, call);
-            messages.add(assistantToolMessage(modelResponse));
+            CodingToolContract.ResultContent toolResult;
+            try {
+                toolResult = executeTool(
+                        authorization, jobId, request, authority, aggregate,
+                        resultId, turn, call);
+            }
+            catch (CodingToolException failure) {
+                // A refusal the model caused is handed back as feedback instead of ending
+                // the Job, because the refusal reason is already a correction instruction.
+                // Anything else - authority, storage, gateway - stays fatal.
+                if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
+                        || turn == MAX_MODEL_TURNS) {
+                    throw failure;
+                }
+                messages.add(plainAssistantMessage(modelResponse));
+                messages.add(userMessage("Your " + call.name() + " call was refused: "
+                        + failure.getMessage()
+                        + " Correct the call and continue the task."
+                        + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
+                continue;
+            }
+            messages.add(assistantToolMessage(modelResponse, call));
             messages.add(toolMessage(toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
             if (Set.of("read_diff", "apply_patch",
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
                 latestDiff = decoded;
+            }
+            if ("apply_patch".equals(call.name())) {
+                // Measured on Job cb3cd98b: the model applied a working patch, then kept
+                // editing - thirteen apply_patch calls, one of which reverted its own work -
+                // and spent the whole turn budget without ever reaching the checks. Nothing
+                // told it the edit had landed and what came next, so it kept polishing. The
+                // same run a day earlier finished in two patches: this is model variance,
+                // not a broken pipeline, which is why the nudge states the next step
+                // instead of forbidding a second patch that a two-part change still needs.
+                messages.add(userMessage(
+                        "apply_patch succeeded and the change is now in the workspace. If the "
+                        + "requested change is complete, stop editing and verify it: call "
+                        + "run_check, then check_package_allowlist and scan_changed_files, and "
+                        + "finish with the stage result. Call apply_patch again only for a part "
+                        + "of the request that is still missing - do not re-edit work that is "
+                        + "already correct."));
             }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(
@@ -171,11 +383,10 @@ public final class CodingHandlerStageService {
                         "Coding Model exceeded the bounded tool loop.");
             }
         }
-        if (modelResponse == null || !modelResponse.toolCalls().isEmpty()) {
+        if (terminalOutcome == null) {
             throw contract("The Coding Model did not produce a terminal stage result.");
         }
-        ModelOutcome outcome = parseOutcome(
-                request.handlerKey(), modelResponse.assistant().content(), ports);
+        ModelOutcome outcome = terminalOutcome;
         String candidateSha;
         String diffDigest;
         if ("coding.code".equals(request.handlerKey())) {
@@ -184,6 +395,22 @@ public final class CodingHandlerStageService {
             }
             candidateSha = authority.baseSha();
             diffDigest = resultDigest(latestDiff);
+            if (EMPTY_DIFF_DIGEST.equals(diffDigest)) {
+                // Reached only after the model stopped calling tools and declared itself
+                // done, so every retry it had is already spent. Which of the two empty
+                // endings it was decides what the person is told, and telling them apart
+                // matters: Job a15a51b1 tried eight patches, could not land one, and the
+                // screen still said the change was already there.
+                throw patchAttempted
+                        ? new CodingWorkerException(
+                                "CODING_PATCH_NOT_APPLIED",
+                                "The Coding stage attempted an edit but no change was applied.",
+                                HttpStatus.UNPROCESSABLE_ENTITY)
+                        : new CodingWorkerException(
+                                "CODING_DIFF_EMPTY",
+                                "The Coding stage finished without changing any file.",
+                                HttpStatus.UNPROCESSABLE_ENTITY);
+            }
         }
         else {
             CodingHandlerContract.HandlerResultResponse code = latestResult(
@@ -203,6 +430,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        requireSystemTools(authority, request.nodeId(), Set.of(
+                "read_diff", "run_check", "check_package_allowlist", "scan_changed_files"));
         CodingHandlerContract.HandlerResultResponse code = latestResult(
                 aggregate, "coding.code", "completed");
         CodingHandlerContract.HandlerResultResponse review = latestResult(
@@ -237,10 +466,82 @@ public final class CodingHandlerStageService {
                 || !diffDigest.equals(scan.path("diffDigest").asText())) {
             throw conflict("The Coding diff changed during preview validation.");
         }
+        List<String> denied = deniedChangedPaths(diff, scan);
+        if (!denied.isEmpty()) {
+            // No approval path exists past this point. A fixed Denylist that a person can wave
+            // through is not a Denylist.
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_DENIED",
+                    "The Coding candidate changed files the fixed guardrail forbids: "
+                            + String.join(", ", denied),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        // Which repository this Job works in is recorded on the Job itself. Both the fence
+        // below and the queued build need it: the fence to read this repository's folders
+        // rather than every repository's, and the build to check out the right one. It used to
+        // be assumed to be the Backend, because there was nothing else it could be.
+        String repository = results.jobRepository(jobId);
+        // The second layer: the folders the administrator chose when this job was created. The
+        // copy taken then is used, not what the setting says now.
+        List<String> outside = outsideAllowedFolders(
+                repository, guardrailSelections.jobSnapshot(jobId), diff, scan);
+        if (!outside.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_PATH_NOT_SELECTED",
+                    "The Coding candidate changed files outside the selected folders: "
+                            + String.join(", ", outside),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        // The third layer: the rules that name no path at all. They cannot be judged before the
+        // model runs, because a request that sounds small can still produce a thousand lines.
+        // Build and test success are not repeated here; the deterministic checks above already
+        // require them.
+        List<String> broken = brokenRules(
+                guardrailRules.jobRules(jobId).orElse(null), diff, scan);
+        if (!broken.isEmpty()) {
+            throw new CodingWorkerException(
+                    "CODING_GUARDRAIL_RULE_DENIED",
+                    "The Coding candidate breaks the guardrail rules: "
+                            + String.join("; ", broken),
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
         String validationHash = digest(objectMapper.valueToTree(List.of(
                 code.candidateSha(), diffDigest,
                 check.path("detailsDigest").asText(),
                 packages, scan)));
+        // The deterministic checks passed, so the candidate is worth showing. The
+        // runner owns Docker, so the stack is raised through its queue rather than
+        // from here. BUILD is queued first because PREVIEW_UP starts with
+        // --no-build and the runner claims one PENDING row at a time in order.
+        String workspaceId = aggregate.workspaceId() == null
+                ? null : aggregate.workspaceId().toString();
+        ObjectNode runnerPayload = objectMapper.createObjectNode().put("repo", repository);
+        if (workspaceId != null) {
+            runnerPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("BUILD", runnerPayload);
+        // The frontend runtime image installs and serves; it never compiles or tests what it
+        // serves, so a broken screen would reach the person asked to approve it. The backend
+        // has to compile to become an image at all. Queued between BUILD and PREVIEW_UP: the
+        // runner takes one pending row at a time in order, so the image it checks is the one
+        // BUILD just made.
+        if (CodingRepositories.FRONTEND.equals(repository)) {
+            // workspaceId is not read by the check itself. It is what ties the queued row back
+            // to this Job, which is how the approval screen finds out whether it passed.
+            ObjectNode checkPayload = objectMapper.createObjectNode().put("repo", repository);
+            if (workspaceId != null) {
+                checkPayload.put("workspaceId", workspaceId);
+            }
+            runner.enqueue("TEST", checkPayload);
+        }
+        // The preview needs the repository too: a frontend Job's changed screen only reaches
+        // 18081 if the preview is pointed at that Job's checkout rather than a stale one.
+        ObjectNode previewPayload = objectMapper.createObjectNode().put("repo", repository);
+        if (workspaceId != null) {
+            previewPayload.put("workspaceId", workspaceId);
+        }
+        runner.enqueue("PREVIEW_UP", previewPayload);
+
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "READY");
         payload.set("changedPaths", diff.path("changedPaths").deepCopy());
@@ -248,6 +549,153 @@ public final class CodingHandlerStageService {
         return response(resultId, request.handlerKey(), "ready",
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
                 code.candidateSha(), diffDigest, validationHash, payload);
+    }
+
+    /**
+     * The guardrail verdict, taken from what Git reports rather than from what the model says it
+     * changed. A model that does not know how far it reached and a model that is describing its
+     * work falsely both fail here, so its intent never has to be judged.
+     *
+     * <p>{@code read_diff} and {@code scan_changed_files} each list the changed files. Both are
+     * read so that a disagreement between the two cannot become a gap, even though the digest
+     * check above already requires them to describe the same diff.
+     */
+    static List<String> deniedChangedPaths(JsonNode... toolResults) {
+        return GuardrailPathPolicy.deniedPaths(changedPaths(toolResults));
+    }
+
+    /**
+     * The changed files that fall outside the folders this job was allowed into.
+     *
+     * <p>An empty allow list means the administrator has not chosen any folder yet, and then only
+     * the fixed Denylist applies. Refusing everything instead would stop ordinary work the moment
+     * nobody had filled the screen in, while the paths that actually matter stay closed either way.
+     *
+     * <p>The allow list entries are {@code repository:path} and only this repository's are read.
+     * That used to be left to the shape of the paths - the two repositories' folders do not
+     * overlap - which held only while every Job was a Backend Job. It is no longer true and the
+     * comparison is no longer a coincidence.
+     *
+     * <p>An allow list with nothing for this repository is not an empty allow list. The
+     * administrator filled the screen in and left this repository closed, so everything changed
+     * here is outside the fence. Reading it as "nothing chosen, therefore open" would turn a
+     * closed repository into an unguarded one, which is the opposite of what was chosen.
+     */
+    static List<String> outsideAllowedFolders(
+            String repository, List<String> allowedPaths, JsonNode... toolResults) {
+        if (allowedPaths.isEmpty()) {
+            return List.of();
+        }
+        String prefix = repository + ":";
+        List<String> folders = allowedPaths.stream()
+                .filter(entry -> entry.startsWith(prefix))
+                .map(entry -> entry.substring(prefix.length()))
+                .filter(folder -> !folder.isBlank())
+                .toList();
+        if (folders.isEmpty()) {
+            return changedPaths(toolResults);
+        }
+        return changedPaths(toolResults).stream()
+                .filter(path -> folders.stream().noneMatch(
+                        folder -> path.equals(folder) || path.startsWith(folder + "/")))
+                .toList();
+    }
+
+    /**
+     * The guardrail rules that the finished candidate breaks, described for the person reading the
+     * failure rather than as codes.
+     *
+     * <p>{@code rules} is null when the job carries no copy, which happens only for a job created
+     * before the rules existed. Such a job never ran under them, so none are applied - the same
+     * choice the path layer makes for an empty selection.
+     *
+     * <p>Every rule is judged from what Git reports. The model's own account of its work is not an
+     * input here for the same reason it is not one in the path layers.
+     */
+    static List<String> brokenRules(
+            GuardrailRuleContract.Rules rules, JsonNode... toolResults) {
+        if (rules == null) {
+            return List.of();
+        }
+        List<String> broken = new ArrayList<>();
+        List<String> changed = changedPaths(toolResults);
+        if (!rules.allowNewDependency()) {
+            List<String> manifests = changed.stream()
+                    .filter(CodingHandlerStageService::isDependencyManifest)
+                    .toList();
+            if (!manifests.isEmpty()) {
+                broken.add("adding a library is not allowed: " + String.join(", ", manifests));
+            }
+        }
+        if (rules.maxChangedFiles() != null && changed.size() > rules.maxChangedFiles()) {
+            broken.add("changed " + changed.size() + " files, limit is "
+                    + rules.maxChangedFiles());
+        }
+        if (rules.maxChangedLines() != null) {
+            int lines = changedLines(toolResults);
+            if (lines > rules.maxChangedLines()) {
+                broken.add("changed " + lines + " lines, limit is " + rules.maxChangedLines());
+            }
+        }
+        return List.copyOf(broken);
+    }
+
+    /**
+     * Whether a path is a file that declares the project's dependencies.
+     *
+     * <p>Matched on the file name at any depth, so moving the file does not evade the rule. Lock
+     * files count: a dependency arrives through them just as surely as through the manifest that
+     * names it.
+     *
+     * <p>The frontend manifest and lock file are already in the fixed Denylist, so allowing new
+     * libraries opens the Backend {@code pom.xml} only. That is deliberate - a rule an
+     * administrator can switch on must not be able to reopen a fixed one.
+     */
+    private static boolean isDependencyManifest(String path) {
+        String normalized = path.replace('\\', '/');
+        String name = normalized.substring(normalized.lastIndexOf('/') + 1);
+        return DEPENDENCY_MANIFESTS.contains(name);
+    }
+
+    /**
+     * How many lines the diff adds or removes.
+     *
+     * <p>Counted from the unified diff body, so a header line - {@code +++ b/...} or
+     * {@code --- a/...} - is not counted as a change. The tool refuses a diff larger than its cap
+     * outright, so the body being counted is never a truncated one.
+     */
+    private static int changedLines(JsonNode... toolResults) {
+        int lines = 0;
+        for (JsonNode toolResult : toolResults) {
+            JsonNode diff = toolResult.path("diff");
+            if (!diff.isTextual()) {
+                continue;
+            }
+            for (String line : diff.textValue().split("\n", -1)) {
+                if (line.startsWith("+++") || line.startsWith("---")) {
+                    continue;
+                }
+                if (line.startsWith("+") || line.startsWith("-")) {
+                    lines++;
+                }
+            }
+            // Only one tool returns the diff body, and counting a second copy of the same diff
+            // would double every number.
+            break;
+        }
+        return lines;
+    }
+
+    private static List<String> changedPaths(JsonNode... toolResults) {
+        Set<String> changedPaths = new LinkedHashSet<>();
+        for (JsonNode toolResult : toolResults) {
+            for (JsonNode path : toolResult.path("changedPaths")) {
+                if (path.isTextual()) {
+                    changedPaths.add(path.textValue());
+                }
+            }
+        }
+        return List.copyOf(changedPaths);
     }
 
     private CodingHandlerContract.StageExecutionResponse sideEffect(
@@ -264,6 +712,268 @@ public final class CodingHandlerStageService {
                 preview.validationHash(), payload);
     }
 
+    private CodingHandlerContract.StageExecutionResponse completePullRequest(
+            UUID jobId,
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse requested = latestResult(
+                aggregate, "coding.pr_request", "requested");
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.GITHUB,
+                requested.candidateSha(), requested.validationHash());
+        if (requested.diffDigest() == null
+                || !requested.diffDigest().matches("^sha256:[0-9a-f]{64}$")) {
+            throw conflict("The pull request has no approved Diff digest.");
+        }
+        CodingHandlerResultService.JobRequestIdentity identity = results.jobRequestIdentity(jobId);
+        String branch = "system/" + identity.workSlug().substring("system-".length());
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("repo", "backend");
+        command.put("branch", branch);
+        command.put("candidateSha", requested.candidateSha());
+        command.put("diffDigest", requested.diffDigest());
+        command.put("validationHash", requested.validationHash());
+        if (aggregate.workspaceId() == null) {
+            throw conflict("The pull request has no bound Coding workspace.");
+        }
+        command.put("workspaceId", aggregate.workspaceId().toString());
+        command.put("title", identity.systemWorkId() + " automated coding change");
+        command.put("body", "Automated Coding Job " + identity.systemWorkId()
+                + ". Candidate and validation evidence are recorded by the control plane.");
+        runner.enqueue(resultId, "CREATE_PR", command);
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
+        if (runnerPending(outcome)) {
+            throw runnerPending("Pull request creation is still pending.");
+        }
+        if (!"SUCCEEDED".equals(outcome.status())) {
+            throw new CodingWorkerException(
+                    outcome.errorCode() == null ? "PR_CREATION_BLOCKED" : outcome.errorCode(),
+                    "Pull request creation was blocked by the host runner.",
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        JsonNode receipt = outcome.result();
+        if (receipt == null
+                || !"backend".equals(receipt.path("repository").asText())
+                || !"dev".equals(receipt.path("base").asText())
+                || !branch.equals(receipt.path("head").asText())
+                || !requested.candidateSha().equals(receipt.path("candidateSha").asText())
+                || !receipt.path("headSha").asText().matches("^sha1:[0-9a-f]{40}$")
+                || !receipt.path("prNumber").canConvertToInt()
+                || receipt.path("prNumber").intValue() < 1
+                || !receipt.path("prUrl").isTextual()) {
+            throw contract("The pull request runner receipt is invalid.");
+        }
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("repository", "backend");
+        payload.put("base", "dev");
+        payload.put("head", branch);
+        payload.put("candidateSha", requested.candidateSha());
+        payload.put("headSha", receipt.path("headSha").asText());
+        payload.put("prNumber", receipt.path("prNumber").intValue());
+        payload.put("prUrl", receipt.path("prUrl").asText());
+        payload.put("state", receipt.path("state").asText("OPEN"));
+        return response(resultId, request.handlerKey(), "completed", aggregate.workspaceId(),
+                requested.candidateSha(), requested.diffDigest(), requested.validationHash(), payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse checkDevMerge(
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse pullRequest = latestResult(
+                aggregate, "coding.pr_complete", "completed");
+        CodingHandlerContract.HandlerResultResponse deployRequest = latestResult(
+                aggregate, "coding.deploy_request", "recorded");
+        requireV4DeploymentIdentity(pullRequest, deployRequest);
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.DEPLOY,
+                deployRequest.candidateSha(), deployRequest.validationHash());
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("repository", pullRequest.payload().path("repository").asText());
+        command.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        command.put("head", pullRequest.payload().path("head").asText());
+        command.put("headSha", pullRequest.payload().path("headSha").asText());
+        command.put("candidateSha", pullRequest.candidateSha());
+        runner.enqueue(resultId, "CHECK_DEV_MERGE", command);
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CHECK_DEV_MERGE");
+        if (runnerPending(outcome)) {
+            throw runnerPending("The dev merge check is still pending.");
+        }
+        if (!"SUCCEEDED".equals(outcome.status()) || outcome.result() == null) {
+            throw new CodingWorkerException(
+                    outcome.errorCode() == null ? "DEV_MERGE_CHECK_BLOCKED" : outcome.errorCode(),
+                    "The dev merge check failed at the host boundary.",
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        JsonNode receipt = outcome.result();
+        String status = receipt.path("status").asText();
+        if (!pullRequest.candidateSha().equals(receipt.path("candidateSha").asText())
+                || !pullRequest.payload().path("head").asText()
+                        .equals(receipt.path("head").asText())
+                || !pullRequest.payload().path("headSha").asText()
+                        .equals(receipt.path("headSha").asText())) {
+            throw contract("The dev merge runner receipt changed the PR subject.");
+        }
+        String port = switch (status) {
+            case "MERGED" -> "merged";
+            case "NOT_MERGED" -> "not_merged";
+            case "BLOCKED" -> "blocked";
+            default -> throw contract("The dev merge receipt is invalid.");
+        };
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("repository", pullRequest.payload().path("repository").asText());
+        payload.put("base", "dev");
+        payload.put("head", pullRequest.payload().path("head").asText());
+        payload.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        payload.put("candidateSha", pullRequest.candidateSha());
+        payload.put("headSha", pullRequest.payload().path("headSha").asText());
+        payload.put("status", status);
+        if ("merged".equals(port)) {
+            String mergeSha = receipt.path("mergeSha").asText();
+            if (!mergeSha.matches("^sha1:[0-9a-f]{40}$")) {
+                throw contract("The merged dev receipt has no valid merge SHA.");
+            }
+            payload.put("mergeSha", mergeSha);
+        }
+        putOptional(payload, "reason", receipt.path("reason").textValue());
+        return response(resultId, request.handlerKey(), port, aggregate.workspaceId(),
+                pullRequest.candidateSha(), pullRequest.diffDigest(),
+                pullRequest.validationHash(), payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse deployRequest(
+            UUID jobId,
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse pullRequest = latestResultOrNull(
+                aggregate, "coding.pr_complete", "completed");
+        if (pullRequest == null) {
+            return sideEffect(resultId, request, aggregate,
+                    "recorded", "DEPLOY_REQUEST_RECORDED");
+        }
+        ObjectNode subject = objectMapper.createObjectNode();
+        subject.put("jobId", jobId.toString());
+        subject.put("pipelineAttempt", aggregate.pipelineAttempt());
+        subject.put("repository", pullRequest.payload().path("repository").asText());
+        subject.put("prNumber", pullRequest.payload().path("prNumber").asInt());
+        subject.put("candidateSha", pullRequest.candidateSha());
+        subject.put("sourceValidationHash", pullRequest.validationHash());
+        subject.put("adapterKey", deploymentAdapter.adapterKey());
+        subject.put("targetKey", deploymentAdapter.targetKey());
+        subject.put("configDigest", deploymentAdapter.configDigest());
+        String subjectHash = digest(subject);
+        UUID deploymentRequestId = UUID.nameUUIDFromBytes(
+                ("deployment-request:" + subjectHash).getBytes(StandardCharsets.UTF_8));
+        ObjectNode payload = subject.deepCopy();
+        payload.put("deploymentRequestId", deploymentRequestId.toString());
+        payload.put("status", "DEPLOY_REQUEST_RECORDED");
+        return response(resultId, request.handlerKey(), "recorded", aggregate.workspaceId(),
+                pullRequest.candidateSha(), pullRequest.diffDigest(), subjectHash, payload);
+    }
+
+    private CodingHandlerContract.StageExecutionResponse deploy(
+            UUID resultId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+        CodingHandlerContract.HandlerResultResponse deployRequest = latestResult(
+                aggregate, "coding.deploy_request", "recorded");
+        CodingHandlerContract.HandlerResultResponse merge = latestResult(
+                aggregate, "coding.dev_merge_check", "merged");
+        requireV4DeploymentIdentity(
+                latestResult(aggregate, "coding.pr_complete", "completed"), deployRequest);
+        requireApproved(aggregate, CodingHandlerContract.ApprovalStage.DEPLOY,
+                deployRequest.candidateSha(), deployRequest.validationHash());
+        String mergeSha = merge.payload().path("mergeSha").asText();
+        String deploymentRequestId = deployRequest.payload()
+                .path("deploymentRequestId").asText();
+        if (!deploymentAdapter.adapterKey().equals(
+                    deployRequest.payload().path("adapterKey").asText())
+                || !deploymentAdapter.targetKey().equals(
+                    deployRequest.payload().path("targetKey").asText())
+                || !deploymentAdapter.configDigest().equals(
+                    deployRequest.payload().path("configDigest").asText())) {
+            throw conflict("The server deployment adapter changed after approval was requested.");
+        }
+        if (!mergeSha.matches("^sha1:[0-9a-f]{40}$")
+                || !deploymentRequestId.matches("^[0-9a-f-]{36}$")
+                || !Objects.equals(deployRequest.candidateSha(), merge.candidateSha())) {
+            throw conflict("The deployment evidence is incomplete or stale.");
+        }
+        UUID executionId = UUID.nameUUIDFromBytes(
+                ("deployment-execution:" + deploymentRequestId + ":" + mergeSha)
+                        .getBytes(StandardCharsets.UTF_8));
+        ObjectNode command = objectMapper.createObjectNode();
+        command.put("deploymentRequestId", deploymentRequestId);
+        command.put("repository", deployRequest.payload().path("repository").asText());
+        command.put("prNumber", deployRequest.payload().path("prNumber").asInt());
+        command.put("candidateSha", deployRequest.candidateSha());
+        command.put("mergeSha", mergeSha);
+        command.put("validationHash", deployRequest.validationHash());
+        DeploymentAdapter.DeploymentOutcome outcome = deploymentAdapter.deploy(
+                executionId, command);
+        if (outcome.status() == DeploymentAdapter.Status.PENDING) {
+            throw runnerPending("The allowlisted deployment is still pending.");
+        }
+        String port = outcome.status() == DeploymentAdapter.Status.COMPLETED
+                ? "completed" : "blocked";
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("deploymentRequestId", deploymentRequestId);
+        payload.put("deploymentExecutionId", executionId.toString());
+        payload.put("adapterKey", deploymentAdapter.adapterKey());
+        payload.put("targetKey", deploymentAdapter.targetKey());
+        payload.put("configDigest", deploymentAdapter.configDigest());
+        payload.put("mergeSha", mergeSha);
+        payload.put("status", port.toUpperCase(java.util.Locale.ROOT));
+        putOptional(payload, "errorCode", outcome.errorCode());
+        if (outcome.payload() != null && outcome.payload().isObject()) {
+            payload.set("receipt", outcome.payload().deepCopy());
+        }
+        return response(resultId, request.handlerKey(), port, aggregate.workspaceId(),
+                deployRequest.candidateSha(), deployRequest.diffDigest(),
+                deployRequest.validationHash(), payload);
+    }
+
+    private static boolean runnerPending(CodingRunnerService.TaskOutcome outcome) {
+        return "PENDING".equals(outcome.status()) || "RUNNING".equals(outcome.status());
+    }
+
+    private static void requireApproved(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            CodingHandlerContract.ApprovalStage stage,
+            String candidateSha,
+            String validationHash) {
+        CodingHandlerContract.ApprovalDecisionSummary latest = null;
+        for (CodingHandlerContract.ApprovalDecisionSummary decision : aggregate.decisions()) {
+            if (decision.stage() == stage) {
+                latest = decision;
+            }
+        }
+        if (latest == null
+                || latest.decision() != CodingHandlerContract.Decision.APPROVED
+                || !Objects.equals(candidateSha, latest.candidateSha())
+                || !Objects.equals(validationHash, latest.validationHash())) {
+            throw conflict("The required Coding approval is missing or stale.");
+        }
+    }
+
+    private static void requireV4DeploymentIdentity(
+            CodingHandlerContract.HandlerResultResponse pullRequest,
+            CodingHandlerContract.HandlerResultResponse deployRequest) {
+        if (!deployRequest.payload().hasNonNull("deploymentRequestId")
+                || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
+                || !Objects.equals(pullRequest.payload().path("repository").asText(),
+                        deployRequest.payload().path("repository").asText())
+                || pullRequest.payload().path("prNumber").asInt(-1)
+                        != deployRequest.payload().path("prNumber").asInt(-2)) {
+            throw conflict("The deployment request is not bound to the completed pull request.");
+        }
+    }
+
+    private static CodingWorkerException runnerPending(String message) {
+        return new CodingWorkerException(
+                "RUNNER_TASK_PENDING", message, HttpStatus.SERVICE_UNAVAILABLE, true, 1_000L);
+    }
+
     private CodingModelTurnContract.Response modelTurn(
             String authorization,
             UUID jobId,
@@ -273,14 +983,20 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             int turn,
             List<JsonNode> schemas,
-            List<JsonNode> messages) {
+            List<JsonNode> messages,
+            JsonNode responseFormat,
+            List<ProviderModelRegistration> modelBindings) {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
         String key = "stage." + hash(
                 resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn);
-        List<String> capabilities = schemas.isEmpty()
-                ? List.of("CHAT") : List.of("CHAT", "TOOL_CALLING");
+        List<String> capabilities = "JSON_SCHEMA".equals(
+                responseFormat.path("type").asText())
+                        ? List.of("CHAT", "STRUCTURED_OUTPUT")
+                        : schemas.isEmpty()
+                                ? List.of("CHAT")
+                                : List.of("CHAT", "TOOL_CALLING");
         CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 turnId,
@@ -295,14 +1011,14 @@ public final class CodingHandlerStageService {
                 capabilities,
                 messages,
                 schemas,
-                objectMapper.createObjectNode().put("type", "TEXT"),
+                responseFormat,
                 authority.expiresAt());
         CodingModelTurnPermit permit = modelGuard.reserve(authorization, request);
         if (permit.replay()) {
             return permit.cachedResponse();
         }
         try {
-            CodingModelTurnContract.Response response = models.execute(request);
+            CodingModelTurnContract.Response response = models.execute(request, modelBindings);
             modelGuard.complete(permit, response);
             return response;
         }
@@ -317,6 +1033,49 @@ public final class CodingHandlerStageService {
         }
     }
 
+    private List<ProviderModelRegistration> modelBindings(
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.StageExecutionRequest request,
+            ModelUseCase useCase) {
+        return profileModelBindings.resolve(
+                authority.profileVersionId(), request.nodeId(), request.handlerKey(), useCase);
+    }
+
+    /**
+     * The analyze response format.
+     *
+     * <p>Every object is closed and every field required, because a provider running strict
+     * structured output refuses a schema that leaves either open. An open payload also let the
+     * model answer with an empty object that satisfied "must be an object" while telling the
+     * approver nothing, so the two fields the approval screen reads are named here rather than
+     * asked for in prose alone.
+     */
+    private JsonNode outcomeResponseFormat() {
+        ObjectNode schema = objectMapper.createObjectNode()
+                .put("type", "object")
+                .put("additionalProperties", false);
+        schema.putArray("required").add("port").add("payload");
+        ObjectNode properties = schema.putObject("properties");
+        properties.putObject("port").put("type", "string");
+        ObjectNode payload = properties.putObject("payload")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        // Every property is required and the object is closed: OpenAI's strict structured
+        // output refuses anything else, and the coding stage depends on targetFiles being
+        // present rather than optional.
+        payload.putArray("required")
+                .add("planSummary").add("acceptanceCriteria").add("targetFiles");
+        ObjectNode payloadProperties = payload.putObject("properties");
+        payloadProperties.putObject("planSummary").put("type", "string");
+        payloadProperties.putObject("acceptanceCriteria")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        payloadProperties.putObject("targetFiles")
+                .put("type", "array")
+                .putObject("items").put("type", "string");
+        return ProviderResponseFormat.jsonSchema(schema).requestContract();
+    }
+
     private CodingToolContract.ResultContent executeTool(
             String authorization,
             UUID jobId,
@@ -328,7 +1087,8 @@ public final class CodingHandlerStageService {
             CodingModelTurnContract.ToolCall call) {
         ObjectNode request = toolRequest(
                 jobId, stage, authority, aggregate, resultId, sequence, call);
-        CodingToolContract.Accepted accepted = tools.submit(authorization, request);
+        CodingToolContract.Accepted accepted =
+                tools.submitForNode(authorization, request, stage.nodeId());
         return tools.result(authorization, accepted.executionId());
     }
 
@@ -425,7 +1185,20 @@ public final class CodingHandlerStageService {
                 result.putArray("roots").add(source.path("scope").asText("."));
             }
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
-            case "apply_patch" -> result.put("patch", source.path("patch").asText());
+            case "apply_patch" -> {
+                if (source.has("patch")) {
+                    result.put("patch", source.path("patch").asText());
+                }
+                else {
+                    // Copied field by field so an incomplete call reaches the Gateway as
+                    // what the model actually sent, and is named back to it there.
+                    for (String field : List.of("path", "oldText", "newText")) {
+                        if (source.has(field)) {
+                            result.put(field, source.path(field).asText());
+                        }
+                    }
+                }
+            }
             case "run_check" -> result.put("checkId", source.path("profile").asText());
             default -> throw contract("The model selected an unregistered Coding tool.");
         }
@@ -437,6 +1210,45 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
+        // The analyst is designed to refuse a request that clearly needs work outside the
+        // fence, before the expensive coding stage runs. It can only do that if it is shown
+        // the fence: the job's own snapshot, so a mid-run settings change cannot move the
+        // rules under it. An empty snapshot means an open system, and injecting a fabricated
+        // restriction into an open system would refuse work the post-check would have passed.
+        if ("coding.analyze".equals(handlerKey)) {
+            List<String> allowed = guardrailSelections.jobSnapshot(aggregate.jobId());
+            if (allowed != null && !allowed.isEmpty()) {
+                ObjectNode guardrail = context.putObject("guardrail");
+                // The fence is shown as labels, not paths. planSummary is read by a general
+                // administrator, so a refusal must be worded in the administrator's own labels,
+                // and a model does not quote what it was never shown. The denied side is the
+                // fact that stops optimism: shown only the allowed folders, the analyst twice
+                // waved through requests by hoping their files lived inside one of them.
+                GuardrailPathSelectionService.JobAreas areas =
+                        guardrailSelections.jobAreas(aggregate.jobId());
+                ArrayNode allowedAreas = guardrail.putArray("allowedAreas");
+                // A snapshot taken before labels existed has none; the paths are then the only
+                // truthful names, and injecting nothing would read as "everything is refused".
+                (areas.allowed().isEmpty() ? allowed : areas.allowed())
+                        .forEach(allowedAreas::add);
+                ArrayNode deniedAreas = guardrail.putArray("deniedAreas");
+                areas.denied().forEach(deniedAreas::add);
+                // The analyst has no tools, so without this it can only guess at file names
+                // and the coding stage pays for the guess in search turns. Paths are safe
+                // here and nowhere else: this context never reaches an approval screen, and
+                // planSummary is separately forbidden from naming them.
+                List<String> files = guardrailSelections.jobFiles(aggregate.jobId());
+                if (!files.isEmpty()) {
+                    ArrayNode fenceFiles = guardrail.putArray("files");
+                    files.forEach(fenceFiles::add);
+                }
+                guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
+                    guardrail.put("allowNewDependency", rules.allowNewDependency());
+                    guardrail.put("maxChangedFiles", rules.maxChangedFiles());
+                    guardrail.put("maxChangedLines", rules.maxChangedLines());
+                });
+            }
+        }
         ArrayNode prior = context.putArray("priorResults");
         aggregate.results().stream()
                 .skip(Math.max(0, aggregate.results().size() - 20L))
@@ -447,6 +1259,13 @@ public final class CodingHandlerStageService {
                     putOptional(item, "candidateSha", result.candidateSha());
                     putOptional(item, "diffDigest", result.diffDigest());
                     putOptional(item, "validationHash", result.validationHash());
+                    // The payload carries the plain-language plan and the acceptance criteria
+                    // agreed at approval 1. Without it a later stage cannot judge the request
+                    // against what was promised, so the approval screens have nothing to
+                    // place side by side.
+                    if (result.payload() != null && result.payload().isObject()) {
+                        item.set("payload", result.payload().deepCopy());
+                    }
                 });
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -455,25 +1274,108 @@ public final class CodingHandlerStageService {
                         .filter(decision -> decision.feedback() != null).count() - 5L))
                 .forEach(decision -> feedback.add(decision.feedback()));
 
+        // The values are quoted because a bare one-word list reads as prose: "port must be
+        // completed" was answered with "done", a synonym the stage refuses.
         String ports = switch (handlerKey) {
-            case "coding.analyze" -> "feasible or infeasible";
-            case "coding.code" -> "completed";
-            case "coding.review" -> "passed or changes_requested";
+            case "coding.analyze" -> "\"feasible\" or \"infeasible\"";
+            case "coding.code" -> "\"completed\"";
+            case "coding.review" -> "\"passed\" or \"changes_requested\"";
             default -> throw contract("The Coding Model stage is not registered.");
+        };
+        // The approval screens are read by a general administrator who cannot read code, so
+        // the payload fields are named here rather than left to the model. An empty payload
+        // still satisfies "must be an object", which is exactly what the model returned before
+        // these names existed.
+        String payloadFields = switch (handlerKey) {
+            case "coding.analyze" -> "payload must contain \"planSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, \"acceptanceCriteria\", an "
+                    + "array of short plain-language statements that will each be true once the "
+                    + "request is done, and \"targetFiles\", the files the change will edit. "
+                    // The analyst reads the fence's file list and the coding stage inherits
+                    // this answer, which is the whole point: the stage that has tools should
+                    // spend its turns editing, not discovering what the analyst could see.
+                    + "Fill targetFiles by choosing from guardrail.files, copying each path "
+                    + "exactly; never invent a path that is not listed there. Name every file "
+                    + "the change plausibly touches, most likely first, and prefer naming one "
+                    + "file too many over leaving the list empty. When the request is "
+                    + "infeasible, or the context lists no files, answer with an empty array. "
+                    // The early block the design asks of the analyst. The post-check on the
+                    // finished candidate remains the authority; this only saves the coding
+                    // stage's cost when the refusal is obvious from the request alone.
+                    + "When the context contains guardrail.allowedAreas, the request may only "
+                    + "change the work areas named there, and every area named in "
+                    + "guardrail.deniedAreas is recorded as not allowed. That record is a "
+                    + "fact, not a guess: do not assume the files such a request needs happen "
+                    + "to live inside an allowed area. Judge by the area the request names. "
+                    + "When it needs a denied area, or an area not listed as allowed, answer "
+                    + "port \"infeasible\". planSummary must then read as a refusal from its "
+                    // Live run 2026-09-03: an infeasible answer whose summary said "기능을
+                    // 개선합니다" reached the screen, where it read as an accepted request.
+                    + "first sentence - say that the request cannot be carried out and why, "
+                    + "and never describe the work as if it were going ahead. Explain in the "
+                    + "language of the "
+                    + "request, naming the areas only by the guardrail labels, and end that "
+                    + "refusal by asking the reader to request a guardrail change from the "
+                    // Live run 2026-09-02: without this clause the refusal ending leaked into
+                    // a feasible plan, which told the reader to escalate work that had just
+                    // been accepted.
+                    + "super administrator if the work is still wanted; a feasible answer "
+                    + "must not mention the super administrator or the guardrail. planSummary "
+                    + "is read by a non-developer: never mention folder paths, file names, or "
+                    + "technical vocabulary. If it is genuinely unclear, proceed as feasible. ";
+            case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
+                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "with no file paths, class names, or code, and \"criteriaResults\", an "
+                    + "array of objects each holding \"criterion\", copied verbatim from the "
+                    + "acceptanceCriteria in the coding.analyze payload you were given, and "
+                    + "\"met\", either true or false. ";
+            default -> "";
         };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
-                + "and payload. port must be " + ports + " and payload must be an object. "
+                + "and payload. port must be exactly " + ports + ", copied verbatim with no "
+                + "synonym or rewording, and payload must be an object. " + payloadFields
                 + ("coding.code".equals(handlerKey)
-                    ? "Use read_diff before any diff-bound tool and again after the final change. "
-                    : "Do not request apply_patch in this stage. ");
+                    // One call per answer is the pipeline's contract: the loop runs the first
+                    // call alone and the history records only that one, so a batch of calls
+                    // silently loses all but its head unless the model is told.
+                    ? "Request one tool call per answer; when an answer carries several, only "
+                        + "the first is executed. "
+                        + "Use read_diff before any diff-bound tool and again after the final change. "
+                        // A measured failure spent four of its turns on a natural-language
+                        // query that can never match code and on near-duplicate retries of
+                        // searches that had already answered. The budget and the search
+                        // discipline have to be said out loud - searching feels like
+                        // progress to a model.
+                        + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
+                        + "answer spends one whether it searches or edits. The coding.analyze "
+                        + "payload in priorResults carries targetFiles, the files chosen for "
+                        + "this change from the guardrail's own list: read those with "
+                        + "read_file and start editing. Do not search to confirm what "
+                        + "targetFiles already names. Search only when those files turn out "
+                        + "not to hold the change, and then search for code identifiers in "
+                        + "English (class, field, and path names), never for words of the "
+                        + "request's own language - those match nothing. Do not rerun a "
+                        + "search that already answered with a slight variation of itself, "
+                        + "and do not reword a search that found nothing - open the most "
+                        + "likely file instead. Once the files to change are in hand, stop "
+                        + "exploring and edit with apply_patch, sending path, oldText and "
+                        + "newText rather than writing a diff yourself; an edit can be "
+                        + "corrected after the next read_diff, but a spent answer cannot be "
+                        + "recovered. "
+                    // Without the second sentence the model reads "no apply_patch here"
+                    // as "the request cannot be done" and answers infeasible.
+                    : "Do not request apply_patch in this stage. A later stage performs "
+                        + "the file changes, so judge only whether the request itself "
+                        + "can be carried out. ");
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", system),
                 objectMapper.createObjectNode().put("role", "user")
                         .put("content", encode(context)));
     }
 
-    private List<JsonNode> toolSchemas(Set<String> names) {
+    List<JsonNode> toolSchemas(Set<String> names) {
         List<JsonNode> schemas = new ArrayList<>();
         for (String name : CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet().stream()
                 .sorted().toList()) {
@@ -482,7 +1384,7 @@ public final class CodingHandlerStageService {
             }
             ObjectNode schema = objectMapper.createObjectNode();
             schema.put("name", name);
-            schema.put("description", "Approved AX Module Studio Coding tool " + name + ".");
+            schema.put("description", toolDescription(name));
             schema.put("schemaDigest", CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.get(name));
             schema.set("inputSchema", inputSchema(name));
             schemas.add(schema);
@@ -494,6 +1396,68 @@ public final class CodingHandlerStageService {
         Set<String> allowed = new java.util.HashSet<>(stageTools);
         allowed.retainAll(profileTools);
         return Set.copyOf(allowed);
+    }
+
+    static Set<String> modelTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> stageTools) {
+        if (authority.toolBindings().legacy()) {
+            return allowedTools(authority.profileAllowedTools(), stageTools);
+        }
+        return allowedTools(
+                authority.toolBindings().modelToolsForNode(nodeId), stageTools);
+    }
+
+    private static void requireSystemTools(
+            CodingToolService.StageAuthority authority,
+            String nodeId,
+            Set<String> requiredTools) {
+        if (authority.toolBindings().legacy()) return;
+        if (!authority.toolBindings().systemToolsForNode(nodeId).equals(requiredTools)) {
+            throw forbidden("The Coding node system Tool binding is incomplete.");
+        }
+    }
+
+    /** Every diff-bound tool is refused until read_diff has established the current diff. */
+    private static final String AFTER_READ_DIFF =
+            "Call read_diff first in this stage; this tool is refused until the current diff "
+                    + "has been read.";
+
+    /**
+     * The model only ever sees these words, so a rule it cannot guess belongs here. The
+     * patch format is the one the MCP workspace enforces; a diff that misses it is refused
+     * as PATCH_POLICY_DENIED after the turn is already spent.
+     */
+    private static String toolDescription(String name) {
+        return switch (name) {
+            case "read_file" -> "Read one repository-relative text file.";
+            case "search_code" -> "Search the repository for a literal string.";
+            case "read_diff" -> "Read the workspace diff as it stands now.";
+            case "apply_patch" -> "Edit the workspace, in either of two ways. "
+                    + AFTER_READ_DIFF
+                    + " Preferred: send path, oldText and newText, and the server writes the "
+                    + "diff for you. oldText is the exact text to replace, copied character "
+                    + "for character out of read_file and appearing exactly once in the file; "
+                    + "newText is what takes its place, or \"\" to delete it. Use this "
+                    + "whenever you are changing text inside a file - it is the only way "
+                    + "that works on long lines, because you never retype the parts you are "
+                    + "keeping. Otherwise: send patch alone, a unified diff, when one call "
+                    + "must touch several files or add or delete a whole file. Every file in "
+                    + "such a patch starts with 'diff --git a/PATH b/PATH' carrying the same "
+                    + "repository-relative path twice, then '--- a/PATH', then '+++ b/PATH', "
+                    + "then its @@ hunks. Rename, copy, mode and binary diffs are refused. "
+                    + "Never send patch together with the other three fields.";
+            case "run_check" -> "Run one approved check over the changed files. Call it "
+                    + "with exactly {\"profile\":\"git-diff-check\"} or "
+                    + "{\"profile\":\"python-syntax\"}; an empty argument object is "
+                    + "refused. " + AFTER_READ_DIFF;
+            case "check_package_allowlist" -> "Check the changed files against the package "
+                    + "allowlist. " + AFTER_READ_DIFF;
+            case "scan_changed_files" -> "Scan the changed files for forbidden content. "
+                    + AFTER_READ_DIFF;
+            default -> throw contract("The Coding tool schema is not registered.");
+        };
     }
 
     private ObjectNode inputSchema(String name) {
@@ -508,7 +1472,16 @@ public final class CodingHandlerStageService {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");
             }
-            case "apply_patch" -> stringProperty(properties, required, "patch");
+            // Two shapes, one tool: 'patch' alone, or path/oldText/newText together.
+            // JSON Schema cannot say "exactly one of these sets" in the subset the
+            // provider gateway accepts, so nothing is required here and
+            // CodingToolService names the missing half in words the model can act on.
+            case "apply_patch" -> {
+                properties.putObject("patch").put("type", "string");
+                properties.putObject("path").put("type", "string");
+                properties.putObject("oldText").put("type", "string");
+                properties.putObject("newText").put("type", "string");
+            }
             case "run_check" -> stringProperty(properties, required, "profile");
             case "read_diff", "check_package_allowlist", "scan_changed_files" -> { }
             default -> throw contract("The Coding tool schema is not registered.");
@@ -522,17 +1495,38 @@ public final class CodingHandlerStageService {
         required.add(name);
     }
 
-    private ObjectNode assistantToolMessage(CodingModelTurnContract.Response response) {
+
+    private ObjectNode userMessage(String content) {
+        return objectMapper.createObjectNode().put("role", "user").put("content", content);
+    }
+
+    /**
+     * Replays a refused call's sentence without the call itself. The refused call never
+     * ran, so pairing it with a tool result would describe an exchange that did not
+     * happen, and an assistant message may not carry an unanswered tool call.
+     */
+    private ObjectNode plainAssistantMessage(CodingModelTurnContract.Response response) {
+        String content = response.assistant().content();
+        return objectMapper.createObjectNode()
+                .put("role", "assistant")
+                .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
+    }
+
+    /**
+     * Replays only the call that actually ran. A model may hand back several tool calls in one
+     * answer, but this loop executes the first alone - replaying the rest would leave the next
+     * turn declaring calls that have no result, which the message contract rightly refuses.
+     * The history must record what the pipeline did, not what the model asked for.
+     */
+    private ObjectNode assistantToolMessage(
+            CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "assistant");
         message.put("content", response.assistant().content());
-        ArrayNode calls = message.putArray("toolCalls");
-        for (CodingModelTurnContract.ToolCall call : response.toolCalls()) {
-            ObjectNode value = calls.addObject();
-            value.put("toolCallId", call.toolCallId().toString());
-            value.put("name", call.name());
-            value.set("arguments", call.arguments());
-        }
+        ObjectNode value = message.putArray("toolCalls").addObject();
+        value.put("toolCallId", executed.toolCallId().toString());
+        value.put("name", executed.name());
+        value.set("arguments", executed.arguments());
         return message;
     }
 
@@ -567,13 +1561,6 @@ public final class CodingHandlerStageService {
         }
     }
 
-    /**
-     * The stage prompt asks for one JSON object, but the model turn contract only
-     * carries TEXT, so nothing can force that shape. Models routinely wrap a
-     * correct answer in a Markdown fence or a sentence, which is a formatting
-     * miss rather than a wrong answer, so one repair pass is allowed before the
-     * stage is failed. A second miss is a contract violation and is not retried.
-     */
     private ModelOutcome parseOutcome(String handlerKey, String raw, Set<String> ports) {
         StructuredOutputGuard.ValidatedOutput<String> validated;
         try {
@@ -590,6 +1577,17 @@ public final class CodingHandlerStageService {
             throw contract("The Coding Model stage result is invalid.");
         }
         return outcome;
+    }
+
+    private ModelOutcome parseOutcome(JsonNode value, Set<String> ports) {
+        if (value == null || !value.isObject() || value.size() != 2
+                || !value.path("port").isTextual()
+                || !ports.contains(value.path("port").asText())
+                || !value.path("payload").isObject()) {
+            throw contract("The Coding Model stage result is invalid.");
+        }
+        return new ModelOutcome(
+                value.path("port").asText(), value.path("payload").deepCopy());
     }
 
     /** Returns null when the text is not the declared stage result object. */
@@ -612,13 +1610,25 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             String handlerKey,
             String port) {
+        CodingHandlerContract.HandlerResultResponse result = latestResultOrNull(
+                aggregate, handlerKey, port);
+        if (result != null) {
+            return result;
+        }
+        throw conflict("The Coding stage prerequisite result is missing.");
+    }
+
+    private static CodingHandlerContract.HandlerResultResponse latestResultOrNull(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            String handlerKey,
+            String port) {
         for (int index = aggregate.results().size() - 1; index >= 0; index--) {
             CodingHandlerContract.HandlerResultResponse result = aggregate.results().get(index);
             if (handlerKey.equals(result.handlerKey()) && port.equals(result.resultPort())) {
                 return result;
             }
         }
-        throw conflict("The Coding stage prerequisite result is missing.");
+        return null;
     }
 
     private static String latestCandidate(
@@ -648,7 +1658,10 @@ public final class CodingHandlerStageService {
             case "coding.review" -> CodingHandlerContract.ResultType.REVIEW;
             case "coding.preview" -> CodingHandlerContract.ResultType.DIFF;
             case "coding.pr_request" -> CodingHandlerContract.ResultType.PULL_REQUEST;
+            case "coding.pr_complete" -> CodingHandlerContract.ResultType.PULL_REQUEST;
+            case "coding.dev_merge_check" -> CodingHandlerContract.ResultType.DEV_MERGE;
             case "coding.deploy_request" -> CodingHandlerContract.ResultType.DEPLOY_REQUEST;
+            case "coding.deploy" -> CodingHandlerContract.ResultType.DEPLOYMENT;
             default -> throw contract("The Coding stage handler is not registered.");
         };
         if (matches.size() != 1
@@ -677,11 +1690,27 @@ public final class CodingHandlerStageService {
         try {
             return "sha256:" + java.util.HexFormat.of().formatHex(
                     MessageDigest.getInstance("SHA-256")
-                            .digest(objectMapper.writeValueAsBytes(value)));
+                            .digest(objectMapper.writeValueAsBytes(canonical(value))));
         }
         catch (JsonProcessingException | NoSuchAlgorithmException failure) {
             throw new IllegalStateException("SHA-256 or JSON encoding is unavailable.", failure);
         }
+    }
+
+    private JsonNode canonical(JsonNode value) {
+        if (value.isObject()) {
+            ObjectNode sorted = objectMapper.createObjectNode();
+            java.util.TreeSet<String> fields = new java.util.TreeSet<>();
+            value.fieldNames().forEachRemaining(fields::add);
+            fields.forEach(field -> sorted.set(field, canonical(value.get(field))));
+            return sorted;
+        }
+        if (value.isArray()) {
+            ArrayNode ordered = objectMapper.createArrayNode();
+            value.forEach(item -> ordered.add(canonical(item)));
+            return ordered;
+        }
+        return value.deepCopy();
     }
 
     private static String hash(String value) {

@@ -26,14 +26,29 @@ if (Test-Path -LiteralPath (Join-Path $workspaceRoot '.git')) {
     throw 'The shared AX Module Studio workspace must not be a Git repository.'
 }
 
-foreach ($sibling in @(
-        'urizo-final-frontend',
-        'urizo-final-orchestrator',
-        'urizo-final-backend',
-        'urizo-final-mcp-server')) {
-    $siblingPath = Join-Path $workspaceRoot $sibling
-    if (-not (Test-Path -LiteralPath $siblingPath -PathType Container)) {
-        throw "Required sibling repository is missing: $sibling"
+$requiredSources = @(
+    @{ Repository = 'urizo-final-frontend'; Environment = 'AXMS_FRONTEND_SOURCE_ROOT' },
+    @{ Repository = 'urizo-final-backend'; Environment = 'AXMS_BACKEND_SOURCE_ROOT' }
+)
+if ($Profile -eq 'full') {
+    $requiredSources += @(
+        @{ Repository = 'urizo-final-orchestrator'; Environment = 'AXMS_ORCHESTRATOR_SOURCE_ROOT' },
+        @{ Repository = 'urizo-final-mcp-server'; Environment = 'AXMS_MCP_SOURCE_ROOT' }
+    )
+}
+foreach ($source in $requiredSources) {
+    $configuredPath = [Environment]::GetEnvironmentVariable(
+        $source.Environment,
+        'Process'
+    )
+    $sourcePath = if ($configuredPath) {
+        $configuredPath
+    }
+    else {
+        Join-Path $workspaceRoot $source.Repository
+    }
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Container)) {
+        throw "Required source repository is missing: $($source.Repository)"
     }
 }
 
@@ -101,6 +116,33 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Local Core DB role synchronization failed.'
 }
 
+if ($Profile -eq 'full') {
+    & $docker @compose up -d --force-recreate --wait --wait-timeout $WaitTimeoutSeconds checkpoint_database
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Checkpoint database could not be recreated with the active local secret.'
+    }
+    $checkpointContainer = (& $docker @compose ps -q checkpoint_database).Trim()
+    if (-not $checkpointContainer) {
+        throw 'Checkpoint database container was not found.'
+    }
+    $checkpointRoleSync = @'
+password="$(< /run/secrets/checkpoint_postgres_password)"
+psql --set=ON_ERROR_STOP=1 \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" \
+  --set=checkpoint_password="$password" <<'SQL'
+SELECT format('ALTER ROLE axms_checkpoint PASSWORD %L', :'checkpoint_password') \gexec
+SQL
+unset password
+'@
+    $checkpointRoleSync = $checkpointRoleSync.Replace("`r`n", "`n")
+    $checkpointRoleSync | & $docker exec -i $checkpointContainer bash -seu
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Checkpoint database role synchronization failed.'
+    }
+    Write-Output 'Local checkpoint database role is synchronized.'
+}
+
 function Wait-ComposeOneShot {
     param(
         [Parameter(Mandatory = $true)][string[]]$ComposeArguments,
@@ -150,7 +192,12 @@ if ($Profile -eq 'full') {
         -Label 'Coding service credential registrar'
 }
 
-& $docker @compose up -d --wait --wait-timeout $WaitTimeoutSeconds
+$upArguments = @('up', '-d')
+if (-not $SkipBuild) {
+    $upArguments += '--force-recreate'
+}
+$upArguments += @('--wait', '--wait-timeout', $WaitTimeoutSeconds)
+& $docker @compose @upArguments
 if ($LASTEXITCODE -ne 0) {
     throw "The $Profile local Compose profile did not become healthy."
 }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -12,6 +13,8 @@ import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -35,7 +38,7 @@ class CmsSiteSettingsServiceTest {
     private CmsSiteSettingsService service;
 
     @Test
-    void savesEnabledDefaultSiteAndItsDefaultTemplateTogether() {
+    void savesEnabledDefaultSiteTemplateWithoutChangingGlobalTemplateAuthority() {
         SiteView main = site("main", "AX Studio", "/", "CLASSIC", true, false);
         SiteView saved = site("main", "AX Studio", "/", "MINIMAL", true, true);
         when(sites.findByKey("main")).thenReturn(Optional.of(main));
@@ -47,7 +50,8 @@ class CmsSiteSettingsServiceTest {
         assertThat(result.defaultSiteKey()).isEqualTo("main");
         assertThat(result.defaultTemplateKey()).isEqualTo("MINIMAL");
         verify(sites).selectDefault("main", "MINIMAL");
-        verify(cms).activateTemplate("MINIMAL");
+        verify(cms).findTemplate("MINIMAL");
+        verifyNoMoreInteractions(cms);
     }
 
     @Test
@@ -59,6 +63,49 @@ class CmsSiteSettingsServiceTest {
                 .isInstanceOf(CmsServiceException.class)
                 .hasMessage("사용 중인 사이트만 기본 사이트로 지정할 수 있습니다.");
         verify(sites, never()).selectDefault("disabled", "CLASSIC");
+    }
+
+    @Test
+    void createsANonDefaultSiteWithItsOwnTemplateSelection() {
+        SiteView created = site(
+                "campaign", "캠페인", "/campaign", "BOLD", true, false);
+        when(sites.findByKey("campaign")).thenReturn(Optional.empty());
+        when(sites.findByPublicPath("/campaign")).thenReturn(Optional.empty());
+        when(cms.findTemplate("BOLD")).thenReturn(Optional.of(template("BOLD")));
+        when(sites.create("campaign", "캠페인", "/campaign", "BOLD", true))
+                .thenReturn(created);
+
+        assertThat(service.createSite(
+                " campaign ", " 캠페인 ", "/campaign", "BOLD", true))
+                .isEqualTo(created);
+        verify(sites).create("campaign", "캠페인", "/campaign", "BOLD", true);
+    }
+
+    @Test
+    void rejectsDuplicateSiteKeyWithAPreciseError() {
+        when(sites.findByKey("campaign")).thenReturn(Optional.of(site(
+                "campaign", "기존 캠페인", "/existing", "CLASSIC", true, false)));
+
+        assertThatThrownBy(() -> service.createSite(
+                "campaign", "새 캠페인", "/campaign", "BOLD", true))
+                .isInstanceOf(CmsServiceException.class)
+                .hasMessage("이미 사용 중인 사이트 키입니다.");
+        verify(sites, never()).create(
+                "campaign", "새 캠페인", "/campaign", "BOLD", true);
+    }
+
+    @Test
+    void rejectsDuplicatePublicPathWithAPreciseError() {
+        when(sites.findByKey("campaign")).thenReturn(Optional.empty());
+        when(sites.findByPublicPath("/campaign")).thenReturn(Optional.of(site(
+                "existing", "기존 캠페인", "/campaign", "CLASSIC", true, false)));
+
+        assertThatThrownBy(() -> service.createSite(
+                "campaign", "새 캠페인", "/campaign", "BOLD", true))
+                .isInstanceOf(CmsServiceException.class)
+                .hasMessage("이미 사용 중인 공개 경로입니다.");
+        verify(sites, never()).create(
+                "campaign", "새 캠페인", "/campaign", "BOLD", true);
     }
 
     @Test
@@ -93,6 +140,43 @@ class CmsSiteSettingsServiceTest {
                 "main", "메인", "/", "CLASSIC", false))
                 .isInstanceOf(CmsServiceException.class)
                 .hasMessage("기본 사이트는 사용 중지할 수 없습니다.");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/admin", "/admin/users",
+            "/api", "/api/site",
+            "/internal", "/internal/jobs",
+            "/actuator", "/actuator/health"
+    })
+    void rejectsReservedPublicPathsAndTheirDescendants(String reservedPath) {
+        when(sites.findByKey("campaign"))
+                .thenReturn(Optional.of(site(
+                        "campaign", "캠페인", "/campaign", "CLASSIC", true, false)));
+
+        assertThatThrownBy(() -> service.updateSite(
+                "campaign", "캠페인", reservedPath, "CLASSIC", true))
+                .isInstanceOf(CmsServiceException.class)
+                .hasMessage("관리자 및 내부 API 경로는 공개 경로로 사용할 수 없습니다.");
+        verify(sites, never()).update(
+                "campaign", "캠페인", reservedPath, "CLASSIC", true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/administrator", "/apiary"})
+    void allowsPublicPathsThatOnlyShareAReservedPrefix(String publicPath) {
+        SiteView current = site(
+                "campaign", "캠페인", "/campaign", "CLASSIC", true, false);
+        SiteView updated = site(
+                "campaign", "캠페인", publicPath, "CLASSIC", true, false);
+        when(sites.findByKey("campaign"))
+                .thenReturn(Optional.of(current), Optional.of(updated));
+        when(cms.findTemplate("CLASSIC")).thenReturn(Optional.of(template("CLASSIC")));
+        when(sites.findByPublicPath(publicPath)).thenReturn(Optional.empty());
+
+        assertThat(service.updateSite(
+                "campaign", "캠페인", publicPath, "CLASSIC", true)).isEqualTo(updated);
+        verify(sites).update("campaign", "캠페인", publicPath, "CLASSIC", true);
     }
 
     @Test

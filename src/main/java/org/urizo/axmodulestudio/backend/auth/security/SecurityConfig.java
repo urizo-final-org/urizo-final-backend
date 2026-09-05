@@ -117,8 +117,12 @@ public class SecurityConfig {
                                 .hasAnyRole("SUPER_ADMIN", "GENERAL_ADMIN")
                         .requestMatchers(
                                 "/api/admin/ai/profile-versions",
-                                "/api/admin/ai/profile-versions/**")
+                                "/api/admin/ai/profile-versions/**",
+                                "/api/admin/ai/profile-templates/**")
                                 .hasRole("SUPER_ADMIN")
+                        // The guardrail decides what the model may change, so choosing it is not
+                        // ordinary administration.
+                        .requestMatchers("/api/admin/coding/guardrail/**").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/projects").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST,
                                 "/api/projects/*/connectors",
@@ -131,6 +135,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.GET,
                                 "/internal/dev/provider-credentials").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.PUT,
+                                "/internal/dev/provider-credentials/*").hasRole("SUPER_ADMIN")
+                        .requestMatchers(HttpMethod.DELETE,
                                 "/internal/dev/provider-credentials/*").hasRole("SUPER_ADMIN")
                         .requestMatchers(HttpMethod.POST,
                                 "/internal/dev/provider-credentials/*/test").hasRole("SUPER_ADMIN")

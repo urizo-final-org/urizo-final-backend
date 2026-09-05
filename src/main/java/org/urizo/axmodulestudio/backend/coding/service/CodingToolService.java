@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -32,20 +33,30 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingToolService {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingToolService.class);
+
     static final Map<String, String> CODING_TOOL_SCHEMA_DIGESTS = Map.of(
             "read_file", "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
             "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
             "read_diff", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
-            "apply_patch", "sha256:f6594e18aaedfb029106fa669c557027854ec5f86cce436fcec1723791743cd7",
+            "apply_patch", "sha256:f80e35f798eb3962fb3c65da2b8e9c0583d3d177b5e0435c273a296ff88f2411",
             "run_check", "sha256:9c8ff63f21a3414335f7f7788d00bdfb096480b37a1cee5e9084d2954439824a",
             "check_package_allowlist", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "scan_changed_files", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa");
     private static final Pattern SHA256_DIGEST = Pattern.compile("^sha256:[0-9a-f]{64}$");
+    /** A unified diff hunk header. The count is optional: git reads '@@ -73 +73 @@' as one line. */
+    private static final Pattern UNIFIED_HUNK_HEADER =
+            Pattern.compile("@@ -\\d+(?:,(\\d+))? \\+\\d+(?:,(\\d+))? @@.*");
+    /** The same header split for rewriting: old start, new start, and the trailing section text. */
+    private static final Pattern HUNK_HEADER_PARTS =
+            Pattern.compile("@@ -(\\d+)(?:,\\d+)? \\+(\\d+)(?:,\\d+)? @@(.*)");
     private static final Set<String> TOP_LEVEL_FIELDS = Set.of(
             "schemaVersion", "messageType", "requestId", "toolCallId", "jobId",
             "traceId", "leaseId", "idempotencyKey", "attempt", "graphStep",
@@ -57,6 +68,15 @@ public final class CodingToolService {
             "repositoryId", "baseSha", "candidateSha");
     private static final Set<String> APPROVAL_FIELDS = Set.of(
             "approvalId", "scopeDigest", "expiresAt");
+    /**
+     * Bound on one side of a replacement edit. The provider gateway caps a whole tool call
+     * at 32,768 characters, so two sides of this size still leave room for the rest.
+     */
+    private static final int REPLACEMENT_TEXT_LIMIT = 8_000;
+    /** Lines of unchanged text kept on each side of a rewritten hunk, as git writes them. */
+    private static final int PATCH_CONTEXT_LINES = 3;
+    /** The replacement form's arguments, as opposed to the one-field patch form. */
+    private static final Set<String> REPLACEMENT_FIELDS = Set.of("path", "oldText", "newText");
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -81,6 +101,16 @@ public final class CodingToolService {
     }
 
     public CodingToolContract.Accepted submit(String authorization, JsonNode request) {
+        return submitInternal(authorization, request, null);
+    }
+
+    CodingToolContract.Accepted submitForNode(
+            String authorization, JsonNode request, String nodeId) {
+        return submitInternal(authorization, request, nodeId);
+    }
+
+    private CodingToolContract.Accepted submitInternal(
+            String authorization, JsonNode request, String nodeId) {
         ParsedRequest parsed = parse(request);
         byte[] credentialDigest = credentialDigest(authorization);
         byte[] requestDigest = sha256Bytes(canonical(request));
@@ -111,7 +141,7 @@ public final class CodingToolService {
                 ToolBinding toolBinding = mcpClients.getIfAvailable() == null
                         ? new ToolBinding(null, authority.baseSha(), null)
                         : toolBinding(parsed.jobId(), authority.baseSha());
-                validateAuthority(parsed, authority, toolBinding);
+                validateAuthority(parsed, authority, toolBinding, nodeId);
                 UUID executionId = UUID.randomUUID();
                 Instant now = Instant.now(clock);
                 ToolOutput output = execute(parsed, toolBinding);
@@ -210,7 +240,7 @@ public final class CodingToolService {
                         job.projectId(), job.repositoryId(), job.graphStep(), job.baseSha(),
                         job.contextDigest(), job.policyHash(), job.promptVersion(),
                         job.allowedCapabilities(), job.allowedNodes(), job.profileAllowedTools(),
-                        job.expiresAt());
+                        job.toolBindings(), job.expiresAt(), job.profileVersionId());
             });
             if (authority == null) {
                 throw unavailable();
@@ -287,7 +317,27 @@ public final class CodingToolService {
             case "apply_patch" -> {
                 requireDiffDigest(binding);
                 arguments.put("expectedDiffDigest", binding.expectedDiffDigest());
-                arguments.put("patch", text(request.arguments(), "patch"));
+                if (isReplacementForm(request.arguments())) {
+                    // The model names the text to change; the diff around it - line
+                    // numbers, counts, context copied byte for byte - is arithmetic over
+                    // the file, so the server does it. Measured on Jobs a15a51b1 and
+                    // 0c78172c, where fifteen patches in a row died on a 1,832-character
+                    // context line the model could not transcribe twice.
+                    arguments.put("patch", replacementPatch(client, binding, request));
+                }
+                else {
+                    String patch = text(request.arguments(), "patch");
+                    String normalized = normalizePatchText(patch);
+                    if (!normalized.equals(patch)) {
+                        // The model's own text stays in coding_model_turn_idempotency;
+                        // this line is the only record that the counts it sent were not
+                        // the counts git received, which an audit of a changed file has
+                        // to be able to see.
+                        LOG.warn("Coding apply_patch hunk counts rewritten: job={} toolCall={}",
+                                request.jobId(), request.toolCallId());
+                    }
+                    arguments.put("patch", normalized);
+                }
             }
             case "run_check" -> {
                 requireDiffDigest(binding);
@@ -309,9 +359,11 @@ public final class CodingToolService {
         }
         JsonNode structured = result.path("structuredContent");
         if (result.path("isError").asBoolean() || !structured.isObject()) {
+            // The refusal reason is a correction instruction - the stage replays it to
+            // the model - so it survives here instead of being flattened to one phrase.
             throw new CodingToolException(
                     "TOOL_EXECUTION_FAILED",
-                    "The MCP coding tool returned an unsuccessful result.",
+                    "The MCP coding tool refused the call. " + mcpRefusalReason(result),
                     HttpStatus.BAD_GATEWAY);
         }
         validateMcpResult(request, structured);
@@ -398,7 +450,8 @@ public final class CodingToolService {
                         + "job.repository_id, job.graph_step, job.base_sha, job.context_digest, "
                         + "job.policy_hash, job.prompt_version, job.allowed_capabilities, "
                         + "job.allowed_nodes, job.expires_at, "
-                        + "profile.snapshot_json::text AS profile_snapshot "
+                        + "profile.snapshot_json::text AS profile_snapshot, "
+                        + "job.profile_version_id "
                         + "FROM app.coding_job job "
                         + "JOIN app.ai_profile_version profile "
                         + "ON profile.profile_version_id = job.profile_version_id "
@@ -418,7 +471,8 @@ public final class CodingToolService {
                             Set.of((String[]) rs.getArray(14).getArray()),
                             Set.of((String[]) rs.getArray(15).getArray()),
                             policy.allowedTools(), policy.guardrailProfileKey(),
-                            rs.getTimestamp(16).toInstant());
+                            policy.toolBindings(), rs.getTimestamp(16).toInstant(),
+                            rs.getObject(18, UUID.class));
                 }, jobId);
         if (rows.isEmpty()) {
             throw new CodingToolException(
@@ -438,15 +492,10 @@ public final class CodingToolService {
                     || !"central.default".equals(guardrail.textValue())) {
                 throw invalidRuntimePolicy();
             }
-            Set<String> tools = new HashSet<>();
-            for (JsonNode tool : allowed) {
-                if (!tool.isTextual()
-                        || !CODING_TOOL_SCHEMA_DIGESTS.containsKey(tool.textValue())
-                        || !tools.add(tool.textValue())) {
-                    throw invalidRuntimePolicy();
-                }
-            }
-            return new RuntimePolicy(tools, guardrail.textValue());
+            ProfileToolBindingPolicy bindings = ProfileToolBindingPolicy.decode(
+                    snapshot, CODING_TOOL_SCHEMA_DIGESTS.keySet());
+            return new RuntimePolicy(
+                    bindings.profileAllowedTools(), guardrail.textValue(), bindings);
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
             throw invalidRuntimePolicy();
@@ -454,10 +503,14 @@ public final class CodingToolService {
     }
 
     private void validateAuthority(
-            ParsedRequest request, JobAuthority job, ToolBinding toolBinding) {
+            ParsedRequest request,
+            JobAuthority job,
+            ToolBinding toolBinding,
+            String nodeId) {
         Instant now = Instant.now(clock);
         UUID expectedApproval = UUID.nameUUIDFromBytes(
                 (request.jobId() + ":approval").getBytes(StandardCharsets.UTF_8));
+        requireNodeToolAllowed(job.toolBindings(), nodeId, request.toolName());
         boolean matches = job.traceId().equals(request.traceId())
                 && "RUNNING".equals(job.status())
                 && "RUNNING".equals(request.jobState())
@@ -487,6 +540,23 @@ public final class CodingToolService {
             throw new CodingToolException(
                     "TOOL_NOT_ALLOWED",
                     "Spring rejected the tool candidate against authoritative job policy.",
+                    HttpStatus.FORBIDDEN);
+        }
+    }
+
+    static void requireNodeToolAllowed(
+            ProfileToolBindingPolicy policy, String nodeId, String toolName) {
+        if (!policy.legacy()
+                && (nodeId == null || !policy.toolsForNode(nodeId).contains(toolName))) {
+            throw new CodingToolException(
+                    "TOOL_NOT_ALLOWED",
+                    "The Coding Tool is not bound to the active Coding stage node.",
+                    HttpStatus.FORBIDDEN);
+        }
+        if (policy.legacy() && !policy.profileAllowedTools().contains(toolName)) {
+            throw new CodingToolException(
+                    "TOOL_NOT_ALLOWED",
+                    "The Coding Tool is not allowed by the legacy Profile policy.",
                     HttpStatus.FORBIDDEN);
         }
     }
@@ -605,7 +675,7 @@ public final class CodingToolService {
         return List.copyOf(values);
     }
 
-    private static void validateToolArguments(String toolName, JsonNode arguments) {
+    static void validateToolArguments(String toolName, JsonNode arguments) {
         switch (toolName) {
             case "read_file" -> {
                 requireObjectFields(arguments, Set.of("path"), "tool arguments");
@@ -631,10 +701,31 @@ public final class CodingToolService {
             case "read_diff", "check_package_allowlist", "scan_changed_files" ->
                     requireObjectFields(arguments, Set.of(), "tool arguments");
             case "apply_patch" -> {
-                requireObjectFields(arguments, Set.of("patch"), "tool arguments");
-                String patch = text(arguments, "patch");
-                if (patch.length() > 50_000 || !patch.startsWith("--- ")) {
-                    throw validation("apply_patch patch is invalid.");
+                Set<String> actual = objectFields(arguments, "tool arguments");
+                if (actual.equals(Set.of("patch"))) {
+                    // Rejects a malformed patch here; the normalized text it returns is
+                    // rebuilt in execute(), which is where the MCP arguments are assembled.
+                    normalizePatchText(text(arguments, "patch"));
+                }
+                else if (actual.equals(REPLACEMENT_FIELDS)) {
+                    relativePath(text(arguments, "path"), "path");
+                    if (boundedText(arguments, "oldText", false)
+                            .equals(boundedText(arguments, "newText", true))) {
+                        throw validation("apply_patch oldText and newText are identical, so "
+                                + "the call would change nothing. Send the text you want in "
+                                + "place of oldText as newText.");
+                    }
+                }
+                else {
+                    // Neither form is complete, and the schema cannot say "one of these two
+                    // sets" - so this sentence is the only place the model is told which
+                    // fields go together and what it actually sent.
+                    throw validation("apply_patch takes either 'patch' alone, holding a "
+                            + "unified diff, or all three of 'path', 'oldText' and 'newText' "
+                            + "to replace one exact piece of text. This call sent "
+                            + (actual.isEmpty() ? "no arguments"
+                                    : String.join(", ", new java.util.TreeSet<>(actual)))
+                            + ".");
                 }
             }
             case "run_check" -> {
@@ -649,6 +740,287 @@ public final class CodingToolService {
             }
             default -> throw validation("Tool name is not registered.");
         }
+    }
+
+    /**
+     * True when the call names the text to replace instead of carrying a diff. Both forms
+     * live in one tool because they are one action - edit this file - and validation has
+     * already established that the arguments are exactly one of the two shapes.
+     */
+    private static boolean isReplacementForm(JsonNode arguments) {
+        return !arguments.has("patch");
+    }
+
+    /** One side of a replacement, bounded. {@code newText} may be empty: that is a deletion. */
+    private static String boundedText(JsonNode arguments, String field, boolean allowEmpty) {
+        JsonNode value = arguments.get(field);
+        if (value == null || !value.isTextual()
+                || !allowEmpty && value.textValue().isEmpty()
+                || value.textValue().length() > REPLACEMENT_TEXT_LIMIT) {
+            throw validation("apply_patch " + field + " must be a string of at most "
+                    + REPLACEMENT_TEXT_LIMIT + " characters"
+                    + (allowEmpty ? "." : ", and it may not be empty."));
+        }
+        return value.textValue();
+    }
+
+    /**
+     * Reads the file, finds the one place the text occurs, and returns the diff for
+     * replacing it. Every refusal here is worded for the model, because the stage replays
+     * it verbatim and it is the only thing the model learns from.
+     */
+    private String replacementPatch(
+            McpPlatformClient client, ToolBinding binding, ParsedRequest request) {
+        String path = text(request.arguments(), "path");
+        String oldText = request.arguments().path("oldText").textValue();
+        String newText = request.arguments().path("newText").textValue();
+        String content = readFileForReplacement(client, binding, path);
+        int first = content.indexOf(oldText);
+        if (first < 0) {
+            throw validation("apply_patch could not find that oldText in " + path + ". The "
+                    + "file is there but does not contain those exact characters - spacing, "
+                    + "indentation and line breaks all count. Call read_file on " + path
+                    + " and copy the text to replace straight out of what it returns.");
+        }
+        int second = content.indexOf(oldText, first + 1);
+        if (second >= 0) {
+            throw validation("apply_patch found that oldText more than once in " + path
+                    + ", so it cannot tell which one to change. Extend oldText with the "
+                    + "surrounding lines until it appears only once.");
+        }
+        String updated = content.substring(0, first) + newText
+                + content.substring(first + oldText.length());
+        String patch = buildReplacementPatch(path, content, updated);
+        if (patch.length() > 50_000) {
+            throw validation("apply_patch built a diff larger than the 50,000 character "
+                    + "bound from that replacement, because the lines around it are very "
+                    + "long. Replace a smaller piece of " + path + ".");
+        }
+        return patch;
+    }
+
+    /**
+     * The current bytes of one file, read through the same MCP tool the model uses. A
+     * failure here is the model's path or the fence, not a broken gateway, so it is
+     * reported as a refusal the model can answer - {@link #unavailable()} would end the Job.
+     */
+    private String readFileForReplacement(
+            McpPlatformClient client, ToolBinding binding, String path) {
+        ObjectNode arguments = objectMapper.createObjectNode();
+        arguments.put("workspace", binding.workspaceId().toString());
+        arguments.put("expectedHead", gitHash(binding.expectedHead()));
+        arguments.put("path", path);
+        JsonNode result;
+        try {
+            result = client.callTool("read_file", arguments);
+        }
+        catch (McpPlatformException failure) {
+            throw unavailable();
+        }
+        JsonNode structured = result.path("structuredContent");
+        if (result.path("isError").asBoolean() || !structured.isObject()
+                || !structured.path("content").isTextual()) {
+            throw validation("apply_patch could not read " + path + " to build the change. "
+                    + mcpRefusalReason(result) + " Check the path and call read_file on it "
+                    + "first.");
+        }
+        return structured.path("content").asText();
+    }
+
+    /**
+     * The unified diff that turns {@code original} into {@code updated}. One replacement
+     * touches one run of lines, so one hunk carries it, with the usual three lines of
+     * context on each side. Both the start lines and the counts are counted from the file
+     * the workspace just returned rather than declared, and git still checks every context
+     * line against the real file before it applies anything.
+     */
+    static String buildReplacementPatch(String path, String original, String updated) {
+        boolean originalNewlineAtEof = original.endsWith("\n");
+        boolean updatedNewlineAtEof = updated.endsWith("\n");
+        List<String> oldLines = contentLines(original);
+        List<String> newLines = contentLines(updated);
+        int shorter = Math.min(oldLines.size(), newLines.size());
+        int prefix = 0;
+        while (prefix < shorter && oldLines.get(prefix).equals(newLines.get(prefix))) {
+            prefix++;
+        }
+        int suffix = 0;
+        while (suffix < shorter - prefix
+                && oldLines.get(oldLines.size() - 1 - suffix)
+                        .equals(newLines.get(newLines.size() - 1 - suffix))) {
+            suffix++;
+        }
+        // A last line that reads the same but ends differently is not a context line: the
+        // '\ No newline at end of file' marker belongs to one side only.
+        if (originalNewlineAtEof != updatedNewlineAtEof) {
+            suffix = 0;
+        }
+        int oldChangeEnd = oldLines.size() - suffix;
+        int newChangeEnd = newLines.size() - suffix;
+        int start = Math.max(0, prefix - PATCH_CONTEXT_LINES);
+        int trailing = Math.min(PATCH_CONTEXT_LINES, suffix);
+
+        StringBuilder body = new StringBuilder();
+        for (int line = start; line < prefix; line++) {
+            appendPatchLine(body, ' ', oldLines, line, originalNewlineAtEof);
+        }
+        for (int line = prefix; line < oldChangeEnd; line++) {
+            appendPatchLine(body, '-', oldLines, line, originalNewlineAtEof);
+        }
+        for (int line = prefix; line < newChangeEnd; line++) {
+            appendPatchLine(body, '+', newLines, line, updatedNewlineAtEof);
+        }
+        for (int line = oldChangeEnd; line < oldChangeEnd + trailing; line++) {
+            appendPatchLine(body, ' ', oldLines, line, originalNewlineAtEof);
+        }
+        return "diff --git a/" + path + " b/" + path + "\n"
+                + "--- a/" + path + "\n"
+                + "+++ b/" + path + "\n"
+                + "@@ -" + (start + 1) + "," + (oldChangeEnd + trailing - start)
+                + " +" + (start + 1) + "," + (newChangeEnd + trailing - start) + " @@\n"
+                + body;
+    }
+
+    /** The lines of a file, without the empty element a closing newline leaves behind. */
+    private static List<String> contentLines(String content) {
+        if (content.isEmpty()) {
+            return List.of();
+        }
+        String body = content.endsWith("\n")
+                ? content.substring(0, content.length() - 1) : content;
+        return List.of(body.split("\n", -1));
+    }
+
+    private static void appendPatchLine(
+            StringBuilder body, char marker, List<String> lines, int index, boolean newlineAtEof) {
+        body.append(marker).append(lines.get(index)).append('\n');
+        if (!newlineAtEof && index == lines.size() - 1) {
+            body.append("\\ No newline at end of file\n");
+        }
+    }
+
+    /**
+     * git apply refuses a malformed patch as "patch with only garbage at :N" or "patch
+     * fragment without header at :N", and the MCP workspace drops that stderr, so the model
+     * hears only that the operation failed and repeats the same mistake. Checking the patch
+     * here turns the same defect into a TOOL_ARGUMENTS_INVALID message naming the offending
+     * line, and that message is replayed to the model verbatim. Two things are checked: the
+     * hunk header shape, and whether each header's declared counts match its own body -
+     * both are internal consistency of the patch text. Whether the line numbers and context
+     * match the real file is git's judgement, not a guess this precheck should make.
+     */
+    static String normalizePatchText(String patch) {
+        // The MCP workspace only applies a patch whose first line is a canonical
+        // 'diff --git a/PATH b/PATH' header, so the precheck demands the same
+        // start. The old '--- ' start could never pass the MCP policy.
+        if (patch.length() > 50_000 || !patch.startsWith("diff --git a/")) {
+            throw validation("apply_patch patch is invalid: it must start with a "
+                    + "'diff --git a/PATH b/PATH' line.");
+        }
+        String[] lines = patch.split("\n", -1);
+        int hunks = 0;
+        boolean oldPathLine = false;
+        boolean newPathLine = false;
+        // The hunk currently being read: where its header sits and what its body carries.
+        // headerLine 0 means no hunk is open; -1 in a slot means "no count was written".
+        int headerLine = 0;
+        int actualOld = 0;
+        int actualNew = 0;
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index].endsWith("\r")
+                    ? lines[index].substring(0, lines[index].length() - 1)
+                    : lines[index];
+            // A trailing newline leaves one empty element behind the last real line;
+            // it is an artifact of the split, not a context line of the last hunk.
+            if (line.isEmpty() && index == lines.length - 1) {
+                break;
+            }
+            // Every body line carries a ' ', '+' or '-' prefix, so a line that opens at
+            // column zero with '@@' can only be a hunk header.
+            if (line.startsWith("@@")) {
+                if (!UNIFIED_HUNK_HEADER.matcher(line).matches()) {
+                    throw validation("apply_patch patch is invalid: line " + (index + 1)
+                            + " is \"" + abbreviate(line) + "\", but a hunk header must carry "
+                            + "the real line numbers of the file, as "
+                            + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' - "
+                            + "for example '@@ -73,7 +73,7 @@'.");
+                }
+                rewriteCounts(lines, headerLine, actualOld, actualNew);
+                hunks++;
+                headerLine = index + 1;
+                actualOld = 0;
+                actualNew = 0;
+                continue;
+            }
+            if (headerLine > 0) {
+                if (line.startsWith("diff --git ")) {
+                    // The next file begins, so the open hunk is complete.
+                    rewriteCounts(lines, headerLine, actualOld, actualNew);
+                    headerLine = 0;
+                }
+                else if (line.startsWith("\\")) {
+                    // '\ No newline at end of file' belongs to neither side.
+                    continue;
+                }
+                else if (line.startsWith("+")) {
+                    actualNew++;
+                    continue;
+                }
+                else if (line.startsWith("-")) {
+                    actualOld++;
+                    continue;
+                }
+                else {
+                    // ' ' context; git also tolerates a context line whose lone
+                    // space was trimmed away, so a bare empty line counts as one.
+                    actualOld++;
+                    actualNew++;
+                    continue;
+                }
+            }
+            oldPathLine = oldPathLine || line.startsWith("--- ");
+            newPathLine = newPathLine || line.startsWith("+++ ");
+        }
+        rewriteCounts(lines, headerLine, actualOld, actualNew);
+        if (hunks == 0) {
+            throw validation("apply_patch patch is invalid: it has no hunk. Add a "
+                    + "'@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@' header "
+                    + "followed by the changed lines.");
+        }
+        if (!oldPathLine || !newPathLine) {
+            throw validation("apply_patch patch is invalid: it must carry a '--- a/PATH' line "
+                    + "and a '+++ b/PATH' line before the first hunk header.");
+        }
+        return String.join("\n", lines);
+    }
+
+    /**
+     * Writes the counted totals into the open hunk's header. A hunk's counts are not a
+     * safety check - they carry no information the body does not already hold, and git
+     * still matches every context line against the real file, so a body that says the
+     * wrong thing is refused whatever the header claims. Leaving the arithmetic to the
+     * model cost fifteen straight refusals on Job e0fb866f, where one context line ran
+     * to 1,387 characters. The start line is never touched: that is a claim about the
+     * file, only git can check it, and a guess here would edit the wrong place.
+     */
+    private static void rewriteCounts(
+            String[] lines, int headerLine, int actualOld, int actualNew) {
+        if (headerLine == 0) {
+            return;
+        }
+        String header = lines[headerLine - 1];
+        String suffix = header.endsWith("\r") ? "\r" : "";
+        Matcher parts = HUNK_HEADER_PARTS.matcher(
+                suffix.isEmpty() ? header : header.substring(0, header.length() - 1));
+        if (!parts.matches()) {
+            return;
+        }
+        lines[headerLine - 1] = "@@ -" + parts.group(1) + "," + actualOld
+                + " +" + parts.group(2) + "," + actualNew + " @@" + parts.group(3) + suffix;
+    }
+
+    private static String abbreviate(String line) {
+        return line.length() <= 80 ? line : line.substring(0, 80) + "...";
     }
 
     private static void validateRequestedPaths(
@@ -748,6 +1120,16 @@ public final class CodingToolService {
                 HttpStatus.FORBIDDEN);
     }
 
+    /** One bounded line of the MCP refusal, with control characters removed. */
+    private static String mcpRefusalReason(JsonNode result) {
+        String text = result.path("content").path(0).path("text").asText("");
+        String cleaned = text.replaceAll("\\p{Cntrl}+", " ").strip();
+        if (cleaned.isEmpty()) {
+            return "No reason was returned.";
+        }
+        return cleaned.length() > 300 ? cleaned.substring(0, 300) : cleaned;
+    }
+
     private static CodingToolException failedResult() {
         return new CodingToolException(
                 "TOOL_EXECUTION_FAILED",
@@ -797,21 +1179,45 @@ public final class CodingToolService {
             String contextDigest, String policyHash, String promptVersion,
             Set<String> allowedCapabilities,
             Set<String> allowedNodes, Set<String> profileAllowedTools,
-            String guardrailProfileKey, Instant expiresAt) { }
-    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            String guardrailProfileKey, ProfileToolBindingPolicy toolBindings,
+            Instant expiresAt, UUID profileVersionId) { }
+    record RuntimePolicy(
+            Set<String> allowedTools,
+            String guardrailProfileKey,
+            ProfileToolBindingPolicy toolBindings) {
+        RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            this(allowedTools, guardrailProfileKey,
+                    ProfileToolBindingPolicy.legacy(allowedTools));
+        }
         RuntimePolicy {
             allowedTools = Set.copyOf(allowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
         }
     }
     record StageAuthority(
             UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
             UUID repositoryId, String graphStep, String baseSha, String contextDigest,
             String policyHash, String promptVersion, Set<String> allowedCapabilities,
-            Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt) {
+            Set<String> allowedNodes, Set<String> profileAllowedTools,
+            ProfileToolBindingPolicy toolBindings, Instant expiresAt, UUID profileVersionId) {
+        StageAuthority(
+                UUID traceId, int stateVersion, UUID leaseId, UUID actorId, UUID projectId,
+                UUID repositoryId, String graphStep, String baseSha, String contextDigest,
+                String policyHash, String promptVersion, Set<String> allowedCapabilities,
+                Set<String> allowedNodes, Set<String> profileAllowedTools, Instant expiresAt,
+                UUID profileVersionId) {
+            this(traceId, stateVersion, leaseId, actorId, projectId, repositoryId, graphStep,
+                    baseSha, contextDigest, policyHash, promptVersion, allowedCapabilities,
+                    allowedNodes, profileAllowedTools,
+                    ProfileToolBindingPolicy.legacy(profileAllowedTools),
+                    expiresAt, profileVersionId);
+        }
         StageAuthority {
             allowedCapabilities = Set.copyOf(allowedCapabilities);
             allowedNodes = Set.copyOf(allowedNodes);
             profileAllowedTools = Set.copyOf(profileAllowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
+            Objects.requireNonNull(profileVersionId, "profileVersionId is required");
         }
     }
     private record ToolBinding(UUID workspaceId, String expectedHead, String expectedDiffDigest) { }

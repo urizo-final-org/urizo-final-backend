@@ -1,15 +1,27 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway.product;
 
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.ai.anthropic.AnthropicChatOptions;
+import org.springframework.ai.anthropic.api.AnthropicApi;
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.Message;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -19,7 +31,14 @@ import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.context.annotation.Profile;
+import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
+import org.springframework.ai.google.genai.common.GoogleGenAiThinkingLevel;
+import org.springframework.ai.model.tool.ToolCallingChatOptions;
+import org.springframework.ai.model.tool.StructuredOutputChatOptions;
+import org.springframework.ai.openai.OpenAiChatOptions;
 import org.springframework.stereotype.Component;
+import org.springframework.ai.tool.ToolCallback;
+import org.springframework.ai.tool.function.FunctionToolCallback;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatMessage;
@@ -29,15 +48,32 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentia
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialResolver;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailure;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFailureKind;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderFinishReason;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings;
 
 @Component
 @Profile("dev & !coding-model-turn-local-mock")
 final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
 
+    private static final int MAX_NATIVE_TOOL_CALLS = 50;
+    private static final int MAX_THOUGHT_SIGNATURE_BYTES = 65_536;
+    private static final int MAX_THOUGHT_SIGNATURES = 1_024;
+    private static final Duration THOUGHT_SIGNATURE_TTL = Duration.ofMinutes(10);
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final ProviderCredentialResolver credentialResolver;
     private final Map<ModelProvider, ProductChatModelFactory> factories;
     private final Clock clock;
+    private final Map<ThoughtSignatureKey, StoredThoughtSignature> thoughtSignatures =
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(
+                        Map.Entry<ThoughtSignatureKey, StoredThoughtSignature> eldest) {
+                    return size() > MAX_THOUGHT_SIGNATURES;
+                }
+            };
 
     SpringAiProductProviderChatAdapter(
             ProviderCredentialResolver credentialResolver,
@@ -81,10 +117,7 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                         credential,
                         registration.modelId(),
                         registration.maxOutputTokens())) {
-                    ChatResponse response = session.chatModel().call(
-                            new Prompt(request.messages().stream()
-                                    .map(SpringAiProductProviderChatAdapter::springMessage)
-                                    .toList()));
+                    ChatResponse response = session.chatModel().call(prompt(registration, request));
                     return response(request, response, startedAt);
                 }
             }
@@ -94,22 +127,163 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
     }
 
-    private static Message springMessage(ProviderChatMessage message) {
+    private Prompt prompt(ProviderModelRegistration registration, ProviderChatRequest request) {
+        List<ProviderChatMessage> providerMessages = request.providerMessages();
+        List<Message> messages = new ArrayList<>();
+        for (int index = 0; index < providerMessages.size(); index++) {
+            messages.add(springMessage(request, providerMessages.get(index), index));
+        }
+        if (request.tools().isEmpty() && !request.responseFormat().structured()) {
+            return new Prompt(messages, chatOptions(registration, request));
+        }
+        if (request.responseFormat().structured()) {
+            return new Prompt(messages, structuredOptions(registration, request));
+        }
+        List<ToolCallback> callbacks = request.tools().stream()
+                .map(SpringAiProductProviderChatAdapter::toolCallback)
+                .toList();
+        ToolCallingChatOptions options = toolOptions(registration, request, callbacks);
+        return new Prompt(messages, options);
+    }
+
+    private static StructuredOutputChatOptions structuredOptions(
+            ProviderModelRegistration registration, ProviderChatRequest request) {
+        StructuredOutputChatOptions options = switch (request.provider()) {
+            case OPENAI -> new OpenAiChatOptions();
+            case GOOGLE_GENAI -> {
+                GoogleGenAiChatOptions google = new GoogleGenAiChatOptions();
+                google.setResponseMimeType("application/json");
+                yield google;
+            }
+            case ANTHROPIC -> new AnthropicChatOptions();
+            case VERTEX_AI_GEMINI ->
+                    throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        };
+        if (options instanceof OpenAiChatOptions openAi) {
+            applyInference(openAi, request.inferenceSettings());
+        }
+        if (options instanceof AnthropicChatOptions anthropic) applyInference(anthropic, request.inferenceSettings());
+        if (options instanceof GoogleGenAiChatOptions google) {
+            applyInference(google, request.inferenceSettings(), registration.inferenceSupport());
+        }
+        options.setOutputSchema(request.responseFormat().providerOutputSchema());
+        return options;
+    }
+
+    private static ToolCallingChatOptions toolOptions(
+            ProviderModelRegistration registration,
+            ProviderChatRequest request, List<ToolCallback> callbacks) {
+        return switch (request.provider()) {
+            case OPENAI -> {
+                OpenAiChatOptions options = new OpenAiChatOptions();
+                applyInference(options, request.inferenceSettings());
+                options.setToolCallbacks(callbacks);
+                options.setInternalToolExecutionEnabled(false);
+                options.setParallelToolCalls(false);
+                yield options;
+            }
+            case GOOGLE_GENAI -> {
+                GoogleGenAiChatOptions options = new GoogleGenAiChatOptions();
+                applyInference(options, request.inferenceSettings(), registration.inferenceSupport());
+                options.setToolCallbacks(callbacks);
+                options.setInternalToolExecutionEnabled(false);
+                yield options;
+            }
+            case ANTHROPIC -> {
+                AnthropicChatOptions options = new AnthropicChatOptions();
+                applyInference(options, request.inferenceSettings());
+                options.setToolCallbacks(callbacks);
+                options.setInternalToolExecutionEnabled(false);
+                yield options;
+            }
+            case VERTEX_AI_GEMINI ->
+                    throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        };
+    }
+
+    private static void applyInference(OpenAiChatOptions options, InferenceSettings settings) {
+        if (settings.reasoningIntensity() != InferenceSettings.ReasoningIntensity.NONE) {
+            options.setReasoningEffort(settings.reasoningIntensity().name().toLowerCase(java.util.Locale.ROOT));
+        }
+    }
+
+    private static org.springframework.ai.chat.prompt.ChatOptions chatOptions(
+            ProviderModelRegistration registration, ProviderChatRequest request) {
+        return switch (request.provider()) {
+            case OPENAI -> { OpenAiChatOptions value = new OpenAiChatOptions(); applyInference(value, request.inferenceSettings()); yield value; }
+            case ANTHROPIC -> { AnthropicChatOptions value = new AnthropicChatOptions(); applyInference(value, request.inferenceSettings()); yield value; }
+            case GOOGLE_GENAI -> { GoogleGenAiChatOptions value = new GoogleGenAiChatOptions(); applyInference(value, request.inferenceSettings(), registration.inferenceSupport()); yield value; }
+            case VERTEX_AI_GEMINI -> throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        };
+    }
+
+    private static void applyInference(AnthropicChatOptions options, InferenceSettings settings) {
+        if (settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE) {
+            // Spring AI 1.1.8 cannot encode Anthropic adaptive thinking. Leaving the
+            // field absent preserves the provider default used by Opus 5 and Sonnet 5.
+            return;
+        }
+        options.setThinking(new AnthropicApi.ChatCompletionRequest.ThinkingConfig(
+                AnthropicApi.ThinkingType.ENABLED,
+                settings.reasoningBudgetTokens()));
+    }
+
+    private static void applyInference(
+            GoogleGenAiChatOptions options,
+            InferenceSettings settings,
+            org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSupport support) {
+        if (settings.reasoningBudgetTokens() != null && support.reasoningBudgetTokens() != null) {
+            // Google accepts either its budget-based control or thinkingLevel, never both.
+            options.setThinkingBudget(settings.reasoningBudgetTokens());
+            return;
+        }
+        options.setThinkingLevel(settings.reasoningIntensity() == InferenceSettings.ReasoningIntensity.NONE
+                ? GoogleGenAiThinkingLevel.THINKING_LEVEL_UNSPECIFIED
+                : GoogleGenAiThinkingLevel.valueOf(settings.reasoningIntensity().name()));
+    }
+
+    private static ToolCallback toolCallback(ProviderToolDefinition tool) {
+        return FunctionToolCallback.<String, String>builder(
+                        tool.name(), input -> {
+                            throw new IllegalStateException(
+                                    "Provider-native tool callbacks cannot execute inside the chat adapter.");
+                        })
+                .description(tool.description())
+                .inputType(String.class)
+                .inputSchema(tool.providerInputSchema())
+                .build();
+    }
+
+    private Message springMessage(
+            ProviderChatRequest request,
+            ProviderChatMessage message,
+            int messageIndex) {
         return switch (message.role()) {
             case SYSTEM -> new SystemMessage(message.content());
             case USER -> new UserMessage(message.content());
-            case ASSISTANT -> AssistantMessage.builder()
-                    .content(message.content())
-                    .toolCalls(message.toolCalls().stream()
-                            .map(call -> new AssistantMessage.ToolCall(
-                                    call.id(), "function", call.name(), call.arguments()))
-                            .toList())
-                    .build();
+            case ASSISTANT -> assistantMessage(request, message, messageIndex);
             case TOOL -> ToolResponseMessage.builder()
                     .responses(List.of(new ToolResponseMessage.ToolResponse(
                             message.toolCallId(), message.toolName(), message.content())))
                     .build();
         };
+    }
+
+    private AssistantMessage assistantMessage(
+            ProviderChatRequest request,
+            ProviderChatMessage message,
+            int messageIndex) {
+        AssistantMessage.Builder builder = AssistantMessage.builder()
+                .content(message.content())
+                .toolCalls(message.toolCalls().stream()
+                        .map(call -> new AssistantMessage.ToolCall(
+                                call.id(), "function", call.name(), call.arguments()))
+                        .toList());
+        List<byte[]> restored = restoreThoughtSignatures(request, message, messageIndex);
+        if (!restored.isEmpty()) {
+            builder.properties(Map.of("thoughtSignatures", restored));
+        }
+        return builder.build();
     }
 
     private ProviderChatResponse response(
@@ -119,24 +293,259 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
             throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         }
-        String content = response.getResult().getOutput().getText();
-        if (content == null || content.isBlank()) {
-            throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        AssistantMessage output = response.getResult().getOutput();
+        // An answer can arrive split across several generations - a text block, then the
+        // tool_use block. Reading only the first one reported stop_reason 'tool_use' with zero
+        // tool calls, and the turn was refused as incomplete, so every generation is merged
+        // before the answer is judged.
+        StringBuilder mergedContent = new StringBuilder();
+        List<AssistantMessage.ToolCall> mergedNativeCalls = new ArrayList<>();
+        for (org.springframework.ai.chat.model.Generation generation : response.getResults()) {
+            if (generation == null || generation.getOutput() == null) {
+                continue;
+            }
+            AssistantMessage part = generation.getOutput();
+            if (part.getText() != null) {
+                mergedContent.append(part.getText());
+            }
+            if (part.getToolCalls() != null) {
+                mergedNativeCalls.addAll(part.getToolCalls());
+            }
         }
+        String content = mergedContent.toString();
+        List<ProviderChatMessage.ToolCall> toolCalls = nativeToolCalls(
+                request, content, mergedNativeCalls);
+        storeThoughtSignatures(request, output, toolCalls);
+        String compatibleContent = request.legacyToolEnvelope()
+                ? legacyEnvelope(content, toolCalls) : content;
         Usage usage = response.getMetadata() == null ? null : response.getMetadata().getUsage();
         int inputTokens = usage == null ? 0 : nonNegative(usage.getPromptTokens());
         int outputTokens = usage == null ? 0 : nonNegative(usage.getCompletionTokens());
         Duration latency = Duration.between(startedAt, clock.instant());
+        String nativeFinishReason = response.getResult().getMetadata() == null
+                ? null : response.getResult().getMetadata().getFinishReason();
+        ProviderFinishReason finishReason = ProviderFinishReason.normalize(
+                request.provider(), nativeFinishReason, !toolCalls.isEmpty());
         return new ProviderChatResponse(
                 request.provider(),
                 request.modelId(),
-                content,
+                compatibleContent,
+                toolCalls,
                 inputTokens,
                 outputTokens,
-                latency.isNegative() ? Duration.ZERO : latency);
+                latency.isNegative() ? Duration.ZERO : latency,
+                finishReason);
+    }
+
+    private static List<ProviderChatMessage.ToolCall> nativeToolCalls(
+            ProviderChatRequest request,
+            String assistantContent,
+            List<AssistantMessage.ToolCall> nativeCalls) {
+        if (nativeCalls == null || nativeCalls.isEmpty()) {
+            return List.of();
+        }
+        if (nativeCalls.size() > MAX_NATIVE_TOOL_CALLS) {
+            throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        }
+        if (request.legacyToolEnvelope() && nativeCalls.size() > 1) {
+            throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        }
+        Map<String, ProviderToolDefinition> definitions = new HashMap<>();
+        request.tools().forEach(tool -> definitions.put(tool.name(), tool));
+        ArrayList<ProviderChatMessage.ToolCall> normalized = new ArrayList<>();
+        for (int index = 0; index < nativeCalls.size(); index++) {
+            AssistantMessage.ToolCall nativeCall = nativeCalls.get(index);
+            if (nativeCall == null || !"function".equals(nativeCall.type())) {
+                throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+            }
+            ProviderToolDefinition definition = definitions.get(nativeCall.name());
+            if (definition == null) {
+                throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+            }
+            String arguments;
+            try {
+                arguments = definition.normalizeArguments(nativeCall.arguments());
+            }
+            catch (IllegalArgumentException failure) {
+                throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+            }
+            normalized.add(new ProviderChatMessage.ToolCall(
+                    toolCallId(
+                            request, assistantContent, index, definition.name(), arguments),
+                    definition.name(),
+                    arguments));
+        }
+        return List.copyOf(normalized);
+    }
+
+    private static String toolCallId(
+            ProviderChatRequest request,
+            String assistantContent,
+            int index,
+            String name,
+            String arguments) {
+        String correlation = correlationId(
+                request,
+                request.providerMessages().size(),
+                assistantContent,
+                index,
+                name,
+                arguments);
+        return UUID.nameUUIDFromBytes(correlation.getBytes(StandardCharsets.US_ASCII)).toString();
+    }
+
+    private static String correlationId(
+            ProviderChatRequest request,
+            int messageCount,
+            String assistantContent,
+            int index,
+            String name,
+            String arguments) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            update(digest, request.provider().name());
+            update(digest, request.modelId());
+            List<ProviderChatMessage> messages = request.providerMessages();
+            if (messageCount < 0 || messageCount > messages.size()) {
+                throw new IllegalArgumentException("Tool call message correlation is invalid.");
+            }
+            for (int messageIndex = 0; messageIndex < messageCount; messageIndex++) {
+                ProviderChatMessage message = messages.get(messageIndex);
+                update(digest, message.role().name());
+                update(digest, message.content());
+                update(digest, message.toolCallId());
+                update(digest, message.toolName());
+                for (ProviderChatMessage.ToolCall call : message.toolCalls()) {
+                    update(digest, call.id());
+                    update(digest, call.name());
+                    update(digest, call.arguments());
+                }
+            }
+            update(digest, assistantContent);
+            update(digest, Integer.toString(index));
+            update(digest, name);
+            update(digest, arguments);
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        }
+        catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable.", failure);
+        }
+    }
+
+    private static void update(MessageDigest digest, String value) {
+        byte[] bytes = value == null ? new byte[0] : value.getBytes(StandardCharsets.UTF_8);
+        digest.update((byte) (bytes.length >>> 24));
+        digest.update((byte) (bytes.length >>> 16));
+        digest.update((byte) (bytes.length >>> 8));
+        digest.update((byte) bytes.length);
+        digest.update(bytes);
+    }
+
+    private void storeThoughtSignatures(
+            ProviderChatRequest request,
+            AssistantMessage output,
+            List<ProviderChatMessage.ToolCall> normalizedCalls) {
+        if (request.provider() != ModelProvider.GOOGLE_GENAI
+                || normalizedCalls.isEmpty()
+                || output.getMetadata() == null
+                || !output.getMetadata().containsKey("thoughtSignatures")) {
+            return;
+        }
+        Object raw = output.getMetadata().get("thoughtSignatures");
+        if (!(raw instanceof List<?> values) || values.size() != normalizedCalls.size()) {
+            throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        }
+        List<byte[]> validated = new ArrayList<>();
+        for (Object item : values) {
+            if (!(item instanceof byte[] signature)
+                    || signature.length == 0
+                    || signature.length > MAX_THOUGHT_SIGNATURE_BYTES) {
+                throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+            }
+            validated.add(Arrays.copyOf(signature, signature.length));
+        }
+        Instant expiresAt = clock.instant().plus(THOUGHT_SIGNATURE_TTL);
+        String assistantContent = output.getText() == null ? "" : output.getText();
+        synchronized (thoughtSignatures) {
+            for (int index = 0; index < validated.size(); index++) {
+                ProviderChatMessage.ToolCall call = normalizedCalls.get(index);
+                thoughtSignatures.put(
+                        new ThoughtSignatureKey(
+                                request.provider(), request.modelId(),
+                                correlationId(
+                                        request,
+                                        request.providerMessages().size(),
+                                        assistantContent,
+                                        index,
+                                        call.name(),
+                                        call.arguments())),
+                        new StoredThoughtSignature(
+                                validated.get(index), expiresAt));
+            }
+        }
+    }
+
+    private List<byte[]> restoreThoughtSignatures(
+            ProviderChatRequest request,
+            ProviderChatMessage message,
+            int messageIndex) {
+        List<ProviderChatMessage.ToolCall> calls = message.toolCalls();
+        if (request.provider() != ModelProvider.GOOGLE_GENAI || calls.isEmpty()) {
+            return List.of();
+        }
+        List<byte[]> restored = new ArrayList<>();
+        synchronized (thoughtSignatures) {
+            for (int callIndex = 0; callIndex < calls.size(); callIndex++) {
+                ProviderChatMessage.ToolCall call = calls.get(callIndex);
+                ThoughtSignatureKey key = new ThoughtSignatureKey(
+                        request.provider(), request.modelId(),
+                        correlationId(
+                                request,
+                                messageIndex,
+                                message.content(),
+                                callIndex,
+                                call.name(),
+                                call.arguments()));
+                StoredThoughtSignature stored = thoughtSignatures.get(key);
+                if (stored == null || !clock.instant().isBefore(stored.expiresAt())) {
+                    thoughtSignatures.remove(key);
+                    return List.of();
+                }
+                restored.add(Arrays.copyOf(stored.value(), stored.value().length));
+            }
+        }
+        return List.copyOf(restored);
+    }
+
+    private static String legacyEnvelope(
+            String content, List<ProviderChatMessage.ToolCall> toolCalls) {
+        ObjectNode envelope = JSON.createObjectNode();
+        envelope.put("assistant", content);
+        ArrayNode calls = envelope.putArray("toolCalls");
+        for (ProviderChatMessage.ToolCall call : toolCalls) {
+            ObjectNode value = calls.addObject();
+            value.put("name", call.name());
+            try {
+                value.set("arguments", JSON.readTree(call.arguments()));
+            }
+            catch (JsonProcessingException failure) {
+                throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+            }
+        }
+        try {
+            return JSON.writeValueAsString(envelope);
+        }
+        catch (JsonProcessingException failure) {
+            throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
+        }
     }
 
     private static int nonNegative(Integer value) {
         return value == null || value < 0 ? 0 : value;
     }
+
+    private record ThoughtSignatureKey(
+            ModelProvider provider, String modelId, String correlationId) { }
+
+    private record StoredThoughtSignature(byte[] value, Instant expiresAt) { }
 }

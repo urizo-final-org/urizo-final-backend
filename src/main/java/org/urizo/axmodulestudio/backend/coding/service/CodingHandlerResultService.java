@@ -134,7 +134,8 @@ public final class CodingHandlerResultService {
             String authorization, UUID jobId, int pipelineAttempt) {
         return authenticated(authorization, () -> {
             List<AggregateRow> attempts = jdbc.query("""
-                    SELECT cj.trace_id, cpa.workspace_id, cpa.status, cjr.request_text,
+                    SELECT cj.trace_id, cj.status AS job_status, cj.state_version,
+                           cpa.workspace_id, cpa.status, cjr.request_text,
                            cpa.created_at, cpa.finished_at
                     FROM app.coding_pipeline_attempt cpa
                     JOIN app.coding_job cj ON cj.job_id = cpa.job_id
@@ -143,6 +144,8 @@ public final class CodingHandlerResultService {
                     """,
                     (rs, row) -> new AggregateRow(
                             rs.getObject("trace_id", UUID.class),
+                            rs.getString("job_status"),
+                            rs.getInt("state_version"),
                             rs.getObject("workspace_id", UUID.class),
                             CodingHandlerContract.AttemptStatus.valueOf(rs.getString("status")),
                             rs.getString("request_text"),
@@ -208,7 +211,7 @@ public final class CodingHandlerResultService {
                             rs.getTimestamp("decided_at").toInstant()),
                     jobId, pipelineAttempt, pipelineAttempt);
             List<CodingHandlerContract.PendingApprovalSummary> pendingApprovals =
-                    pendingApprovals(jobId, pipelineAttempt);
+                    pendingApprovals(attempt, jobId, pipelineAttempt);
             return new CodingHandlerContract.AttemptAggregateResponse(
                     CodingHandlerContract.SCHEMA_VERSION,
                     jobId,
@@ -225,31 +228,44 @@ public final class CodingHandlerResultService {
         });
     }
 
-    private List<CodingHandlerContract.PendingApprovalSummary> pendingApprovals(
-            UUID jobId, int pipelineAttempt) {
-        return CodingApprovalReadiness.find(jdbc, jobId, pipelineAttempt)
-                .map(ready -> {
-                    Integer previous = jdbc.queryForObject("""
-                            SELECT COUNT(*) FROM app.coding_approval_decision
-                            WHERE job_id = ? AND stage = ?
-                            """, Integer.class, jobId, ready.stage().name());
-                    int stageRound = (previous == null ? 0 : previous) + 1;
-                    String nodeId = CodingHandlerContract.approvalNode(ready.stage());
-                    return List.of(new CodingHandlerContract.PendingApprovalSummary(
-                            CodingApprovalId.forStage(
-                                    jobId, pipelineAttempt, nodeId, ready.stage(), stageRound),
-                            nodeId,
-                            ready.stage(),
-                            stageRound,
-                            requiresSuperAdmin(ready.stage())
-                                    ? "SUPER_ADMIN" : "GENERAL_ADMIN"));
-                })
-                .orElseGet(List::of);
+    JobRequestIdentity jobRequestIdentity(UUID jobId) {
+        List<JobRequestIdentity> rows = jdbc.query("""
+                SELECT system_work_id, work_slug
+                FROM app.coding_job_request
+                WHERE job_id = ?
+                """, (rs, row) -> new JobRequestIdentity(
+                        rs.getString("system_work_id"), rs.getString("work_slug")), jobId);
+        if (rows.size() != 1
+                || rows.get(0).systemWorkId() == null
+                || rows.get(0).workSlug() == null
+                || !rows.get(0).workSlug().startsWith("system-")) {
+            throw conflict(
+                    "CODING_JOB_REQUEST_NOT_INITIALIZED",
+                    "The Coding Job request identity has not been initialized.");
+        }
+        return rows.get(0);
     }
 
-    private static boolean requiresSuperAdmin(CodingHandlerContract.ApprovalStage stage) {
-        return stage == CodingHandlerContract.ApprovalStage.GITHUB
-                || stage == CodingHandlerContract.ApprovalStage.DEPLOY;
+    private List<CodingHandlerContract.PendingApprovalSummary> pendingApprovals(
+            AggregateRow attempt, UUID jobId, int pipelineAttempt) {
+        if (!"WAITING_APPROVAL".equals(attempt.jobStatus())
+                || attempt.status() != CodingHandlerContract.AttemptStatus.ACTIVE) {
+            return List.of();
+        }
+        return CodingApprovalReadiness.find(
+                        jdbc,
+                        objectMapper,
+                        jobId,
+                        attempt.traceId(),
+                        attempt.stateVersion(),
+                        pipelineAttempt)
+                .map(ready -> List.of(new CodingHandlerContract.PendingApprovalSummary(
+                        ready.approvalId(),
+                        ready.nodeId(),
+                        ready.stage(),
+                        ready.stageRound(),
+                        ready.requiredRole())))
+                .orElseGet(List::of);
     }
 
     private AttemptRow requireCurrentAttempt(UUID jobId, int requestedAttempt) {
@@ -308,6 +324,119 @@ public final class CodingHandlerResultService {
             UUID jobId,
             int pipelineAttempt,
             CodingHandlerContract.PutResultRequest request) {
+        if (request.resultType() == CodingHandlerContract.ResultType.PULL_REQUEST
+                && "coding.pr_complete".equals(request.handlerKey())) {
+            ResultSubject requested = latestSubject(
+                    jobId, pipelineAttempt, "coding.pr_request", "requested");
+            ApprovalSubject githubApproval = latestApproval(
+                    jobId, pipelineAttempt, CodingHandlerContract.ApprovalStage.GITHUB);
+            requireApprovedSubject(requested, githubApproval);
+            if (!matches(request, requested)) {
+                throw subjectConflict();
+            }
+            return;
+        }
+        if (request.resultType() == CodingHandlerContract.ResultType.DEV_MERGE) {
+            ResultSubject pullRequest = latestSubject(
+                    jobId, pipelineAttempt, "coding.pr_complete", "completed");
+            JsonNode pullRequestPayload = latestPayload(
+                    jobId, pipelineAttempt, "coding.pr_complete", "completed");
+            ResultSubject deployRequest = latestSubject(
+                    jobId, pipelineAttempt, "coding.deploy_request", "recorded");
+            JsonNode deployRequestPayload = latestPayload(
+                    jobId, pipelineAttempt, "coding.deploy_request", "recorded");
+            ApprovalSubject deployApproval = latestApproval(
+                    jobId, pipelineAttempt, CodingHandlerContract.ApprovalStage.DEPLOY);
+            requireApprovedSubject(deployRequest, deployApproval);
+            if (!matches(request, pullRequest)
+                    || pullRequestPayload == null
+                    || deployRequest == null
+                    || deployRequestPayload == null
+                    || !deployRequestPayload.hasNonNull("deploymentRequestId")
+                    || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
+                    || !Objects.equals(pullRequestPayload.path("repository").asText(),
+                            deployRequestPayload.path("repository").asText())
+                    || pullRequestPayload.path("prNumber").asInt(-1)
+                            != deployRequestPayload.path("prNumber").asInt(-2)) {
+                throw subjectConflict();
+            }
+            return;
+        }
+        if (request.resultType() == CodingHandlerContract.ResultType.DEPLOYMENT) {
+            ResultSubject deployRequest = latestSubject(
+                    jobId, pipelineAttempt, "coding.deploy_request", "recorded");
+            JsonNode deployRequestPayload = latestPayload(
+                    jobId, pipelineAttempt, "coding.deploy_request", "recorded");
+            ResultSubject merge = latestSubject(
+                    jobId, pipelineAttempt, "coding.dev_merge_check", "merged");
+            ApprovalSubject approval = latestApproval(
+                    jobId, pipelineAttempt, CodingHandlerContract.ApprovalStage.DEPLOY);
+            requireApprovedSubject(deployRequest, approval);
+            String deploymentRequestId = request.payload()
+                    .path("deploymentRequestId").asText();
+            String mergeSha = request.payload().path("mergeSha").asText();
+            String expectedExecutionId = UUID.nameUUIDFromBytes(
+                    ("deployment-execution:" + deploymentRequestId + ":" + mergeSha)
+                            .getBytes(StandardCharsets.UTF_8)).toString();
+            if (!matches(request, deployRequest)
+                    || merge == null
+                    || !Objects.equals(request.candidateSha(), merge.candidateSha())
+                    || !expectedExecutionId.equals(
+                            request.payload().path("deploymentExecutionId").asText())
+                    || deployRequestPayload == null
+                    || !Objects.equals(deploymentRequestId,
+                            deployRequestPayload.path("deploymentRequestId").asText())
+                    || !Objects.equals(request.payload().path("adapterKey").asText(),
+                            deployRequestPayload.path("adapterKey").asText())
+                    || !Objects.equals(request.payload().path("targetKey").asText(),
+                            deployRequestPayload.path("targetKey").asText())
+                    || !Objects.equals(request.payload().path("configDigest").asText(),
+                            deployRequestPayload.path("configDigest").asText())) {
+                throw subjectConflict();
+            }
+            return;
+        }
+        boolean versionFourDeployRequest =
+                request.resultType() == CodingHandlerContract.ResultType.DEPLOY_REQUEST
+                && request.payload().hasNonNull("deploymentRequestId");
+        if (versionFourDeployRequest) {
+            ResultSubject pullRequest = latestSubject(
+                    jobId, pipelineAttempt, "coding.pr_complete", "completed");
+            ApprovalSubject githubApproval = latestApproval(
+                    jobId, pipelineAttempt, CodingHandlerContract.ApprovalStage.GITHUB);
+            requireApprovedSubject(pullRequest, githubApproval);
+            JsonNode payload = request.payload();
+            ObjectNode subject = objectMapper.createObjectNode();
+            for (String field : List.of(
+                    "jobId", "pipelineAttempt", "repository", "prNumber", "candidateSha",
+                    "sourceValidationHash", "adapterKey", "targetKey", "configDigest")) {
+                JsonNode value = payload.get(field);
+                if (value == null) {
+                    throw subjectConflict();
+                }
+                subject.set(field, value.deepCopy());
+            }
+            boolean valid = pullRequest != null
+                    && jobId.toString().equals(payload.path("jobId").asText())
+                    && pipelineAttempt == payload.path("pipelineAttempt").asInt(-1)
+                    && Objects.equals(request.candidateSha(), pullRequest.candidateSha())
+                    && Objects.equals(request.candidateSha(), payload.path("candidateSha").asText())
+                    && Objects.equals(pullRequest.validationHash(),
+                            payload.path("sourceValidationHash").asText())
+                    && Objects.equals(request.validationHash(), jsonDigest(subject))
+                    && UUID.nameUUIDFromBytes(
+                            ("deployment-request:" + request.validationHash())
+                                    .getBytes(StandardCharsets.UTF_8)).toString().equals(
+                                            payload.path("deploymentRequestId").asText())
+                    && !payload.path("adapterKey").asText().isBlank()
+                    && !payload.path("targetKey").asText().isBlank()
+                    && payload.path("configDigest").asText()
+                            .matches("^sha256:[0-9a-f]{64}$");
+            if (!valid) {
+                throw subjectConflict();
+            }
+            return;
+        }
         CodingHandlerContract.ApprovalStage requiredStage = switch (request.resultType()) {
             case PULL_REQUEST -> CodingHandlerContract.ApprovalStage.CANDIDATE;
             case DEPLOY_REQUEST -> CodingHandlerContract.ApprovalStage.DEPLOY;
@@ -316,19 +445,58 @@ public final class CodingHandlerResultService {
         if (requiredStage == null) {
             return;
         }
-        List<ResultSubject> previews = jdbc.query("""
+        ResultSubject preview = latestSubject(
+                jobId, pipelineAttempt, "coding.preview", "ready");
+        ApprovalSubject approval = latestApproval(jobId, pipelineAttempt, requiredStage);
+        requireBoundarySubject(
+                request.resultType(),
+                new ResultSubject(request.candidateSha(), request.validationHash()),
+                preview,
+                approval);
+    }
+
+    private ResultSubject latestSubject(
+            UUID jobId, int pipelineAttempt, String handlerKey, String port) {
+        List<ResultSubject> rows = jdbc.query("""
                 SELECT candidate_sha, validation_hash
                 FROM app.coding_handler_result
                 WHERE job_id = ? AND pipeline_attempt = ?
-                  AND handler_key = 'coding.preview'
-                  AND result_type = 'DIFF'
-                  AND result_port = 'ready'
+                  AND handler_key = ? AND result_port = ?
                 ORDER BY recorded_at DESC, result_id DESC
                 LIMIT 1
                 """, (rs, row) -> new ResultSubject(
                         rs.getString("candidate_sha"), rs.getString("validation_hash")),
-                jobId, pipelineAttempt);
-        List<ApprovalSubject> approvals = jdbc.query("""
+                jobId, pipelineAttempt, handlerKey, port);
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private JsonNode latestPayload(
+            UUID jobId, int pipelineAttempt, String handlerKey, String port) {
+        List<String> rows = jdbc.query("""
+                SELECT payload::text
+                FROM app.coding_handler_result
+                WHERE job_id = ? AND pipeline_attempt = ?
+                  AND handler_key = ? AND result_port = ?
+                ORDER BY recorded_at DESC, result_id DESC
+                LIMIT 1
+                """, (rs, row) -> rs.getString("payload"),
+                jobId, pipelineAttempt, handlerKey, port);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(rows.get(0));
+        }
+        catch (JsonProcessingException failure) {
+            throw unavailable();
+        }
+    }
+
+    private ApprovalSubject latestApproval(
+            UUID jobId,
+            int pipelineAttempt,
+            CodingHandlerContract.ApprovalStage stage) {
+        List<ApprovalSubject> rows = jdbc.query("""
                 SELECT decision, subject_candidate_sha, validation_hash
                 FROM app.coding_approval_decision
                 WHERE job_id = ? AND pipeline_attempt = ? AND stage = ?
@@ -336,14 +504,30 @@ public final class CodingHandlerResultService {
                 LIMIT 1
                 """, (rs, row) -> new ApprovalSubject(
                         CodingHandlerContract.Decision.valueOf(rs.getString("decision")),
-                        rs.getString("subject_candidate_sha"),
-                        rs.getString("validation_hash")),
-                jobId, pipelineAttempt, requiredStage.name());
-        requireBoundarySubject(
-                request.resultType(),
-                new ResultSubject(request.candidateSha(), request.validationHash()),
-                previews.isEmpty() ? null : previews.get(0),
-                approvals.isEmpty() ? null : approvals.get(0));
+                        rs.getString("subject_candidate_sha"), rs.getString("validation_hash")),
+                jobId, pipelineAttempt, stage.name());
+        return rows.isEmpty() ? null : rows.get(0);
+    }
+
+    private static boolean matches(
+            CodingHandlerContract.PutResultRequest request, ResultSubject subject) {
+        return subject != null
+                && Objects.equals(request.candidateSha(), subject.candidateSha())
+                && Objects.equals(request.validationHash(), subject.validationHash());
+    }
+
+    private static boolean approved(ResultSubject subject, ApprovalSubject approval) {
+        return subject != null
+                && approval != null
+                && approval.decision() == CodingHandlerContract.Decision.APPROVED
+                && Objects.equals(subject.candidateSha(), approval.candidateSha())
+                && Objects.equals(subject.validationHash(), approval.validationHash());
+    }
+
+    static void requireApprovedSubject(ResultSubject subject, ApprovalSubject approval) {
+        if (!approved(subject, approval)) {
+            throw subjectConflict();
+        }
     }
 
     private void requireCandidateChain(
@@ -527,6 +711,25 @@ public final class CodingHandlerResultService {
                 recordedAt);
     }
 
+    /**
+     * The repository this Job works in.
+     *
+     * <p>The stage that queues the build has to name a repository, and a Job's own row is the
+     * only place that answer is recorded. Read here rather than carried through the aggregate
+     * response: the worker contract is shared with the Python runtime, and a field only the
+     * build stage reads does not belong in it.
+     */
+    public String jobRepository(UUID jobId) {
+        List<UUID> identifiers = jdbc.query(
+                "SELECT repository_id FROM app.coding_job WHERE job_id = ?",
+                (rs, row) -> rs.getObject("repository_id", UUID.class), jobId);
+        if (identifiers.size() != 1) {
+            throw new CodingWorkerException(
+                    "JOB_NOT_FOUND", "Authoritative Coding Job not found.", HttpStatus.NOT_FOUND);
+        }
+        return CodingRepositories.nameOf(identifiers.get(0));
+    }
+
     private JobAuthority requireJob(UUID jobId) {
         List<JobAuthority> jobs = jdbc.query("""
                 SELECT trace_id, status, state_version
@@ -607,6 +810,17 @@ public final class CodingHandlerResultService {
         }
     }
 
+    private String jsonDigest(JsonNode value) {
+        try {
+            return "sha256:" + java.util.HexFormat.of().formatHex(
+                    MessageDigest.getInstance("SHA-256")
+                            .digest(objectMapper.writeValueAsBytes(canonical(value))));
+        }
+        catch (NoSuchAlgorithmException | JsonProcessingException failure) {
+            throw unavailable();
+        }
+    }
+
     private JsonNode canonical(JsonNode value) {
         if (value.isObject()) {
             ObjectNode sorted = objectMapper.createObjectNode();
@@ -665,6 +879,8 @@ public final class CodingHandlerResultService {
             CodingHandlerContract.HandlerResultResponse response) { }
     private record AggregateRow(
             UUID traceId,
+            String jobStatus,
+            int stateVersion,
             UUID workspaceId,
             CodingHandlerContract.AttemptStatus status,
             String requestText,
@@ -676,4 +892,5 @@ public final class CodingHandlerResultService {
             String candidateSha,
             String validationHash) { }
     record ReviewSubject(String resultPort, String candidateSha) { }
+    record JobRequestIdentity(String systemWorkId, String workSlug) { }
 }

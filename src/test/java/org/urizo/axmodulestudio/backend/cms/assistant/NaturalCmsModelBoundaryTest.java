@@ -55,13 +55,19 @@ class NaturalCmsModelBoundaryTest {
         ObjectNode input = mapper.createObjectNode()
                 .put("type", "object")
                 .put("additionalProperties", false);
-        input.putObject("properties");
-        input.putArray("required");
+        ObjectNode command = input.putObject("properties").putObject("command")
+                .put("type", "object")
+                .put("additionalProperties", false);
+        ObjectNode commandProperties = command.putObject("properties");
+        commandProperties.putObject("operation").put("type", "string");
+        commandProperties.putObject("fields").put("type", "object");
+        command.putArray("required").add("operation").add("fields");
+        input.putArray("required").add("command");
         ObjectNode schema = mapper.createObjectNode()
-                .put("name", "resolve_cms_target")
-                .put("description", "Resolve the Spring-supplied CMS target.")
+                .put("name", "validate_cms_command")
+                .put("description", "Submit one Natural CMS UPDATE command.")
                 .put("schemaDigest", NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS
-                        .get("resolve_cms_target"));
+                        .get("validate_cms_command"));
         schema.set("inputSchema", input);
         CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
                 "1.0",
@@ -90,7 +96,7 @@ class NaturalCmsModelBoundaryTest {
         when(gateway.chat(any())).thenReturn(new ProviderChatResponse(
                 ModelProvider.OPENAI,
                 "cms-test-model",
-                "{\"assistant\":\"resolved\",\"toolCalls\":[]}",
+                "resolved",
                 1,
                 1,
                 Duration.ofMillis(1)));

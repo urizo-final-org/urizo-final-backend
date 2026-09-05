@@ -1,0 +1,51 @@
+{
+  "contractVersion": "1.0",
+  "profileVersionId": "f7b8ca22-d38c-4715-9aa2-3746f7322ca7",
+  "profileKey": "LLM_OPS",
+  "profileVersion": 1,
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "handlerKey": "common.start",
+      "resultPorts": ["next"],
+      "config": {}
+    },
+    {
+      "id": "guardrail",
+      "type": "guardrail",
+      "handlerKey": "common.guardrail",
+      "resultPorts": ["passed", "failed"],
+      "config": {"locked": true}
+    },
+    {
+      "id": "check",
+      "type": "check",
+      "handlerKey": "common.check",
+      "resultPorts": ["passed", "failed"],
+      "config": {}
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "handlerKey": "common.end",
+      "resultPorts": [],
+      "config": {}
+    }
+  ],
+  "edges": [
+    {"from": "start", "resultPort": "next", "to": "guardrail"},
+    {"from": "guardrail", "resultPort": "passed", "to": "check"},
+    {"from": "guardrail", "resultPort": "failed", "to": "end"},
+    {"from": "check", "resultPort": "passed", "to": "end"},
+    {"from": "check", "resultPort": "failed", "to": "end"}
+  ],
+  "config": {
+    "maxNodes": 4,
+    "maxAttempts": 3,
+    "loopLimits": []
+  },
+  "modelBindings": {},
+  "toolPolicy": {"allowedTools": []},
+  "guardrailProfileKey": "central.default"
+}

@@ -7,6 +7,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,9 @@ public class CodingRunnerService {
 
     private static final Duration DEFAULT_LEASE = Duration.ofMinutes(2);
 
+    /** Silence longer than this is judged as the runner being off (guide: two minutes). */
+    private static final Duration LIVENESS_THRESHOLD = Duration.ofMinutes(2);
+
     private static final Map<String, Duration> LEASE_BY_KIND = Map.of(
             "CREATE_WORKTREE", Duration.ofMinutes(2),
             "PREPARE_SCAN_WORKTREE", Duration.ofMinutes(2),
@@ -36,12 +40,24 @@ public class CodingRunnerService {
             "TEST", Duration.ofMinutes(15),
             "PREVIEW_UP", Duration.ofMinutes(10),
             "PREVIEW_DOWN", Duration.ofMinutes(10),
-            "CREATE_PR", Duration.ofMinutes(3));
+            "CREATE_PR", Duration.ofMinutes(3),
+            "CHECK_DEV_MERGE", Duration.ofMinutes(3),
+            "DEPLOY_LOCAL_COMPOSE", Duration.ofMinutes(20));
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+
+    /**
+     * When the runner last authenticated on one of its own endpoints. Kept in memory, not in
+     * the database: the runner polls claim every couple of seconds, and the point is only
+     * "is it there right now", which does not survive a server restart anyway. The runner
+     * shares its stored credential with the Python worker, so the credential's own
+     * last_used_at cannot answer this — these endpoints are the only runner-exclusive trace.
+     */
+    private final java.util.concurrent.atomic.AtomicReference<Instant> lastSeenAt =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     CodingRunnerService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
@@ -88,6 +104,85 @@ public class CodingRunnerService {
                     task.attempt() + 1, task.maxAttempts());
         });
     }
+
+    /**
+     * Adds one runner command to the queue. The runner claims a single PENDING
+     * row ordered by creation time, so commands queued together run in the order
+     * they are added here. The kind is bounded by the table check constraint and
+     * the runner's own allowlist; the payload never names a build target.
+     */
+    public UUID enqueue(String kind, JsonNode payload) {
+        return enqueue(UUID.randomUUID(), kind, payload);
+    }
+
+    /** Enqueues a replay-safe external operation under a caller-derived stable task id. */
+    public UUID enqueue(UUID taskId, String kind, JsonNode payload) {
+        Objects.requireNonNull(taskId, "taskId is required");
+        Objects.requireNonNull(kind, "kind is required");
+        Objects.requireNonNull(payload, "payload is required");
+        if (!LEASE_BY_KIND.containsKey(kind) || !payload.isObject()) {
+            throw new IllegalArgumentException("The runner command is not registered.");
+        }
+        String encoded;
+        try {
+            encoded = objectMapper.writeValueAsString(payload);
+        }
+        catch (JsonProcessingException failure) {
+            throw new IllegalArgumentException("The runner payload is invalid.", failure);
+        }
+        int inserted = jdbc.update("INSERT INTO app.coding_runner_task (task_id, kind, payload) "
+                + "VALUES (?, ?, ?::jsonb) ON CONFLICT (task_id) DO NOTHING",
+                taskId, kind, encoded);
+        if (inserted == 0) {
+            List<TaskBinding> bindings = jdbc.query(
+                    "SELECT kind, payload::text FROM app.coding_runner_task WHERE task_id = ?",
+                    (rs, row) -> new TaskBinding(rs.getString(1), readJson(rs.getString(2))),
+                    taskId);
+            if (bindings.size() != 1
+                    || !kind.equals(bindings.get(0).kind())
+                    || !payload.equals(bindings.get(0).payload())) {
+                throw new CodingWorkerException(
+                        "RUNNER_TASK_CONFLICT",
+                        "The runner task id is already bound to another command.",
+                        HttpStatus.CONFLICT);
+            }
+        }
+        return taskId;
+    }
+
+    /**
+     * Reads one queued command back. A caller that queued work has no other way to learn what
+     * happened, because the runner reports to this service rather than to whoever asked.
+     *
+     * <p>A task that is still {@code PENDING} is the normal state while no runner is running; that
+     * is a wait, not a failure.
+     */
+    public TaskOutcome taskOutcome(UUID taskId, String expectedKind) {
+        Objects.requireNonNull(taskId, "taskId is required");
+        List<TaskOutcome> found = jdbc.query(
+                "SELECT status, error_code, result_json::text FROM app.coding_runner_task "
+                        + "WHERE task_id = ? AND kind = ?",
+                (row, index) -> {
+                    // result_json stays null until the runner reports, which is the normal state
+                    // while the command is still queued.
+                    String encoded = row.getString("result_json");
+                    return new TaskOutcome(
+                            row.getString("status"),
+                            row.getString("error_code"),
+                            encoded == null ? null : readJson(encoded));
+                },
+                taskId, expectedKind);
+        if (found.isEmpty()) {
+            throw new CodingWorkerException(
+                    "RUNNER_TASK_NOT_FOUND",
+                    "The runner command was not found.",
+                    HttpStatus.NOT_FOUND);
+        }
+        return found.get(0);
+    }
+
+    /** What the runner reported for one queued command. {@code result} is null until it finishes. */
+    public record TaskOutcome(String status, String errorCode, JsonNode result) { }
 
     public CodingRunnerContract.HeartbeatResponse heartbeat(
             String authorization, CodingRunnerContract.HeartbeatRequest request) {
@@ -181,11 +276,24 @@ public class CodingRunnerService {
         return rows.get(0);
     }
 
+    /** The screen's answer to "is the runner on": last contact, and the verdict on it. */
+    public record Liveness(Instant lastSeenAt, boolean alive) { }
+
+    public Liveness liveness() {
+        Instant seen = lastSeenAt.get();
+        boolean alive = seen != null
+                && !Instant.now(clock).isAfter(seen.plus(LIVENESS_THRESHOLD));
+        return new Liveness(seen, alive);
+    }
+
     private <T> T authenticated(String authorization, java.util.function.Supplier<T> action) {
         byte[] credentialDigest = credentialDigest(authorization);
         try {
             return transactions.execute(status -> {
                 authenticate(credentialDigest);
+                // An authenticated call on a runner endpoint is proof of life even when the
+                // queue is empty and the action itself returns nothing.
+                lastSeenAt.set(Instant.now(clock));
                 return action.get();
             });
         }
@@ -261,6 +369,8 @@ public class CodingRunnerService {
     }
 
     private record TaskRow(UUID taskId, String kind, String payload, int attempt, int maxAttempts) { }
+
+    private record TaskBinding(String kind, JsonNode payload) { }
 
     private record TaskCounters(int attempt, int maxAttempts) { }
 }

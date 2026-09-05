@@ -28,7 +28,6 @@ import org.urizo.axmodulestudio.backend.cms.entity.CmsTemplateEntity;
 @Profile("local-full")
 public class CmsRepository {
 
-    private static final String ACTIVE = "Y";
     private static final String NOT_DELETED = "N";
 
     private final AdminAccountRepository accountRepository;
@@ -208,10 +207,6 @@ public class CmsRepository {
                 .toList();
     }
 
-    public Optional<TemplateView> findActiveTemplate() {
-        return templateRepository.findFirstByActiveYn(ACTIVE).map(CmsRepository::template);
-    }
-
     public Optional<TemplateView> findTemplate(String key) {
         return templateRepository.findById(key).map(CmsRepository::template);
     }
@@ -220,24 +215,13 @@ public class CmsRepository {
         return templateRepository.existsById(key);
     }
 
-    public void deactivateTemplates() {
-        templateRepository.findAllByActiveYn(ACTIVE).forEach(CmsTemplateEntity::deactivate);
-        templateRepository.flush();
-    }
-
-    public void activateTemplate(String key) {
-        deactivateTemplates();
-        templateRepository.findById(key)
-                .orElseThrow()
-                .markActive(Instant.now());
-    }
-
     public int updateTemplate(
             String key, String layout, String color, String siteName, String header, String footer,
             String heroImageUrl, String heroTitle, String heroSubtitle,
             String heroButtonLabel, String heroButtonUrl) {
         return templateRepository.findById(key).map(template -> {
-            template.activate(layout, color, siteName, header, footer, heroImageUrl, heroTitle,
+            template.changePresentation(layout, color, siteName, header, footer,
+                    heroImageUrl, heroTitle,
                     heroSubtitle, heroButtonLabel, heroButtonUrl, Instant.now());
             return 1;
         }).orElse(0);

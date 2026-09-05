@@ -41,6 +41,10 @@ param(
     # service runs, so this adds no new dependency and keeps Git versions equal.
     [string]$McpWorkspaceImage = 'axms/mcp-server:dev',
 
+    # Fixed by compose.preview.yaml. TEST runs the frontend checks inside the image BUILD
+    # just produced rather than building one of its own.
+    [string]$PreviewFrontendImage = 'axms/preview-frontend:latest',
+
     [switch]$RunOnce
 )
 
@@ -291,6 +295,110 @@ function Invoke-CreateWorktree {
     return @{ worktreePath = $target; reused = $false }
 }
 
+function Get-WorkspaceHostPath {
+    param([Parameter(Mandatory = $true)][string]$WorkspaceId)
+
+    if ($WorkspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw "RUNNER_PAYLOAD_INVALID|workspaceId 형식이 올바르지 않습니다: $WorkspaceId"
+    }
+    return Join-Path $WorkRoot "ws-$WorkspaceId"
+}
+
+function Export-McpWorkspaceToHost {
+    # The Coding tools write into a named volume because a Windows bind mount is
+    # always root-owned inside the container and Git then refuses the repository.
+    # Docker is therefore the only reader, and BUILD and PREVIEW_UP need the files
+    # on the host. This copies the volume clone out to a path of its own so the
+    # existing ai-<repo> worktrees the other commands use are never touched.
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$WorkspaceId
+    )
+
+    $target = Get-WorkspaceHostPath -WorkspaceId $WorkspaceId
+
+    # The marker is read as the service user: the workspace belongs to 10001 and
+    # root cannot read the Git config of a directory it does not own.
+    $probe = "if [ -d /workspaces/$WorkspaceId ]; then " `
+        + "git -C /workspaces/$WorkspaceId config --local --get axms.repository || echo AXMS_NO_MARKER; " `
+        + 'else echo AXMS_MISSING; fi'
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $state = & docker run --rm `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            --entrypoint sh $McpWorkspaceImage -c $probe 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_FAILED|작업 폴더를 확인하지 못했습니다: $(($state | Select-Object -Last 3) -join ' ')"
+    }
+    $held = "$(@($state) | Select-Object -Last 1)".Trim()
+    if ($held -eq 'AXMS_MISSING') {
+        throw "RUNNER_WORKSPACE_MISSING|작업 폴더가 없습니다. CREATE_WORKTREE 를 먼저 실행하세요: $WorkspaceId"
+    }
+    if ($held -ne $Repository) {
+        throw "RUNNER_WORKSPACE_CONFLICT|이 workspaceId 는 다른 저장소에 묶여 있습니다: $WorkspaceId ($held)"
+    }
+
+    # A stale export would hand the build files the model already deleted, so the
+    # target is emptied first. Only this runner writes here and the path is
+    # derived from the validated workspaceId, never from the payload directly.
+    if (Test-Path -LiteralPath $target -PathType Container) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+    # --user 0:0 reads the 10001-owned workspace and writes the bind mount, which
+    # Docker Desktop maps back to the host user. The container is short-lived and
+    # has no network and no secrets.
+    $copy = "cp -a /workspaces/$WorkspaceId/. /out/"
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm --user 0:0 `
+            -v "${McpWorkspaceVolume}:/workspaces" `
+            -v "${target}:/out" `
+            --entrypoint sh $McpWorkspaceImage -c $copy 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|작업 폴더를 꺼내지 못했습니다: $(($output | Select-Object -Last 3) -join ' ')"
+    }
+    # A marker the repository is known to carry, so a half-copied export is caught here
+    # rather than as an unreadable Compose error later. It is per repository: the Compose
+    # files are Backend files, and a frontend checkout has never held one.
+    $marker = switch ($Repository) {
+        'backend' { 'compose.dev.yaml' }
+        'frontend' { 'package.json' }
+        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $Repository" }
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $target $marker) -PathType Leaf)) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더에 $marker 이 없습니다: $target"
+    }
+
+    # The clone was made on Linux, so its config keeps core.filemode true. Windows
+    # cannot carry the executable bit, so every shell script would read as a mode
+    # change and a later commit from this directory would carry that noise.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $config = & git -C $target config --local core.filemode false 2>&1
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "RUNNER_WORKSPACE_EXPORT_FAILED|꺼낸 폴더 설정에 실패했습니다: $(($config | Select-Object -Last 2) -join ' ')"
+    }
+    return $target
+}
+
 function Get-AiWorktreePath {
     param([Parameter(Mandatory = $true)][string]$Repository)
 
@@ -299,6 +407,60 @@ function Get-AiWorktreePath {
         throw "RUNNER_WORKTREE_MISSING|작업 폴더가 없습니다. CREATE_WORKTREE 를 먼저 실행하세요: $path"
     }
     return $path
+}
+
+function Get-ScanFiles {
+    param([Parameter(Mandatory = $true)][string]$Root)
+
+    # The Coding agents cannot list files themselves: their only ways to find one are a
+    # search that has to guess the word and a read that has to guess the path. Three live
+    # runs burned every turn that way and never reached apply_patch. The tracked file list
+    # is small enough (a few hundred paths) to hand over whole, and the Backend filters it
+    # to the guardrail rather than the runner - the same reason Get-ScanFolders returns raw
+    # folders: one copy of the fence, on the Backend.
+    $listed = @(& git -C $Root ls-files 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        # A missing file list must not fail a scan whose real product is the sha. The agents
+        # then work the old way instead of the Job being refused.
+        return @()
+    }
+    return @($listed | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+}
+
+function Get-ScanFolders {
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    # Folder depth per repository. Shallower and the choice is useless, deeper and
+    # the screen turns into a file browser. This yields roughly 7 frontend and
+    # 8 backend entries.
+    $specs = switch ($Repository) {
+        'frontend' { @('src/features/*', 'src/app', 'src/shared/*', 'src/styles') }
+        'backend' { @('src/main/java/org/urizo/axmodulestudio/backend/*') }
+        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $Repository" }
+    }
+
+    # The fixed Denylist is not applied here. The Backend holds the single copy of
+    # that list and filters this raw result, so the two cannot drift apart.
+    $folders = [System.Collections.Generic.List[string]]::new()
+    foreach ($spec in $specs) {
+        $relative = $spec -replace '/\*$', ''
+        $absolute = Join-Path $Root ($relative -replace '/', [IO.Path]::DirectorySeparatorChar)
+        if (-not (Test-Path -LiteralPath $absolute -PathType Container)) {
+            continue
+        }
+        if ($spec.EndsWith('/*')) {
+            foreach ($child in (Get-ChildItem -LiteralPath $absolute -Directory | Sort-Object Name)) {
+                $folders.Add("$relative/$($child.Name)")
+            }
+        }
+        else {
+            $folders.Add($relative)
+        }
+    }
+    return $folders.ToArray()
 }
 
 function Invoke-PrepareScanWorktree {
@@ -334,7 +496,12 @@ function Invoke-PrepareScanWorktree {
             if ($LASTEXITCODE -eq 0 -and $dirty) {
                 # Nothing should ever edit this folder. If something did, keep it
                 # and let a person look rather than overwriting the evidence.
-                return @{ repo = $repository; scanPath = $target; sha = 'unchanged'; note = '로컬 변경이 있어 갱신하지 않았습니다.' }
+                return @{
+                    repo = $repository; scanPath = $target; sha = 'unchanged'
+                    note = '로컬 변경이 있어 갱신하지 않았습니다.'
+                    folders = (Get-ScanFolders -Repository $repository -Root $target)
+                    files = (Get-ScanFiles -Root $target)
+                }
             }
             $current = "$(& git -C $target rev-parse HEAD 2>&1)".Trim()
             if ($current -ne $baseSha) {
@@ -343,7 +510,11 @@ function Invoke-PrepareScanWorktree {
                     throw "RUNNER_SCAN_FAILED|스캔 폴더 갱신 실패: $(($moved | Select-Object -Last 2) -join ' ')"
                 }
             }
-            return @{ repo = $repository; scanPath = $target; sha = $baseSha; reused = $true }
+            return @{
+                repo = $repository; scanPath = $target; sha = $baseSha; reused = $true
+                folders = (Get-ScanFolders -Repository $repository -Root $target)
+                files = (Get-ScanFiles -Root $target)
+            }
         }
 
         $created = & git -C $source worktree add --detach $target $baseSha 2>&1
@@ -354,7 +525,11 @@ function Invoke-PrepareScanWorktree {
     finally {
         $ErrorActionPreference = $previous
     }
-    return @{ repo = $repository; scanPath = $target; sha = $baseSha; reused = $false }
+    return @{
+        repo = $repository; scanPath = $target; sha = $baseSha; reused = $false
+        folders = (Get-ScanFolders -Repository $repository -Root $target)
+        files = (Get-ScanFiles -Root $target)
+    }
 }
 
 function Get-PreviewArguments {
@@ -369,11 +544,17 @@ function Get-PreviewArguments {
 }
 
 function Set-PreviewEnvironment {
+    # Which screen the preview shows. A frontend Job passes its own exported workspace: the
+    # whole point of the preview is the screen the model just changed, and the shared
+    # ai-frontend checkout is not that. Without a source given, that checkout is still the
+    # right answer - a backend Job's preview keeps showing the screen it always showed.
+    param([string]$FrontendSource)
+
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
-    $frontend = Join-Path $WorkRoot 'ai-frontend'
+    $frontend = if ($FrontendSource) { $FrontendSource } else { Join-Path $WorkRoot 'ai-frontend' }
     if (Test-Path -LiteralPath $frontend -PathType Container) {
         $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontend
     }
@@ -446,7 +627,30 @@ function Copy-SourceDatabase {
 }
 
 function Invoke-PreviewUp {
-    $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+    param($Payload)
+
+    # BUILD already exported this workspace and produced the images from it, so the same
+    # export is reused here rather than taken again.
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
+    if (-not $repository) { $repository = 'backend' }
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    $exported = ''
+    if ($workspaceId) {
+        $exported = Get-WorkspaceHostPath -WorkspaceId $workspaceId
+        if (-not (Test-Path -LiteralPath $exported -PathType Container)) {
+            throw "RUNNER_WORKSPACE_MISSING|꺼낸 작업 폴더가 없습니다. BUILD 를 먼저 실행하세요: $exported"
+        }
+    }
+    # Same split as BUILD: the Compose files are Backend files, so the project directory is a
+    # Backend checkout even when the Job worked in the frontend.
+    if ($repository -eq 'frontend') {
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        $frontendSource = $exported
+    }
+    else {
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendSource = ''
+    }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }
@@ -454,7 +658,7 @@ function Invoke-PreviewUp {
     $dumpBytes = 0
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    Set-PreviewEnvironment
+    Set-PreviewEnvironment -FrontendSource $frontendSource
     try {
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
@@ -505,8 +709,27 @@ function Invoke-ComposeBuild {
     # Compose files live in the backend worktree, so it is always the project
     # directory. The frontend worktree is passed through the same variable the
     # preview overlay uses for both its build context and its source mount.
-    $backendWorktree = Get-AiWorktreePath -Repository 'backend'
-    $frontendWorktree = if ($repository -eq 'frontend') { Get-AiWorktreePath -Repository 'frontend' } else { '' }
+    # A workspaceId means the model worked in the MCP volume, so its files are
+    # exported here first. Without one this stays the host worktree the command
+    # already used, so the existing path is untouched.
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
+    $exported = if ($workspaceId) {
+        Export-McpWorkspaceToHost -Repository $repository -WorkspaceId $workspaceId
+    }
+    else { '' }
+    if ($repository -eq 'frontend') {
+        # The Compose files live in the Backend repository, so the project directory stays a
+        # Backend checkout no matter which repository is being built. A frontend workspace holds
+        # no compose.dev.yaml and naming it here fails before the build starts.
+        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The image is built from the model's own work when there is any. Falling back to the
+        # shared checkout would build a screen nobody changed and call it the candidate.
+        $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }
+    }
+    else {
+        $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
+        $frontendWorktree = ''
+    }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }
@@ -539,6 +762,54 @@ function Invoke-ComposeBuild {
     return @{ repo = $repository; services = $services; projectDirectory = $backendWorktree }
 }
 
+function Invoke-FrontendChecks {
+    # The frontend runtime image installs dependencies and serves the sources; nothing in it
+    # compiles or tests them. A backend candidate at least has to compile to become an image,
+    # so a broken one dies at BUILD. A broken screen does not - it reaches the person who is
+    # asked to approve it, and the guardrail screen promises the opposite in so many words:
+    # "빌드 통과 필수 · 테스트 통과 필수 - 항상 켜져 있으며 끌 수 없습니다".
+    #
+    # BUILD has already produced this image from the same workspace and the dev dependencies
+    # are in it, so the checks run in what is there. Building a second image would double the
+    # wait and could check something other than what the preview is about to serve.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & docker run --rm $PreviewFrontendImage pnpm run verify 2>&1
+        $exit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+
+    # vitest colours its summary, so the escape codes are stripped before anything is matched
+    # or reported. Left in, they reach the approval screen as unreadable noise.
+    # PowerShell 5.1 has no `e escape, and a raw control character in the source would not
+    # survive an editor round trip, so the byte is named rather than typed.
+    $escape = [char]27
+    $plain = @($output | ForEach-Object { "$_" -replace "$escape\[[0-9;]*[A-Za-z]", '' })
+    if ($exit -ne 0) {
+        # What failed has to survive into one line on the approval screen. Taking the tail
+        # does not work: pnpm echoes "Command failed" once per nested script and vitest signs
+        # off with timings, so the compiler error ends up buried in its own noise. The lines
+        # that name a failure are picked out instead, and the tail is only the fallback for a
+        # failure shaped like nothing here.
+        $named = @($plain | Select-String -Pattern 'error TS[0-9]|Tests .*failed|error during build|Error:' |
+            ForEach-Object { $_.ToString().Trim() } | Select-Object -First 2)
+        if ($named) {
+            $tail = $named
+        }
+        else {
+            $tail = @($plain | Where-Object { $_.Trim() -and $_ -notmatch 'ELIFECYCLE' }) |
+                Select-Object -Last 3
+        }
+        throw "RUNNER_TEST_FAILED|$($tail -join ' / ')"
+    }
+    $tests = ($plain | Select-String -Pattern '^\s*Tests\s+\S' | Select-Object -Last 1)
+    $summary = if ($tests) { $tests.ToString().Trim() } else { '검사 통과' }
+    return @{ repo = 'frontend'; summary = "$summary · 타입 검사와 빌드 통과" }
+}
+
 function Invoke-Tests {
     param($Payload)
 
@@ -548,18 +819,18 @@ function Invoke-Tests {
     # The runtime image has no Maven and no test dependencies: the Dockerfile
     # builds with -DskipTests on purpose. Tests therefore run in the build stage,
     # and the dependency cache is a named volume so only the first run downloads.
+    if ($repository -eq 'frontend') { return Invoke-FrontendChecks }
+    if ($repository -ne 'backend') {
+        throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository"
+    }
+
     $worktree = Get-AiWorktreePath -Repository $repository
     $stageImage = "axms/preview-$repository-test:latest"
-    $target = switch ($repository) {
-        'backend' { 'build' }
-        'frontend' { throw 'RUNNER_KIND_NOT_IMPLEMENTED|frontend 테스트는 아직 구현하지 않았습니다.' }
-        default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository" }
-    }
 
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $build = & docker build --target $target -t $stageImage $worktree 2>&1
+        $build = & docker build --target build -t $stageImage $worktree 2>&1
         if ($LASTEXITCODE -ne 0) {
             throw "RUNNER_TEST_FAILED|테스트 이미지 준비 실패: $(($build | Select-Object -Last 3) -join ' ')"
         }
@@ -585,9 +856,21 @@ function Invoke-CreatePullRequest {
     $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
     $branch = Get-PayloadValue -Payload $Payload -Name 'branch'
     $title = Get-PayloadValue -Payload $Payload -Name 'title'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    $expectedDiffDigest = Get-PayloadValue -Payload $Payload -Name 'diffDigest'
+    $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
     if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
     if (-not $branch) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 branch 가 없습니다.' }
     if (-not $title) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 title 이 없습니다.' }
+    if ($workspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 workspaceId 형식이 올바르지 않습니다.'
+    }
+    if ($candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 candidateSha 형식이 올바르지 않습니다.'
+    }
+    if ($expectedDiffDigest -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|payload 의 diffDigest 형식이 올바르지 않습니다.'
+    }
 
     # Branch names are issued by Spring. Refusing anything else keeps a generated
     # payload from pushing to a name that looks like a person's work.
@@ -595,25 +878,19 @@ function Invoke-CreatePullRequest {
         throw "RUNNER_PAYLOAD_INVALID|허용되지 않은 브랜치 이름입니다: $branch"
     }
 
-    $worktree = Get-AiWorktreePath -Repository $repository
+    $worktree = Export-McpWorkspaceToHost `
+        -Repository $repository -WorkspaceId $workspaceId
+    $slug = Get-RemoteSlug -Worktree $worktree
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        # Nothing to review is not an error. It happens whenever the run produced
-        # no change, and failing here would retry a task that can never succeed.
-        $ahead = @(& git -C $worktree rev-list --count origin/dev..HEAD 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|커밋 수를 확인하지 못했습니다: $($ahead -join ' ')"
-        }
-        if ([int]"$($ahead[0])".Trim() -eq 0) {
-            return @{ repo = $repository; created = $false; reason = '커밋이 없어 PR 을 만들 수 없습니다.' }
-        }
-
-        # The same applies to a missing gh: report it and let the rest of the run
-        # stand, rather than throwing away work that already passed review.
         & gh --version 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            return @{ repo = $repository; created = $false; reason = 'gh 가 없어 PR 을 만들 수 없습니다.' }
+            throw 'RUNNER_PR_BLOCKED|gh 가 없어 PR 을 만들 수 없습니다.'
+        }
+        $baseHead = "$(@(& git -C $worktree rev-parse HEAD 2>&1)[0])".Trim()
+        if ("sha1:$baseHead" -ne $candidateSha) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|작업 폴더 HEAD 가 승인된 candidateSha 와 다릅니다.'
         }
 
         $current = "$(@(& git -C $worktree rev-parse --abbrev-ref HEAD 2>&1)[0])".Trim()
@@ -624,22 +901,343 @@ function Invoke-CreatePullRequest {
             }
         }
 
+        & git -C $worktree diff --cached --quiet --exit-code 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|승인된 staged 변경이 없어 PR 을 만들 수 없습니다.'
+        }
+        if ($LASTEXITCODE -ne 1) {
+            throw 'RUNNER_PR_FAILED|승인된 staged 변경을 확인하지 못했습니다.'
+        }
+        $actualDiffDigest = Get-StagedDiffDigest -Worktree $worktree
+        if ($actualDiffDigest -ne $expectedDiffDigest) {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|staged Diff가 승인된 diffDigest와 다릅니다.'
+        }
+        $env:GIT_AUTHOR_DATE = '2000-01-01T00:00:00Z'
+        $env:GIT_COMMITTER_DATE = '2000-01-01T00:00:00Z'
+        try {
+            $committed = & git -C $worktree `
+                -c "user.name=AX Module Studio" `
+                -c "user.email=axms-system@localhost.invalid" `
+                commit --no-gpg-sign --no-verify -m $title 2>&1
+            $commitExit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item Env:GIT_AUTHOR_DATE -ErrorAction SilentlyContinue
+            Remove-Item Env:GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+        }
+        if ($commitExit -ne 0) {
+            throw "RUNNER_PR_FAILED|Candidate commit 생성 실패: $(($committed | Select-Object -Last 2) -join ' ')"
+        }
+        $headSha = "$(@(& git -C $worktree rev-parse HEAD 2>&1)[0])".Trim()
+        $parentSha = "$(@(& git -C $worktree rev-parse HEAD^ 2>&1)[0])".Trim()
+        if ($parentSha -ne $baseHead -or $headSha -notmatch '^[0-9a-f]{40}$') {
+            throw 'RUNNER_PR_SUBJECT_BLOCKED|생성된 PR head가 승인 Candidate에 직접 연결되지 않았습니다.'
+        }
+
+        $existing = Get-ExactPullRequest -Slug $slug -Branch $branch `
+            -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
+            -Repository $repository
+        if ($null -ne $existing) { return $existing }
+
         $pushed = & git -C $worktree push -u origin $branch 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|push 실패: $(($pushed | Select-Object -Last 2) -join ' ')"
+            $detail = "$(($pushed | Select-Object -Last 3) -join ' ')"
+            if (Test-NetworkFailure -Detail $detail) {
+                throw "RUNNER_GITHUB_TRANSIENT|push 일시 실패: $detail"
+            }
+            throw "RUNNER_PR_BLOCKED|push 차단: $detail"
         }
 
         $body = Get-PayloadValue -Payload $Payload -Name 'body'
         if (-not $body) { $body = $title }
-        $created = & gh pr create --repo (Get-RemoteSlug -Worktree $worktree) --base dev --head $branch --title $title --body $body 2>&1
+        $created = & gh pr create --repo $slug --base dev --head $branch --title $title --body $body 2>&1
         if ($LASTEXITCODE -ne 0) {
-            throw "RUNNER_PR_FAILED|PR 생성 실패: $(($created | Select-Object -Last 2) -join ' ')"
+            Throw-GitHubFailure -Output $created -Operation 'PR 생성'
+        }
+        $receipt = Get-ExactPullRequest -Slug $slug -Branch $branch `
+            -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
+            -Repository $repository
+        if ($null -eq $receipt) {
+            throw 'RUNNER_PR_BLOCKED|생성된 PR 을 정확히 다시 조회하지 못했습니다.'
         }
     }
     finally {
         $ErrorActionPreference = $previous
     }
-    return @{ repo = $repository; created = $true; url = "$(@($created)[-1])".Trim() }
+    return $receipt
+}
+
+function Get-StagedDiffDigest {
+    param([Parameter(Mandatory = $true)][string]$Worktree)
+
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'
+    $start.WorkingDirectory = $Worktree
+    $start.Arguments = 'diff --cached --no-ext-diff --no-textconv --no-color --text HEAD --'
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    if (-not $process.Start()) {
+        throw 'RUNNER_PR_FAILED|staged Diff 검증 프로세스를 시작하지 못했습니다.'
+    }
+    $bytes = [IO.MemoryStream]::new()
+    try {
+        $process.StandardOutput.BaseStream.CopyTo($bytes)
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) {
+            throw "RUNNER_PR_FAILED|staged Diff 검증 실패: $errorText"
+        }
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $digest = $hash.ComputeHash($bytes.ToArray())
+        }
+        finally { $hash.Dispose() }
+        return 'sha256:' + ([BitConverter]::ToString($digest) -replace '-', '').ToLowerInvariant()
+    }
+    finally {
+        $bytes.Dispose()
+        $process.Dispose()
+    }
+}
+
+function Throw-GitHubFailure {
+    param($Output, [Parameter(Mandatory = $true)][string]$Operation)
+
+    $detail = "$(@($Output) -join ' ')".Trim()
+    if (Test-NetworkFailure -Detail $detail) {
+        throw "RUNNER_GITHUB_TRANSIENT|$Operation 일시 실패: $detail"
+    }
+    throw "RUNNER_GITHUB_BLOCKED|$Operation 차단: $detail"
+}
+
+function Test-NetworkFailure {
+    param([string]$Detail)
+
+    return $Detail -match '(?i)(rate limit|timed? out|timeout|temporar|HTTP 5\d\d|502|503|504|could not resolve host|connection (reset|refused|closed)|failed to connect|network is unreachable|TLS handshake)'
+}
+
+function Get-ExactPullRequest {
+    param(
+        [Parameter(Mandatory = $true)][string]$Slug,
+        [Parameter(Mandatory = $true)][string]$Branch,
+        [Parameter(Mandatory = $true)][string]$CandidateSha,
+        [Parameter(Mandatory = $true)][string]$ExpectedHeadSha,
+        [Parameter(Mandatory = $true)][string]$Repository
+    )
+
+    $raw = & gh pr list --repo $Slug --base dev --head $Branch --state all `
+        --json number,url,state,baseRefName,headRefName,headRefOid 2>&1
+    if ($LASTEXITCODE -ne 0) { Throw-GitHubFailure -Output $raw -Operation 'PR 조회' }
+    $items = @(("$($raw -join '')" | ConvertFrom-Json))
+    if ($items.Count -eq 0) { return $null }
+    if ($items.Count -ne 1) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|같은 base/head 조합의 PR 이 둘 이상입니다.'
+    }
+    $item = $items[0]
+    if ($item.baseRefName -ne 'dev' -or $item.headRefName -ne $Branch `
+            -or "sha1:$($item.headRefOid)" -ne $ExpectedHeadSha `
+            -or $item.state -notin @('OPEN', 'MERGED')) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|기존 PR 이 승인된 repository/base/head/candidate 와 다릅니다.'
+    }
+    return @{
+        repository = $Repository
+        base = 'dev'
+        head = $Branch
+        candidateSha = $CandidateSha
+        headSha = $ExpectedHeadSha
+        prNumber = [int]$item.number
+        prUrl = "$($item.url)"
+        state = "$($item.state)"
+        reused = $true
+    }
+}
+
+function Invoke-CheckDevMerge {
+    param($Payload)
+
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repository'
+    $prNumber = Get-PayloadValue -Payload $Payload -Name 'prNumber'
+    $head = Get-PayloadValue -Payload $Payload -Name 'head'
+    $headSha = Get-PayloadValue -Payload $Payload -Name 'headSha'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    if ($repository -ne 'backend' -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+            -or $head -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$' `
+            -or $headSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|dev merge 확인 payload 가 올바르지 않습니다.'
+    }
+    $worktree = Get-AiWorktreePath -Repository $repository
+    $slug = Get-RemoteSlug -Worktree $worktree
+    $raw = & gh pr view ([int]$prNumber) --repo $slug `
+        --json number,url,state,baseRefName,headRefName,headRefOid,mergeCommit 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $detail = "$(@($raw) -join ' ')".Trim()
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_GITHUB_TRANSIENT|dev merge 조회 일시 실패: $detail"
+        }
+        return @{
+            status = 'BLOCKED'; reason = 'GitHub 조회 권한 또는 PR 상태 확인이 차단되었습니다.'
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    $item = "$($raw -join '')" | ConvertFrom-Json
+    if ($item.baseRefName -ne 'dev' -or $item.headRefName -ne $head `
+            -or "sha1:$($item.headRefOid)" -ne $headSha) {
+        return @{
+            status = 'BLOCKED'; reason = 'PR base/head/candidate 불일치'
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    if ($item.state -eq 'MERGED') {
+        if ($null -eq $item.mergeCommit -or "$($item.mergeCommit.oid)" -notmatch '^[0-9a-f]{40}$') {
+            return @{
+                status = 'BLOCKED'; reason = 'merge commit 누락'
+                candidateSha = $candidateSha; head = $head; headSha = $headSha
+            }
+        }
+        return @{
+            status = 'MERGED'; mergeSha = "sha1:$($item.mergeCommit.oid)"
+            candidateSha = $candidateSha; head = $head; headSha = $headSha
+        }
+    }
+    if ($item.state -eq 'OPEN') {
+        return @{
+            status = 'NOT_MERGED'; candidateSha = $candidateSha
+            head = $head; headSha = $headSha
+        }
+    }
+    return @{
+        status = 'BLOCKED'; reason = 'PR 이 merge 없이 닫혔습니다.'
+        candidateSha = $candidateSha; head = $head; headSha = $headSha
+    }
+}
+
+function Get-MergedDeployWorktree {
+    param([Parameter(Mandatory = $true)][string]$MergeSha)
+
+    $rawMergeSha = $MergeSha.Substring('sha1:'.Length)
+    $source = Get-RepositorySourcePath -Repository 'backend'
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|Backend canonical 저장소를 찾을 수 없습니다.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $fetched = & git -C $source fetch origin dev:refs/remotes/origin/dev 2>&1
+        $fetchExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($fetchExit -ne 0) {
+        $detail = "$(($fetched | Select-Object -Last 4) -join ' ')"
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_DEPLOY_TRANSIENT|origin/dev fetch 일시 실패: $detail"
+        }
+        throw "RUNNER_DEPLOY_BLOCKED|origin/dev fetch 차단: $detail"
+    }
+
+    & git -C $source cat-file -e "$rawMergeSha^{commit}" 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_DEPLOY_BLOCKED|승인된 mergeSha commit을 찾을 수 없습니다.'
+    }
+    & git -C $source merge-base --is-ancestor $rawMergeSha origin/dev 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 1) {
+        throw 'RUNNER_DEPLOY_BLOCKED|승인된 mergeSha가 현재 origin/dev에 포함되지 않습니다.'
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_DEPLOY_BLOCKED|mergeSha와 origin/dev 관계를 확인하지 못했습니다.'
+    }
+
+    $resolvedWorkRoot = [IO.Path]::GetFullPath($WorkRoot)
+    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot 'deploy-backend'))
+    $prefix = $resolvedWorkRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) `
+        + [IO.Path]::DirectorySeparatorChar
+    if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|고정 deploy Worktree 경로가 WorkRoot 밖입니다.'
+    }
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        if (Test-Path -LiteralPath $target -PathType Container) {
+            $inside = "$(@(& git -C $target rev-parse --is-inside-work-tree 2>&1)[0])".Trim()
+            if ($LASTEXITCODE -ne 0 -or $inside -ne 'true') {
+                throw 'RUNNER_DEPLOY_BLOCKED|고정 deploy 경로가 관리되는 Git Worktree가 아닙니다.'
+            }
+            $dirty = @(& git -C $target status --porcelain 2>&1)
+            if ($LASTEXITCODE -ne 0 -or $dirty.Count -gt 0) {
+                throw 'RUNNER_DEPLOY_BLOCKED|deploy Worktree에 보존해야 할 로컬 변경이 있습니다.'
+            }
+            $current = "$(@(& git -C $target rev-parse HEAD 2>&1)[0])".Trim()
+            if ($current -ne $rawMergeSha) {
+                $checkedOut = & git -C $target checkout --detach $rawMergeSha 2>&1
+                if ($LASTEXITCODE -ne 0) {
+                    throw "RUNNER_DEPLOY_BLOCKED|deploy Worktree 갱신 실패: $(($checkedOut | Select-Object -Last 3) -join ' ')"
+                }
+            }
+        }
+        else {
+            $created = & git -C $source worktree add --detach $target $rawMergeSha 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "RUNNER_DEPLOY_BLOCKED|deploy Worktree 생성 실패: $(($created | Select-Object -Last 3) -join ' ')"
+            }
+        }
+        $verified = "$(@(& git -C $target rev-parse HEAD 2>&1)[0])".Trim()
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($verified -ne $rawMergeSha) {
+        throw 'RUNNER_DEPLOY_BLOCKED|deploy Worktree가 승인된 mergeSha를 가리키지 않습니다.'
+    }
+    return $target
+}
+
+function Invoke-LocalDockerComposeDeployment {
+    param($Payload)
+
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repository'
+    $deploymentRequestId = Get-PayloadValue -Payload $Payload -Name 'deploymentRequestId'
+    $prNumber = Get-PayloadValue -Payload $Payload -Name 'prNumber'
+    $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
+    $mergeSha = Get-PayloadValue -Payload $Payload -Name 'mergeSha'
+    $validationHash = Get-PayloadValue -Payload $Payload -Name 'validationHash'
+    if ($repository -ne 'backend' `
+            -or $deploymentRequestId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' `
+            -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+            -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $mergeSha -notmatch '^sha1:[0-9a-f]{40}$' `
+            -or $validationHash -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'RUNNER_PAYLOAD_INVALID|고정 로컬 배포의 승인 증거가 올바르지 않습니다.'
+    }
+    $sourceRoot = Get-MergedDeployWorktree -MergeSha $mergeSha
+    $masterScript = Join-Path (Split-Path -Parent $repositoryRoot) `
+        'urizo-final-master\scripts\rebuild-local-service.ps1'
+    if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
+        throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $output = & $masterScript -Service spring-app -Profile full `
+            -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
+        $exit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($exit -ne 0) {
+        $detail = "$(($output | Select-Object -Last 4) -join ' ')"
+        if (Test-NetworkFailure -Detail $detail) {
+            throw "RUNNER_DEPLOY_TRANSIENT|로컬 Compose 배포 일시 실패: $detail"
+        }
+        throw "RUNNER_DEPLOY_BLOCKED|로컬 Compose 배포 실패: $detail"
+    }
+    return @{
+        adapter = 'local-docker-compose'
+        target = 'full:backend:spring-app'
+        sourceSha = $mergeSha
+        status = 'COMPLETED'
+    }
 }
 
 function Get-RemoteSlug {
@@ -675,13 +1273,19 @@ function Complete-RunnerTask {
                 $result = Invoke-PrepareScanWorktree -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
             'PREVIEW_UP' {
-                $result = Invoke-PreviewUp
+                $result = Invoke-PreviewUp -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
             'PREVIEW_DOWN' {
                 $result = Invoke-PreviewDown
             }
             'CREATE_PR' {
                 $result = Invoke-CreatePullRequest -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
+            }
+            'CHECK_DEV_MERGE' {
+                $result = Invoke-CheckDevMerge -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
+            }
+            'DEPLOY_LOCAL_COMPOSE' {
+                $result = Invoke-LocalDockerComposeDeployment -Payload (Get-PayloadValue -Payload $Task -Name 'payload')
             }
             default {
                 # Fixed allowlist: an unknown or not-yet-built command is refused
@@ -692,8 +1296,11 @@ function Complete-RunnerTask {
     }
     catch {
         $parts = "$($_.Exception.Message)" -split '\|', 2
-        $outcome = 'PERMANENT_FAILURE'
         $errorCode = if ($parts[0] -match '^[A-Z][A-Z0-9_]{2,119}$') { $parts[0] } else { 'RUNNER_COMMAND_FAILED' }
+        $outcome = if ($errorCode -in @('RUNNER_GITHUB_TRANSIENT', 'RUNNER_DEPLOY_TRANSIENT')) {
+            'RETRYABLE_FAILURE'
+        }
+        else { 'PERMANENT_FAILURE' }
         $detail = if ($parts.Count -gt 1) { $parts[1] } else { "$($_.Exception.Message)" }
     }
 
@@ -706,6 +1313,15 @@ function Complete-RunnerTask {
         outcome       = $outcome
     }
     if ($null -ne $result) { $body['result'] = $result }
+    # A failure reported as a code alone tells the approval screen that something broke and
+    # nothing about what. The reason was already computed for the console line; it travels in
+    # the same result field, which the Job authority stores for any outcome. Bounded because
+    # it is stored and shown, and a compiler can be arbitrarily talkative.
+    elseif ($detail) {
+        $reason = "$detail"
+        if ($reason.Length -gt 500) { $reason = $reason.Substring(0, 500) }
+        $body['result'] = @{ detail = $reason }
+    }
     if ($null -ne $errorCode) { $body['errorCode'] = $errorCode }
 
     $stamp = (Get-Date).ToString('HH:mm:ss')

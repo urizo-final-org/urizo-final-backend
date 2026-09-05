@@ -12,6 +12,7 @@ import java.util.stream.Collectors;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCredentialLease;
 import org.urizo.axmodulestudio.backend.integration.ai.local.ProviderSecretCrypto.EncryptedSecret;
 
 @Service
@@ -42,9 +43,14 @@ public class LocalProviderSecretService {
                 .toList();
     }
 
+    public boolean hasVerifiedCredential(ModelProvider provider) {
+        return statuses().stream().anyMatch(status -> status.provider() == provider
+                && status.configured() && status.state() == ProviderCredentialState.VERIFIED);
+    }
+
     public ProviderCredentialStatus store(ModelProvider provider, String credential) {
         requireSupported(provider);
-        validateCredential(credential);
+        validateCredential(provider, credential);
 
         byte[] plaintext = credential.getBytes(StandardCharsets.US_ASCII);
         try {
@@ -57,16 +63,26 @@ public class LocalProviderSecretService {
         }
     }
 
-    byte[] decryptForProviderCall(ModelProvider provider) {
+    ProviderCredentialLease leaseForProviderCall(ModelProvider provider) {
         requireSupported(provider);
         StoredProviderSecret stored = repository.find(provider)
                 .orElseThrow(() -> new IllegalArgumentException("Provider credential is not configured."));
-        return crypto.decrypt(provider, stored.encryptedSecret());
+        byte[] plaintext = crypto.decrypt(provider, stored.encryptedSecret());
+        try {
+            return ProviderCredentialLease.fromBytes(
+                    provider,
+                    plaintext,
+                    stored.encryptedSecret().fingerprint());
+        }
+        finally {
+            Arrays.fill(plaintext, (byte) 0);
+        }
     }
 
-    public void updateState(ModelProvider provider, ProviderCredentialState state) {
+    public ProviderCredentialStatus delete(ModelProvider provider) {
         requireSupported(provider);
-        repository.updateState(provider, state);
+        repository.delete(provider);
+        return ProviderCredentialStatus.notConfigured(provider);
     }
 
     private static ProviderCredentialStatus status(ModelProvider provider, StoredProviderSecret stored) {
@@ -84,7 +100,7 @@ public class LocalProviderSecretService {
                 stored.lastTestedAt());
     }
 
-    private static void validateCredential(String credential) {
+    static void validateCredential(ModelProvider provider, String credential) {
         if (credential == null || credential.length() < 8 || credential.length() > 4096) {
             throw new IllegalArgumentException("Credential length must be between 8 and 4096 characters.");
         }
@@ -94,6 +110,10 @@ public class LocalProviderSecretService {
         boolean printableAscii = credential.chars().allMatch(character -> character >= 0x21 && character <= 0x7e);
         if (!printableAscii) {
             throw new IllegalArgumentException("Credential must contain printable ASCII characters only.");
+        }
+        if (provider == ModelProvider.ANTHROPIC
+                && (credential.length() < 40 || !credential.startsWith("sk-ant-") || credential.contains("..."))) {
+            throw new IllegalArgumentException("Anthropic API key format is invalid or masked.");
         }
     }
 

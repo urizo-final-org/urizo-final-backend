@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -19,7 +20,8 @@ public class EncryptedProviderSecretRepository {
 
     private final JdbcTemplate jdbcTemplate;
 
-    public EncryptedProviderSecretRepository(JdbcTemplate localProviderSecretJdbcTemplate) {
+    public EncryptedProviderSecretRepository(
+            @Qualifier("localProviderSecretJdbcTemplate") JdbcTemplate localProviderSecretJdbcTemplate) {
         this.jdbcTemplate = localProviderSecretJdbcTemplate;
     }
 
@@ -63,39 +65,49 @@ public class EncryptedProviderSecretRepository {
                 """, this::mapStoredSecret);
     }
 
-    public void updateState(ModelProvider provider, ProviderCredentialState state) {
-        int changed = jdbcTemplate.update("""
-                UPDATE app.local_provider_secret
-                   SET connection_state = ?, last_tested_at = CURRENT_TIMESTAMP
-                 WHERE provider = ?
-                """, state.name(), provider.name());
-        if (changed != 1) {
-            throw new IllegalStateException("Provider credential state update did not target exactly one row.");
-        }
-    }
-
-    public void recordAudit(
+    public boolean recordTestIfCurrent(
             ModelProvider provider,
+            String credentialFingerprint,
             String modelId,
+            ProviderCredentialState state,
             String outcome,
             String safeErrorCode,
             Integer inputTokens,
             Integer outputTokens,
             long latencyMs) {
-        jdbcTemplate.update("""
+        int changed = jdbcTemplate.update("""
+                WITH current_credential AS (
+                    UPDATE app.local_provider_secret
+                       SET connection_state = ?, last_tested_at = CURRENT_TIMESTAMP
+                     WHERE provider = ?
+                       AND fingerprint = ?
+                    RETURNING provider
+                )
                 INSERT INTO app.local_provider_connection_audit (
                     audit_id, provider, model_id, capability, outcome, safe_error_code,
                     input_tokens, output_tokens, latency_ms
-                ) VALUES (?, ?, ?, 'CHAT', ?, ?, ?, ?, ?)
+                )
+                SELECT ?, provider, ?, 'CHAT', ?, ?, ?, ?, ?
+                  FROM current_credential
                 """,
-                UUID.randomUUID(),
+                state.name(),
                 provider.name(),
+                credentialFingerprint,
+                UUID.randomUUID(),
                 modelId,
                 outcome,
                 safeErrorCode,
                 inputTokens,
                 outputTokens,
                 latencyMs);
+        return changed == 1;
+    }
+
+    public void delete(ModelProvider provider) {
+        jdbcTemplate.update("""
+                DELETE FROM app.local_provider_secret
+                 WHERE provider = ?
+                """, provider.name());
     }
 
     private StoredProviderSecret mapStoredSecret(ResultSet resultSet, int rowNumber) throws SQLException {

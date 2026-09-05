@@ -15,6 +15,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -84,6 +86,57 @@ class ProviderChatGatewayTest {
                     assertThat(failure.toString()).doesNotContain(rawValue);
                 });
         assertThat(retryDelays).isEmpty();
+    }
+
+    @Test
+    void rejectsLengthLimitedResponsesInsteadOfTreatingThemAsComplete() {
+        ProviderChatRequest request = request("bounded response fixture");
+        when(adapter.chat(registration, request)).thenReturn(new ProviderChatResponse(
+                ModelProvider.OPENAI,
+                Stage2ProviderModels.OPENAI_CHAT,
+                "partial output",
+                List.of(),
+                4,
+                8,
+                Duration.ofMillis(25),
+                ProviderFinishReason.LENGTH_LIMIT));
+
+        assertThatThrownBy(() -> gateway.chat(request))
+                .isInstanceOfSatisfying(ProviderGatewayException.class, failure -> {
+                    assertThat(failure.code()).isEqualTo(
+                            ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
+                    // The ending itself, not only that there was one. Every non-"stop"
+                    // ending shares this code, and the stored turn keeps the code alone,
+                    // so the message is the only place the difference survives.
+                    assertThat(failure.getMessage())
+                            .startsWith("Model provider returned an incomplete response:")
+                            .contains("LENGTH_LIMIT");
+                });
+        verify(adapter).chat(registration, request);
+    }
+
+    @Test
+    void requiresTheExistingToolCallingCapabilityBeforeInvokingAnAdapter() {
+        ObjectNode schema = JsonNodeFactory.instance.objectNode();
+        schema.put("type", "object").put("additionalProperties", false);
+        schema.putArray("required");
+        schema.putObject("properties");
+        ProviderChatRequest request = new ProviderChatRequest(
+                ModelProvider.OPENAI,
+                Stage2ProviderModels.OPENAI_CHAT,
+                List.of(ProviderChatMessage.plain(
+                        ProviderChatMessage.Role.USER, "Read the approved diff.")),
+                List.of(new ProviderToolDefinition(
+                        "read_diff", "Read the approved diff.", schema)),
+                NOW.plusSeconds(60));
+
+        assertThatThrownBy(() -> gateway.chat(request))
+                .isInstanceOfSatisfying(CapabilityRegistrationException.class, failure ->
+                        assertThat(failure.code()).isEqualTo(
+                                ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED));
+        verify(adapter, times(0)).chat(
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
     }
 
     private static ProviderChatRequest request(String prompt) {

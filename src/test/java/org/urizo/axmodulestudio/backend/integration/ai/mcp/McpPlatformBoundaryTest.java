@@ -33,7 +33,8 @@ class McpPlatformBoundaryTest {
 
     @Test
     void mcpContainerHasOnlyItsDedicatedInternalNetworkAndCredential() throws IOException {
-        String compose = Files.readString(Path.of("compose.dev.yaml"), StandardCharsets.UTF_8);
+        String compose = Files.readString(Path.of("compose.dev.yaml"), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n");
         int start = compose.indexOf("\n  mcp-server:");
         int end = compose.indexOf("\n  coding-runtime:", start);
         assertThat(start).isGreaterThanOrEqualTo(0);

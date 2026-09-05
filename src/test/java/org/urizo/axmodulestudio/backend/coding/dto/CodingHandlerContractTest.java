@@ -42,6 +42,22 @@ class CodingHandlerContractTest {
     }
 
     @Test
+    void registersPrMergeAndDeploymentCompletionContracts() {
+        assertThat(new CodingHandlerContract.StageExecutionResponse(
+                "1.0", UUID.randomUUID(), "coding.pr_complete", "completed",
+                UUID.randomUUID(), CANDIDATE, DIGEST, DIGEST,
+                JsonNodeFactory.instance.objectNode()).resultPort()).isEqualTo("completed");
+        assertThat(new CodingHandlerContract.StageExecutionResponse(
+                "1.0", UUID.randomUUID(), "coding.dev_merge_check", "not_merged",
+                UUID.randomUUID(), CANDIDATE, DIGEST, DIGEST,
+                JsonNodeFactory.instance.objectNode()).resultPort()).isEqualTo("not_merged");
+        assertThat(new CodingHandlerContract.StageExecutionResponse(
+                "1.0", UUID.randomUUID(), "coding.deploy", "blocked",
+                UUID.randomUUID(), CANDIDATE, DIGEST, DIGEST,
+                JsonNodeFactory.instance.objectNode()).resultPort()).isEqualTo("blocked");
+    }
+
+    @Test
     void requiresPostPreviewApprovalsToCarryCandidateEvidence() {
         assertThatThrownBy(() -> new CodingHandlerContract.ApprovalDecisionRequest(
                 "1.0", TRACE_ID, 3, 1, UUID.randomUUID(), "cms_approval",
@@ -49,6 +65,27 @@ class CodingHandlerContractTest {
                 null, null, CodingHandlerContract.Decision.APPROVED, null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("candidateSha");
+    }
+
+    @Test
+    void acceptsTheSnapshotSelectedApprovalNodeAndRound() {
+        CodingHandlerContract.ApprovalDecisionRequest request =
+                new CodingHandlerContract.ApprovalDecisionRequest(
+                        "1.0",
+                        TRACE_ID,
+                        3,
+                        1,
+                        UUID.randomUUID(),
+                        "snapshot-release_approval",
+                        CodingHandlerContract.ApprovalStage.GITHUB,
+                        4,
+                        CANDIDATE,
+                        DIGEST,
+                        CodingHandlerContract.Decision.APPROVED,
+                        null);
+
+        assertThat(request.nodeId()).isEqualTo("snapshot-release_approval");
+        assertThat(request.stageRound()).isEqualTo(4);
     }
 
     @Test

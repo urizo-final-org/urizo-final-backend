@@ -7,28 +7,28 @@
     {
       "id": "start",
       "type": "start",
-      "handlerKey": "fixture.start",
+      "handlerKey": "common.start",
       "resultPorts": ["next"],
       "config": {}
     },
     {
       "id": "guardrail",
       "type": "guardrail",
-      "handlerKey": "fixture.guardrail",
-      "resultPorts": ["passed"],
+      "handlerKey": "common.guardrail",
+      "resultPorts": ["passed", "failed"],
       "config": {"locked": true}
     },
     {
       "id": "analyze",
       "type": "agent",
-      "handlerKey": "fixture.analyze",
-      "resultPorts": ["completed"],
-      "config": {"promptKey": "fixture.analysis"}
+      "handlerKey": "coding.analyze",
+      "resultPorts": ["feasible", "infeasible"],
+      "config": {}
     },
     {
       "id": "end",
       "type": "end",
-      "handlerKey": "fixture.end",
+      "handlerKey": "common.end",
       "resultPorts": [],
       "config": {}
     }
@@ -36,15 +36,17 @@
   "edges": [
     {"from": "start", "resultPort": "next", "to": "guardrail"},
     {"from": "guardrail", "resultPort": "passed", "to": "analyze"},
-    {"from": "analyze", "resultPort": "completed", "to": "end"}
+    {"from": "guardrail", "resultPort": "failed", "to": "end"},
+    {"from": "analyze", "resultPort": "feasible", "to": "end"},
+    {"from": "analyze", "resultPort": "infeasible", "to": "end"}
   ],
   "config": {
-    "maxNodes": 8,
+    "maxNodes": 4,
     "maxAttempts": 3,
     "loopLimits": []
   },
   "modelBindings": {
-    "analyze": {"primary": "fixture-model", "fallback": []}
+    "analyze": {"primary": "llm-ops-analyze", "fallback": []}
   },
   "toolPolicy": {"allowedTools": []},
   "guardrailProfileKey": "central.default"

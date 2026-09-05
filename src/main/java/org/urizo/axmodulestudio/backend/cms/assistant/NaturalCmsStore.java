@@ -12,6 +12,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,8 +23,10 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 @Service
 @Profile("dev & local-full")
@@ -34,19 +37,28 @@ public final class NaturalCmsStore {
     private static final Set<String> RUNTIME_TOOLS = Set.of(
             "resolve_cms_target", "validate_cms_command", "create_cms_preview",
             "discard_cms_preview", "revalidate_cms_preview", "apply_cms_preview");
+    private static final String NATURAL_CMS_QUEUE = "axms:natural-cms:jobs:v1";
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    private final JdbcTemplate productJdbc;
+    private final TransactionTemplate productTransactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
     NaturalCmsStore(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions,
+            @Qualifier("productJdbcTemplate") JdbcTemplate productJdbc,
+            @Qualifier("authJpaTransactionManager")
+            PlatformTransactionManager productTransactionManager,
             ObjectMapper objectMapper,
             Clock clock) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc is required");
         this.transactions = Objects.requireNonNull(transactions, "transactions are required");
+        this.productJdbc = Objects.requireNonNull(productJdbc, "productJdbc is required");
+        this.productTransactions = new TransactionTemplate(Objects.requireNonNull(
+                productTransactionManager, "productTransactionManager is required"));
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
     }
@@ -77,7 +89,9 @@ public final class NaturalCmsStore {
                     request.resource().id(),
                     Timestamp.from(now),
                     Timestamp.from(now));
-            return requireJob(jobId, false);
+            NaturalCmsContract.JobResponse job = requireJob(jobId, false);
+            enqueue(job, now);
+            return job;
         });
         if (created == null) {
             throw unavailable();
@@ -94,6 +108,10 @@ public final class NaturalCmsStore {
             }
             return job;
         });
+    }
+
+    public NaturalCmsContract.JobResponse get(String authorization, UUID jobId) {
+        return authenticated(authorization, () -> requireJob(jobId, false));
     }
 
     RuntimePolicy runtimePolicy(String authorization, UUID profileVersionId) {
@@ -121,15 +139,10 @@ public final class NaturalCmsStore {
                     || !"central.default".equals(guardrail.textValue())) {
                 throw conflict("Natural CMS runtime policy is not executable.");
             }
-            java.util.HashSet<String> tools = new java.util.HashSet<>();
-            for (JsonNode tool : allowed) {
-                if (!tool.isTextual()
-                        || !RUNTIME_TOOLS.contains(tool.textValue())
-                        || !tools.add(tool.textValue())) {
-                    throw conflict("Natural CMS runtime policy is not executable.");
-                }
-            }
-            return new RuntimePolicy(tools, guardrail.textValue());
+            ProfileToolBindingPolicy bindings = ProfileToolBindingPolicy.decode(
+                    snapshot, RUNTIME_TOOLS);
+            return new RuntimePolicy(
+                    bindings.profileAllowedTools(), guardrail.textValue(), bindings);
         }
         catch (JsonProcessingException | IllegalArgumentException failure) {
             throw conflict("Natural CMS runtime policy is not executable.");
@@ -148,37 +161,62 @@ public final class NaturalCmsStore {
             NaturalCmsContract.StageExecutionResponse response) {
         return authenticated(authorization, () -> {
             NaturalCmsContract.JobResponse job = requireJob(jobId, true);
-            if (job.pipelineAttempt() != pipelineAttempt
-                    || !job.resource().equals(response.resource())) {
-                throw conflict("Natural CMS result does not match its Job boundary.");
-            }
+            return record(jdbc, job, pipelineAttempt, response);
+        });
+    }
+
+    public NaturalCmsContract.HandlerResult recordApplied(
+            String authorization,
+            UUID jobId,
+            int pipelineAttempt,
+            UUID resultId,
+            int expectedStateVersion,
+            Supplier<NaturalCmsContract.StageExecutionResponse> apply) {
+        Objects.requireNonNull(resultId, "resultId is required");
+        Objects.requireNonNull(apply, "apply is required");
+        authenticated(authorization, () -> Boolean.TRUE);
+        NaturalCmsContract.HandlerResult stored = productTransactions.execute(status -> {
+            NaturalCmsContract.JobResponse job = requireJob(productJdbc, jobId, true);
             Optional<NaturalCmsContract.HandlerResult> existing =
-                    findResult(jobId, pipelineAttempt, response.resultId());
+                    findResult(productJdbc, jobId, pipelineAttempt, resultId);
             if (existing.isPresent()) {
                 NaturalCmsContract.HandlerResult result = existing.get();
-                if (!result.handlerKey().equals(response.handlerKey())
-                        || !result.resultPort().equals(response.resultPort())) {
+                if (!"cms.apply".equals(result.handlerKey())
+                        || !"applied".equals(result.resultPort())) {
                     throw conflict("Natural CMS resultId is already bound.");
                 }
                 return result;
             }
-
-            Instant recordedAt = clock.instant();
-            jdbc.update("""
-                    INSERT INTO app.natural_cms_handler_result (
-                        result_id, job_id, pipeline_attempt, trace_id, handler_key,
-                        result_port, resource_type, resource_id, structured_command,
-                        preview_id, preview_hash, payload, recorded_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, CAST(? AS jsonb), ?)
-                    """,
-                    response.resultId(), jobId, pipelineAttempt, job.traceId(),
-                    response.handlerKey(), response.resultPort(), response.resource().type(),
-                    response.resource().id(), json(response.structuredCommand()),
-                    response.previewId(), response.previewHash(), json(response.payload()),
-                    Timestamp.from(recordedAt));
-            updateJob(jobId, response, recordedAt);
-            return findResult(jobId, pipelineAttempt, response.resultId()).orElseThrow();
+            if (job.pipelineAttempt() != pipelineAttempt
+                    || job.stateVersion() != expectedStateVersion
+                    || !"WAITING_APPROVAL".equals(job.status())
+                    || !job.previewValid()
+                    || !"APPROVED".equals(job.approvalDecision())) {
+                throw conflict("Natural CMS apply does not match its approved Job boundary.");
+            }
+            NaturalCmsContract.StageExecutionResponse response = apply.get();
+            if (!resultId.equals(response.resultId())
+                    || !"cms.apply".equals(response.handlerKey())) {
+                throw conflict("Natural CMS apply result does not match its Job boundary.");
+            }
+            return record(productJdbc, job, pipelineAttempt, response);
         });
+        if (stored == null) {
+            throw unavailable();
+        }
+        return stored;
+    }
+
+    /**
+     * 화면이 진행 상태와 미리보기를 받아오는 유일한 경로.
+     *
+     * <p>Job은 요청 직후 비어 있고 파이프라인이 채운다. 승인·반려와 같은 역할 기준을 쓴다.
+     */
+    public NaturalCmsContract.JobResponse read(AuthenticatedActor actor, UUID jobId) {
+        if (actor == null || !actor.role().isCmsAdministrator()) {
+            throw forbidden("A CMS administrator is required.");
+        }
+        return requireJob(jobId, false);
     }
 
     public NaturalCmsContract.JobResponse decide(
@@ -203,7 +241,8 @@ public final class NaturalCmsStore {
                 }
                 throw conflict("Natural CMS preview already has another decision.");
             }
-            jdbc.update("""
+            Instant decidedAt = clock.instant();
+            int updated = jdbc.update("""
                     UPDATE app.natural_cms_job
                     SET approval_decision = ?, approval_feedback = ?, approver_id = ?,
                         pipeline_attempt = pipeline_attempt +
@@ -212,8 +251,13 @@ public final class NaturalCmsStore {
                     WHERE job_id = ? AND status = 'WAITING_APPROVAL'
                     """,
                     request.decision(), request.feedback(), actor.actorId(), request.decision(),
-                    Timestamp.from(clock.instant()), jobId);
-            return requireJob(jobId, false);
+                    Timestamp.from(decidedAt), jobId);
+            if (updated != 1) {
+                throw conflict("Natural CMS approval transition did not complete.");
+            }
+            NaturalCmsContract.JobResponse result = requireJob(jobId, false);
+            enqueue(result, decidedAt);
+            return result;
         });
         if (decided == null) {
             throw unavailable();
@@ -229,17 +273,58 @@ public final class NaturalCmsStore {
         return count != null && count > 0;
     }
 
+    private NaturalCmsContract.HandlerResult record(
+            JdbcTemplate database,
+            NaturalCmsContract.JobResponse job,
+            int pipelineAttempt,
+            NaturalCmsContract.StageExecutionResponse response) {
+        if (job.pipelineAttempt() != pipelineAttempt
+                || !job.resource().equals(response.resource())) {
+            throw conflict("Natural CMS result does not match its Job boundary.");
+        }
+        Optional<NaturalCmsContract.HandlerResult> existing = findResult(
+                database, job.jobId(), pipelineAttempt, response.resultId());
+        if (existing.isPresent()) {
+            NaturalCmsContract.HandlerResult result = existing.get();
+            if (!result.handlerKey().equals(response.handlerKey())
+                    || !result.resultPort().equals(response.resultPort())) {
+                throw conflict("Natural CMS resultId is already bound.");
+            }
+            return result;
+        }
+
+        Instant recordedAt = clock.instant();
+        database.update("""
+                INSERT INTO app.natural_cms_handler_result (
+                    result_id, job_id, pipeline_attempt, trace_id, handler_key,
+                    result_port, resource_type, resource_id, structured_command,
+                    preview_id, preview_hash, payload, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS jsonb), ?, ?, CAST(? AS jsonb), ?)
+                """,
+                response.resultId(), job.jobId(), pipelineAttempt, job.traceId(),
+                response.handlerKey(), response.resultPort(), response.resource().type(),
+                response.resource().id(), json(response.structuredCommand()),
+                response.previewId(), response.previewHash(), json(response.payload()),
+                Timestamp.from(recordedAt));
+        updateJob(database, job.jobId(), response, recordedAt);
+        return findResult(database, job.jobId(), pipelineAttempt, response.resultId())
+                .orElseThrow();
+    }
+
     private void updateJob(
+            JdbcTemplate database,
             UUID jobId,
             NaturalCmsContract.StageExecutionResponse response,
             Instant updatedAt) {
-        switch (response.handlerKey()) {
-            case "cms.analyze" -> jdbc.update("""
+        int updated = switch (response.handlerKey()) {
+            case "cms.analyze" -> database.update("""
                     UPDATE app.natural_cms_job
-                    SET status = 'ACTIVE', updated_at = ?
+                    SET status = ?, updated_at = ?
                     WHERE job_id = ? AND status <> 'COMPLETED'
-                    """, Timestamp.from(updatedAt), jobId);
-            case "cms.preview" -> jdbc.update("""
+                    """,
+                    "infeasible".equals(response.resultPort()) ? "REJECTED" : "ACTIVE",
+                    Timestamp.from(updatedAt), jobId);
+            case "cms.preview" -> database.update("""
                     UPDATE app.natural_cms_job
                     SET status = 'WAITING_APPROVAL', structured_command = CAST(? AS jsonb),
                         preview_id = ?, preview_hash = ?, preview_payload = CAST(? AS jsonb),
@@ -253,7 +338,7 @@ public final class NaturalCmsStore {
                     Timestamp.from(updatedAt), jobId);
             case "cms.discard" -> {
                 boolean retry = "retry".equals(response.resultPort());
-                jdbc.update("""
+                yield database.update("""
                         UPDATE app.natural_cms_job
                         SET status = ?, preview_valid = FALSE, updated_at = ?
                         WHERE job_id = ? AND approval_decision = 'REJECTED'
@@ -261,19 +346,27 @@ public final class NaturalCmsStore {
                         retry ? "ACTIVE" : "REJECTED",
                         Timestamp.from(updatedAt), jobId);
             }
-            case "cms.apply" -> jdbc.update("""
+            case "cms.apply" -> database.update("""
                     UPDATE app.natural_cms_job
                     SET status = 'COMPLETED', preview_valid = FALSE,
                         updated_at = ?
                     WHERE job_id = ? AND approval_decision = 'APPROVED'
                     """, Timestamp.from(updatedAt), jobId);
             default -> throw new IllegalArgumentException("Natural CMS handler is not registered.");
+        };
+        if (updated != 1) {
+            throw conflict("Natural CMS Job transition did not complete.");
         }
     }
 
     private Optional<NaturalCmsContract.HandlerResult> findResult(
             UUID jobId, int pipelineAttempt, UUID resultId) {
-        List<NaturalCmsContract.HandlerResult> rows = jdbc.query("""
+        return findResult(jdbc, jobId, pipelineAttempt, resultId);
+    }
+
+    private Optional<NaturalCmsContract.HandlerResult> findResult(
+            JdbcTemplate database, UUID jobId, int pipelineAttempt, UUID resultId) {
+        List<NaturalCmsContract.HandlerResult> rows = database.query("""
                 SELECT result_id, job_id, trace_id, pipeline_attempt, handler_key, result_port,
                        resource_type, resource_id, structured_command, preview_id, preview_hash,
                        payload, recorded_at
@@ -293,6 +386,11 @@ public final class NaturalCmsStore {
     }
 
     private NaturalCmsContract.JobResponse requireJob(UUID jobId, boolean lock) {
+        return requireJob(jdbc, jobId, lock);
+    }
+
+    private NaturalCmsContract.JobResponse requireJob(
+            JdbcTemplate database, UUID jobId, boolean lock) {
         String sql = """
                 SELECT job_id, trace_id, profile_version_id, pipeline_attempt, state_version,
                        status, request_text, resource_type, resource_id, structured_command,
@@ -300,7 +398,7 @@ public final class NaturalCmsStore {
                        approval_feedback, created_at, updated_at
                 FROM app.natural_cms_job WHERE job_id = ?
                 """ + (lock ? " FOR UPDATE" : "");
-        List<NaturalCmsContract.JobResponse> rows = jdbc.query(sql,
+        List<NaturalCmsContract.JobResponse> rows = database.query(sql,
                 (rs, row) -> new NaturalCmsContract.JobResponse(
                         NaturalCmsContract.SCHEMA_VERSION,
                         rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
@@ -318,6 +416,25 @@ public final class NaturalCmsStore {
                     HttpStatus.NOT_FOUND);
         }
         return rows.get(0);
+    }
+
+    private void enqueue(NaturalCmsContract.JobResponse job, Instant availableAt) {
+        UUID outboxId = UUID.randomUUID();
+        String eventKey = job.jobId() + ":natural-cms-requested:v" + job.stateVersion();
+        JsonNode payload = objectMapper.createObjectNode()
+                .put("schemaVersion", NaturalCmsContract.SCHEMA_VERSION)
+                .put("jobId", job.jobId().toString());
+        jdbc.update("""
+                INSERT INTO app.transactional_outbox (
+                    outbox_id, aggregate_type, aggregate_id, event_type, event_key,
+                    destination, payload, status, available_at, created_at, updated_at)
+                VALUES (?, 'NATURAL_CMS_JOB', ?, 'NATURAL_CMS_JOB_REQUESTED', ?, ?,
+                    CAST(? AS jsonb), 'PENDING', ?, ?, ?)
+                ON CONFLICT (event_key) DO NOTHING
+                """,
+                outboxId, job.jobId(), eventKey, NATURAL_CMS_QUEUE, json(payload),
+                Timestamp.from(availableAt), Timestamp.from(availableAt),
+                Timestamp.from(availableAt));
     }
 
     private void requireActiveProfile(UUID profileVersionId) {
@@ -438,9 +555,17 @@ public final class NaturalCmsStore {
                 true);
     }
 
-    record RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+    record RuntimePolicy(
+            Set<String> allowedTools,
+            String guardrailProfileKey,
+            ProfileToolBindingPolicy toolBindings) {
+        RuntimePolicy(Set<String> allowedTools, String guardrailProfileKey) {
+            this(allowedTools, guardrailProfileKey,
+                    ProfileToolBindingPolicy.legacy(allowedTools));
+        }
         RuntimePolicy {
             allowedTools = Set.copyOf(allowedTools);
+            Objects.requireNonNull(toolBindings, "toolBindings is required");
         }
     }
 }

@@ -11,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -44,6 +45,12 @@ public final class NaturalCmsCommandController {
         NaturalCmsContract.JobResponse created = store.create(
                 actor(authentication), traceId(servletRequest), request);
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
+    }
+
+    @GetMapping("/{jobId}")
+    NaturalCmsContract.JobResponse get(
+            @PathVariable UUID jobId, Authentication authentication) {
+        return store.read(actor(authentication), jobId);
     }
 
     @PostMapping("/{jobId}/decisions")

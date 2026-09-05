@@ -61,6 +61,19 @@ public final class ProviderCapabilityRegistry {
                 .toList();
     }
 
+    public List<ProviderModelRegistration> registrations() {
+        return registrations.values().stream()
+                .sorted(Comparator.comparing(value -> value.provider().name() + ":" + value.modelId()))
+                .toList();
+    }
+
+    public ProviderModelRegistration findBySelectionId(String selectionId) {
+        if (selectionId == null) return null;
+        return registrations.values().stream()
+                .filter(registration -> selectionId.equals(registration.selectionId()))
+                .findFirst().orElse(null);
+    }
+
     private static int defaultSelectionOrder(ModelProvider provider) {
         return provider == ModelProvider.ANTHROPIC ? 1 : 0;
     }

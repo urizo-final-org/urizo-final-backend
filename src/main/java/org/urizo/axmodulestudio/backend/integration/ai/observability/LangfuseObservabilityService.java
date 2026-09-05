@@ -192,6 +192,8 @@ public final class LangfuseObservabilityService {
         environment.put("operator", "any of");
         environment.putArray("value").add(ENVIRONMENT);
         environment.put("type", "stringOptions");
+        fixedStringFilter(filters, "name", "axms.model");
+        fixedStringFilter(filters, "type", "GENERATION");
         query.put("fromTimestamp", range.from().toString());
         query.put("toTimestamp", range.to().toString());
         ObjectNode order = query.putArray("orderBy").addObject();
@@ -210,6 +212,14 @@ public final class LangfuseObservabilityService {
         ObjectNode metric = metrics.addObject();
         metric.put("measure", measure);
         metric.put("aggregation", aggregation);
+    }
+
+    private static void fixedStringFilter(ArrayNode filters, String column, String value) {
+        ObjectNode filter = filters.addObject();
+        filter.put("column", column);
+        filter.put("operator", "=");
+        filter.put("value", value);
+        filter.put("type", "string");
     }
 
     private static String observationsPath(TimeRange range) {
@@ -257,7 +267,7 @@ public final class LangfuseObservabilityService {
                 environment,
                 requiredInstant(row, "startTime"),
                 nullableInstant(row, "endTime"),
-                nullableText(row, "providedModelName"),
+                nullableText(row, "model"),
                 nullableLong(usageDetails, "input"),
                 nullableLong(usageDetails, "output"),
                 latencySeconds == null ? null : latencySeconds.movePointRight(3),

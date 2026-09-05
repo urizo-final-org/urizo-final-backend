@@ -11,6 +11,12 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 @Component
 final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactory {
 
+    private final ObservationRegistry observationRegistry;
+
+    GoogleGenAiProductChatModelFactory(ObservationRegistry observationRegistry) {
+        this.observationRegistry = observationRegistry;
+    }
+
     @Override
     public ModelProvider provider() {
         return ModelProvider.GOOGLE_GENAI;
@@ -33,7 +39,7 @@ final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactor
                     .genAiClient(client)
                     .defaultOptions(options)
                     .retryTemplate(singleAttempt())
-                    .observationRegistry(ObservationRegistry.NOOP)
+                    .observationRegistry(observationRegistry)
                     .build();
             return new ProductChatModelSession(model, client::close);
         }

@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.micrometer.observation.ObservationRegistry;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.ai.anthropic.AnthropicChatModel;
@@ -284,11 +285,11 @@ class SpringAiProductProviderChatAdapterTest {
 
     @Test
     void constructsConcreteProductLaneClientsWithoutMakingRemoteCalls() {
-        try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory()
+        try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory(ObservationRegistry.NOOP)
                         .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT, OUTPUT_BUDGET);
-                ProductChatModelSession google = new GoogleGenAiProductChatModelFactory()
+                ProductChatModelSession google = new GoogleGenAiProductChatModelFactory(ObservationRegistry.NOOP)
                         .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT, OUTPUT_BUDGET);
-                ProductChatModelSession anthropic = new AnthropicProductChatModelFactory()
+                ProductChatModelSession anthropic = new AnthropicProductChatModelFactory(ObservationRegistry.NOOP)
                         .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.ANTHROPIC_CHAT, OUTPUT_BUDGET)) {
             assertThat(openAi.chatModel()).isInstanceOf(OpenAiChatModel.class);
             assertThat(google.chatModel()).isInstanceOf(GoogleGenAiChatModel.class);
@@ -663,7 +664,7 @@ class SpringAiProductProviderChatAdapterTest {
                 .isInstanceOf(StructuredOutputChatOptions.class);
 
         if (provider == ModelProvider.OPENAI) {
-            try (ProductChatModelSession session = new OpenAiProductChatModelFactory()
+            try (ProductChatModelSession session = new OpenAiProductChatModelFactory(ObservationRegistry.NOOP)
                     .open(FIXTURE_CREDENTIAL, modelId, OUTPUT_BUDGET)) {
                 Method createRequest = OpenAiChatModel.class.getDeclaredMethod(
                         "createRequest", Prompt.class, boolean.class);
@@ -703,7 +704,7 @@ class SpringAiProductProviderChatAdapterTest {
                             });
         }
         else {
-            try (ProductChatModelSession session = new AnthropicProductChatModelFactory()
+            try (ProductChatModelSession session = new AnthropicProductChatModelFactory(ObservationRegistry.NOOP)
                     .open(FIXTURE_CREDENTIAL, modelId, OUTPUT_BUDGET)) {
                 Method createRequest = AnthropicChatModel.class.getDeclaredMethod(
                         "createRequest", Prompt.class, boolean.class);
@@ -719,7 +720,7 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     private static void assertOpenAiProviderRequest(Prompt prompt) throws Exception {
-        try (ProductChatModelSession session = new OpenAiProductChatModelFactory()
+        try (ProductChatModelSession session = new OpenAiProductChatModelFactory(ObservationRegistry.NOOP)
                 .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT, OUTPUT_BUDGET)) {
             Method createRequest = OpenAiChatModel.class.getDeclaredMethod(
                     "createRequest", Prompt.class, boolean.class);
@@ -759,7 +760,7 @@ class SpringAiProductProviderChatAdapterTest {
 
     private static GoogleGenAiChatModel.GeminiRequest createGeminiProviderRequest(
             Prompt prompt) throws Exception {
-        try (ProductChatModelSession session = new GoogleGenAiProductChatModelFactory()
+        try (ProductChatModelSession session = new GoogleGenAiProductChatModelFactory(ObservationRegistry.NOOP)
                 .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.GOOGLE_GENAI_CHAT, OUTPUT_BUDGET)) {
             Method createRequest = GoogleGenAiChatModel.class.getDeclaredMethod(
                     "createGeminiRequest", Prompt.class);

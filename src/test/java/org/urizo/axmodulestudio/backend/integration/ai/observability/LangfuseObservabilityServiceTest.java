@@ -36,6 +36,8 @@ class LangfuseObservabilityServiceTest {
             assertThat(URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8))
                     .contains("\"view\":\"observations\"")
                     .contains("\"column\":\"environment\"")
+                    .contains("\"column\":\"name\",\"operator\":\"=\",\"value\":\"axms.model\"")
+                    .contains("\"column\":\"type\",\"operator\":\"=\",\"value\":\"GENERATION\"")
                     .contains("\"local\"")
                     .doesNotContain("\"prompt\"", "\"io\"", "completion");
             return new LangfuseHttpTransport.Response(200, """
@@ -87,7 +89,7 @@ class LangfuseObservabilityServiceTest {
                       "environment":"local",
                       "startTime":"2026-09-01T01:00:00Z",
                       "endTime":"2026-09-01T01:00:01Z",
-                      "providedModelName":"gpt-test",
+                      "model":"gpt-test",
                       "usageDetails":{"input":12,"output":4,"total":16},
                       "latency":1.25,
                       "input":"secret prompt",

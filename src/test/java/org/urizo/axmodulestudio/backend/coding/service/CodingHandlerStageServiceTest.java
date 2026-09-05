@@ -209,12 +209,6 @@ class CodingHandlerStageServiceTest {
                 "Bearer worker", JOB, 1, RESULT, fixture.request());
 
         assertThat(response.resultPort()).isEqualTo("completed");
-        assertThat(response.modelObservations()).hasSize(3)
-                .allSatisfy(observation -> {
-                    assertThat(observation.provider()).isEqualTo("GOOGLE");
-                    assertThat(observation.modelId()).isEqualTo("coding-test-model");
-                    assertThat(observation.latencyMs()).isEqualTo(10);
-                });
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(fixture.gateway(), times(3)).chat(routed.capture());
@@ -658,7 +652,7 @@ class CodingHandlerStageServiceTest {
     }
 
     @Test
-    void idempotentModelTurnReplayReturnsNoNewModelObservation() {
+    void idempotentModelTurnReplayUsesCachedResponseWithoutCallingProvider() {
         ObjectMapper mapper = new ObjectMapper();
         AnalyzeFixture fixture = analyzeFixture(mapper);
         ObjectNode payload = mapper.createObjectNode().put("planSummary", "고칩니다.");
@@ -696,7 +690,6 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
 
         assertThat(response.resultPort()).isEqualTo("feasible");
-        assertThat(response.modelObservations()).isEmpty();
         verify(fixture.gateway(), never()).chat(any());
     }
 
@@ -1155,7 +1148,6 @@ class CodingHandlerStageServiceTest {
         assertThat(response.candidateSha()).isEqualTo(BASE_SHA);
         assertThat(response.diffDigest()).isEqualTo(DIFF_DIGEST);
         assertThat(response.payload().path("summary").asText()).isEqualTo("done");
-        assertThat(response.modelObservations()).hasSize(2);
 
         CodingHandlerContract.HandlerResultResponse stored =
                 new CodingHandlerContract.HandlerResultResponse(
@@ -1175,7 +1167,6 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 2, "coding.code", RESULT));
         assertThat(replay.resultId()).isEqualTo(response.resultId());
         assertThat(replay.payload()).isEqualTo(response.payload());
-        assertThat(replay.modelObservations()).isEmpty();
 
         ArgumentCaptor<JsonNode> toolRequest = ArgumentCaptor.forClass(JsonNode.class);
         verify(toolService).submitForNode(

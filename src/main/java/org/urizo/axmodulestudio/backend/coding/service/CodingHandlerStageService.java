@@ -32,7 +32,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
-import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservation;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
@@ -199,12 +199,11 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
-        ModelTurnExecution execution = modelTurn(
+        CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(), initialMessages(request.handlerKey(), aggregate),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
-        CodingModelTurnContract.Response response = execution.response();
         if (!(response.responseFormat()
                 instanceof CodingModelTurnContract.JsonSchemaResponseFormat structured)) {
             throw contract("The Coding analyze result is not structured output.");
@@ -214,7 +213,7 @@ public final class CodingHandlerStageService {
                 Set.of("feasible", "infeasible"));
         JsonNode payload = withCheckedTargetFiles(jobId, outcome.payload());
         return response(resultId, request.handlerKey(), outcome.port(), jobId,
-                null, null, null, payload, execution.modelObservations());
+                null, null, null, payload);
     }
 
     /**
@@ -297,18 +296,16 @@ public final class CodingHandlerStageService {
         // could not land one - and only this tells them apart.
         boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
-        List<ModelObservation> modelObservations = new ArrayList<>();
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            ModelTurnExecution execution = modelTurn(
+            CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, messages,
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
-            modelResponse = execution.response();
-            modelObservations.addAll(execution.modelObservations());
+            modelResponse = execution;
             if (modelResponse.toolCalls().isEmpty()) {
                 try {
                     terminalOutcome = parseOutcome(
@@ -425,7 +422,7 @@ public final class CodingHandlerStageService {
         }
         return response(resultId, request.handlerKey(), outcome.port(),
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
-                candidateSha, diffDigest, null, outcome.payload(), modelObservations);
+                candidateSha, diffDigest, null, outcome.payload());
     }
 
     private CodingHandlerContract.StageExecutionResponse preview(
@@ -979,7 +976,7 @@ public final class CodingHandlerStageService {
                 "RUNNER_TASK_PENDING", message, HttpStatus.SERVICE_UNAVAILABLE, true, 1_000L);
     }
 
-    private ModelTurnExecution modelTurn(
+    private CodingModelTurnContract.Response modelTurn(
             String authorization,
             UUID jobId,
             UUID resultId,
@@ -1020,12 +1017,16 @@ public final class CodingHandlerStageService {
                 authority.expiresAt());
         CodingModelTurnPermit permit = modelGuard.reserve(authorization, request);
         if (permit.replay()) {
-            return new ModelTurnExecution(permit.cachedResponse(), List.of());
+            return permit.cachedResponse();
         }
         try {
-            CodingModelTurnContract.Response response = models.execute(request, modelBindings);
+            CodingModelTurnContract.Response response;
+            try (ModelObservationScope ignored = ModelObservationScope.open(
+                    jobId, stage.traceId(), authority.profileVersionId(), stage.nodeId())) {
+                response = models.execute(request, modelBindings);
+            }
             modelGuard.complete(permit, response);
-            return new ModelTurnExecution(response, List.of(observation(response)));
+            return response;
         }
         catch (ProviderGatewayException failure) {
             try {
@@ -1747,20 +1748,6 @@ public final class CodingHandlerStageService {
             String diffDigest,
             String validationHash,
             JsonNode payload) {
-        return response(resultId, handlerKey, port, workspaceId, candidateSha,
-                diffDigest, validationHash, payload, List.of());
-    }
-
-    private static CodingHandlerContract.StageExecutionResponse response(
-            UUID resultId,
-            String handlerKey,
-            String port,
-            UUID workspaceId,
-            String candidateSha,
-            String diffDigest,
-            String validationHash,
-            JsonNode payload,
-            List<ModelObservation> modelObservations) {
         return new CodingHandlerContract.StageExecutionResponse(
                 CodingHandlerContract.SCHEMA_VERSION,
                 resultId,
@@ -1770,17 +1757,7 @@ public final class CodingHandlerStageService {
                 candidateSha,
                 diffDigest,
                 validationHash,
-                payload,
-                modelObservations);
-    }
-
-    private static ModelObservation observation(CodingModelTurnContract.Response response) {
-        return new ModelObservation(
-                response.selectedModel().provider(),
-                response.selectedModel().modelId(),
-                response.usage().inputTokens(),
-                response.usage().outputTokens(),
-                response.latencyMs());
+                payload);
     }
 
     private static void putOptional(ObjectNode target, String field, String value) {
@@ -1802,16 +1779,6 @@ public final class CodingHandlerStageService {
                     INTERNAL_TRANSIENT_ERROR -> true;
             default -> false;
         };
-    }
-
-    private record ModelTurnExecution(
-            CodingModelTurnContract.Response response,
-            List<ModelObservation> modelObservations) {
-
-        private ModelTurnExecution {
-            response = Objects.requireNonNull(response, "response is required");
-            modelObservations = List.copyOf(modelObservations);
-        }
     }
 
     private static CodingWorkerException contract(String message) {

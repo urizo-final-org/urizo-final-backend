@@ -25,9 +25,9 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
-import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservation;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
@@ -114,7 +114,7 @@ public final class NaturalCmsStageService {
         };
         NaturalCmsContract.HandlerResult stored = store.record(
                 authorization, jobId, pipelineAttempt, executed);
-        return response(stored, executed.modelObservations());
+        return response(stored);
     }
 
     private NaturalCmsContract.StageExecutionResponse analyze(
@@ -138,8 +138,7 @@ public final class NaturalCmsStageService {
                 null,
                 null,
                 null,
-                outcome.value(),
-                List.of(observation(turn)));
+                outcome.value());
     }
 
     private NaturalCmsContract.StageExecutionResponse preview(
@@ -187,8 +186,7 @@ public final class NaturalCmsStageService {
                 command,
                 previewId,
                 previewHash,
-                preview,
-                List.of(observation(response)));
+                preview);
     }
 
     private NaturalCmsContract.StageExecutionResponse discard(
@@ -283,7 +281,7 @@ public final class NaturalCmsStageService {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
-        return models.executeNaturalCms(new CodingModelTurnContract.Request(
+        CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 turnId,
                 job.jobId(),
@@ -298,7 +296,11 @@ public final class NaturalCmsStageService {
                 messages,
                 schemas,
                 objectMapper.createObjectNode().put("type", "TEXT"),
-                clock.instant().plusSeconds(60)), modelBindings);
+                clock.instant().plusSeconds(60));
+        try (ModelObservationScope ignored = ModelObservationScope.open(
+                job.jobId(), job.traceId(), job.profileVersionId(), stage.nodeId())) {
+            return models.executeNaturalCms(request, modelBindings);
+        }
     }
 
     private List<ProviderModelRegistration> modelBindings(
@@ -546,12 +548,6 @@ public final class NaturalCmsStageService {
 
     private NaturalCmsContract.StageExecutionResponse response(
             NaturalCmsContract.HandlerResult result) {
-        return response(result, List.of());
-    }
-
-    private NaturalCmsContract.StageExecutionResponse response(
-            NaturalCmsContract.HandlerResult result,
-            List<ModelObservation> modelObservations) {
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
                 result.resultId(),
@@ -561,8 +557,7 @@ public final class NaturalCmsStageService {
                 result.structuredCommand(),
                 result.previewId(),
                 result.previewHash(),
-                result.payload(),
-                modelObservations);
+                result.payload());
     }
 
     private static UUID uuid(JsonNode value, String field) {
@@ -614,15 +609,6 @@ public final class NaturalCmsStageService {
     private static NaturalCmsException conflict(String message) {
         return new NaturalCmsException(
                 "NATURAL_CMS_STATE_CONFLICT", message, HttpStatus.CONFLICT);
-    }
-
-    private static ModelObservation observation(CodingModelTurnContract.Response response) {
-        return new ModelObservation(
-                response.selectedModel().provider(),
-                response.selectedModel().modelId(),
-                response.usage().inputTokens(),
-                response.usage().outputTokens(),
-                response.latencyMs());
     }
 
     private record ModelOutcome(String port, JsonNode value) { }

@@ -123,10 +123,6 @@ class NaturalCmsStageServiceTest {
                     "Bearer worker", JOB, 1, RESULT,
                     stageRequest("cms.preview", RESULT));
             assertThat(response.resultPort()).isEqualTo("ready");
-            assertThat(response.modelObservations()).singleElement().satisfies(observation -> {
-                assertThat(observation.provider()).isEqualTo("OPENAI");
-                assertThat(observation.modelId()).isEqualTo("test-model");
-            });
 
             ArgumentCaptor<CodingModelTurnContract.Request> request =
                     ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);

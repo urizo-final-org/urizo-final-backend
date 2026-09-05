@@ -17,7 +17,6 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
-import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservation;
 
 public final class CodingHandlerContract {
 
@@ -337,8 +336,7 @@ public final class CodingHandlerContract {
             String candidateSha,
             String diffDigest,
             String validationHash,
-            JsonNode payload,
-            List<ModelObservation> modelObservations) {
+            JsonNode payload) {
 
         public StageExecutionResponse {
             requireVersion(schemaVersion);
@@ -365,22 +363,6 @@ public final class CodingHandlerContract {
                 throw new IllegalArgumentException(
                         "Side-effect stage validationHash is required.");
             }
-            modelObservations = List.copyOf(Objects.requireNonNull(
-                    modelObservations, "modelObservations are required"));
-        }
-
-        public StageExecutionResponse(
-                String schemaVersion,
-                UUID resultId,
-                String handlerKey,
-                String resultPort,
-                UUID workspaceId,
-                String candidateSha,
-                String diffDigest,
-                String validationHash,
-                JsonNode payload) {
-            this(schemaVersion, resultId, handlerKey, resultPort, workspaceId,
-                    candidateSha, diffDigest, validationHash, payload, List.of());
         }
     }
 

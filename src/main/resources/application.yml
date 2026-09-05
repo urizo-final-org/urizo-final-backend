@@ -49,6 +49,14 @@ ax:
       connect-timeout: ${AXMS_MCP_PLATFORM_CONNECT_TIMEOUT:3s}
       request-timeout: ${AXMS_MCP_PLATFORM_REQUEST_TIMEOUT:5s}
       max-response-bytes: ${AXMS_MCP_PLATFORM_MAX_RESPONSE_BYTES:65536}
+    langfuse:
+      base-url: ${LANGFUSE_BASE_URL:}
+      public-key: ${LANGFUSE_PUBLIC_KEY:}
+      secret-key: ${LANGFUSE_SECRET_KEY:}
+      connect-timeout: 3s
+      request-timeout: 5s
+      cache-ttl: 30s
+      max-response-bytes: 262144
   coding:
     job-lifecycle:
       enabled: false

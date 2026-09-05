@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -11,6 +12,7 @@ import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservation;
 
 public final class NaturalCmsContract {
 
@@ -111,7 +113,8 @@ public final class NaturalCmsContract {
             JsonNode structuredCommand,
             UUID previewId,
             String previewHash,
-            JsonNode payload) {
+            JsonNode payload,
+            List<ModelObservation> modelObservations) {
         public StageExecutionResponse {
             requireVersion(schemaVersion);
             Objects.requireNonNull(resultId, "resultId is required");
@@ -127,6 +130,22 @@ public final class NaturalCmsContract {
             if (previewHash != null) {
                 requireDigest(previewHash, "previewHash");
             }
+            modelObservations = List.copyOf(Objects.requireNonNull(
+                    modelObservations, "modelObservations are required"));
+        }
+
+        public StageExecutionResponse(
+                String schemaVersion,
+                UUID resultId,
+                String handlerKey,
+                String resultPort,
+                ResourceRef resource,
+                JsonNode structuredCommand,
+                UUID previewId,
+                String previewHash,
+                JsonNode payload) {
+            this(schemaVersion, resultId, handlerKey, resultPort, resource,
+                    structuredCommand, previewId, previewHash, payload, List.of());
         }
 
         @Override

@@ -370,6 +370,7 @@ services:
     logging: *default-logging
     networks:
       - axms_internal
+      - axms_egress
 
   frontend:
     profiles: ["spring-core", "full"]

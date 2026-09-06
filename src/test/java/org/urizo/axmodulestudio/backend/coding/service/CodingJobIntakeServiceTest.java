@@ -197,6 +197,15 @@ class CodingJobIntakeServiceTest {
         assertThat(payload.getValue().path("repo").asText()).isEqualTo("frontend");
     }
 
+    @Test
+    void consoleReadsLegacyBackendHistoryWithoutRelaxingExecutionRouting() {
+        UUID legacyBackend = UUID.fromString("33333333-3333-4333-8333-333333333333");
+
+        assertThat(CodingRepositories.consoleNameOf(legacyBackend)).isEqualTo("backend");
+        assertThatThrownBy(() -> CodingRepositories.nameOf(legacyBackend))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     /**
      * The analyst was seen to wave one of these through. With no allowed folder in this
      * repository the file list it is handed is empty, and the label list alone did not stop it -

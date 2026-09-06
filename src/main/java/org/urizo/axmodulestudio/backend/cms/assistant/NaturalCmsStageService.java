@@ -25,6 +25,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformException;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
@@ -280,7 +281,7 @@ public final class NaturalCmsStageService {
         UUID turnId = UUID.nameUUIDFromBytes(
                 (resultId + ":attempt:" + stage.executionAttempt() + ":model:" + turn)
                         .getBytes(StandardCharsets.UTF_8));
-        return models.executeNaturalCms(new CodingModelTurnContract.Request(
+        CodingModelTurnContract.Request request = new CodingModelTurnContract.Request(
                 CodingModelTurnContract.SCHEMA_VERSION,
                 turnId,
                 job.jobId(),
@@ -295,7 +296,11 @@ public final class NaturalCmsStageService {
                 messages,
                 schemas,
                 objectMapper.createObjectNode().put("type", "TEXT"),
-                clock.instant().plusSeconds(60)), modelBindings);
+                clock.instant().plusSeconds(60));
+        try (ModelObservationScope ignored = ModelObservationScope.open(
+                job.jobId(), job.traceId(), job.profileVersionId(), stage.nodeId())) {
+            return models.executeNaturalCms(request, modelBindings);
+        }
     }
 
     private List<ProviderModelRegistration> modelBindings(

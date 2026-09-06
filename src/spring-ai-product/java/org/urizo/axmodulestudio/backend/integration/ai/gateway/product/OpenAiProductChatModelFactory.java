@@ -11,6 +11,12 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 @Component
 final class OpenAiProductChatModelFactory implements ProductChatModelFactory {
 
+    private final ObservationRegistry observationRegistry;
+
+    OpenAiProductChatModelFactory(ObservationRegistry observationRegistry) {
+        this.observationRegistry = observationRegistry;
+    }
+
     @Override
     public ModelProvider provider() {
         return ModelProvider.OPENAI;
@@ -31,7 +37,7 @@ final class OpenAiProductChatModelFactory implements ProductChatModelFactory {
                 .openAiApi(api)
                 .defaultOptions(options)
                 .retryTemplate(singleAttempt())
-                .observationRegistry(ObservationRegistry.NOOP)
+                .observationRegistry(observationRegistry)
                 .build();
         return new ProductChatModelSession(model, () -> { });
     }

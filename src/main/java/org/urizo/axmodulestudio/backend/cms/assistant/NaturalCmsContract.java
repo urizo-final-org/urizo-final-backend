@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;

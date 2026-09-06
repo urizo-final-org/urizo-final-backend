@@ -3,6 +3,7 @@ set -eu
 
 bundle=${1:?CA bundle path is required}
 truststore=${2:?temporary truststore path is required}
+certificate_output_directory=${3:-}
 
 test -s "$bundle"
 cp "$JAVA_HOME/lib/security/cacerts" "$truststore"
@@ -41,6 +42,12 @@ for certificate in "$certificate_directory"/certificate-*.pem; do
         -storepass changeit \
         -alias "axms-host-extra-ca-$certificate_count" \
         -file "$certificate" >/dev/null 2>&1
+    if [ -n "$certificate_output_directory" ]; then
+        cp "$certificate" \
+            "$certificate_output_directory/axms-host-extra-ca-$certificate_count.crt"
+        chmod 0644 \
+            "$certificate_output_directory/axms-host-extra-ca-$certificate_count.crt"
+    fi
 done
 
 test "$certificate_count" -gt 0

@@ -48,6 +48,26 @@ WORKDIR /workspace
 
 FROM eclipse-temurin:21.0.11_10-jre-jammy AS runtime
 
+COPY --from=build --chmod=0555 \
+    /usr/local/bin/import-maven-build-extra-ca \
+    /usr/local/bin/import-maven-build-extra-ca
+
+RUN --mount=type=secret,id=maven_build_extra_ca,required=false \
+    set -eu; \
+    truststore=''; \
+    cleanup() { if [ -n "$truststore" ]; then rm -f "$truststore"; fi; }; \
+    trap cleanup EXIT; \
+    if [ -f /run/secrets/maven_build_extra_ca ]; then \
+      truststore="$(mktemp)"; \
+      import-maven-build-extra-ca \
+        /run/secrets/maven_build_extra_ca \
+        "$truststore" \
+        /usr/local/share/ca-certificates; \
+      update-ca-certificates >/dev/null; \
+      install -m 0644 "$truststore" "$JAVA_HOME/lib/security/cacerts"; \
+    fi; \
+    rm -f /usr/local/bin/import-maven-build-extra-ca
+
 RUN groupadd --gid 10001 axms \
     && useradd --uid 10001 --gid axms --create-home --shell /usr/sbin/nologin axms \
     && mkdir -p /opt/axms \

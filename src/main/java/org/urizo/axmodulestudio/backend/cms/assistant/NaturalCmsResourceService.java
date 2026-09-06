@@ -616,6 +616,25 @@ public final class NaturalCmsResourceService {
             return state;
         }
 
+        /**
+         * 삭제 가능 여부를 판정 단계가 알아야 한다.
+         *
+         * <p>판정 지시문이 "게시물이 없을 때만 삭제"라고만 하면 모델은 그 조건을 확인할 수단이 없어
+         * 안전하게 거부한다. 실제로 같은 게시판에 `이 게시판 지워줘`는 통과하고 `지워줘`는
+         * 거부되는 흔들림이 나왔다. 개수만 주면 모델이 스스로 판단한다.
+         *
+         * <p>제목까지 주지 않는다. 필요한 것은 0인지 아닌지뿐이고, 게시물은 리소스 중 갯수가 가장 많다.
+         */
+        @Override
+        public ObjectNode promptContext(String id) {
+            if (NEW_ID.equals(id)) {
+                return null;
+            }
+            ObjectNode context = objectMapper.createObjectNode();
+            context.put("posts", cmsService.posts(numericId(id, "BOARD")).size());
+            return context;
+        }
+
         @Override
         public CmsRequests.BoardRequest merged(Command command, String id) {
             JsonNode fields = command.fields();

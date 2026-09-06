@@ -408,6 +408,8 @@ public final class NaturalCmsStageService {
     private static String feasibilityInstruction(NaturalCmsContract.ResourceRef resource) {
         String scope = "the selected content's title and body only";
         String excluded = "writing posts, editing article bodies, templates and members";
+        /** 리소스별로 덧붙이는 단서. 범위 문장에 섞으면 조건이 전체로 번진다. */
+        String note = "";
         if ("MENU".equals(resource.type())) {
             scope = "menus only: a menu's name, path, parent, order among siblings, and which "
                     + "content or board it links to. Creating and deleting a menu is included";
@@ -420,10 +422,17 @@ public final class NaturalCmsStageService {
                     + "and members";
         }
         else if ("BOARD".equals(resource.type())) {
-            scope = "boards only: a board's name and description. Creating a board and "
-                    + "deleting an empty board is included";
+            scope = "boards only: creating a board, changing a board's name or description, "
+                    + "and deleting a board";
             excluded = "writing or editing posts, menus, static content pages, templates "
                     + "and members";
+            // 조건을 삭제에만 묶고 나머지는 무관함을 명시한다. 한 문장에 붙여 두었더니
+            // 모델이 posts가 0이 아니면 이름 변경까지 막았다.
+            note = " reference.posts is how many posts this board has and it restricts "
+                    + "deletion only. Deleting is infeasible when it is not 0, and that "
+                    + "reason says the board still has that many posts. Creating a board and "
+                    + "changing a name or description stay feasible whatever reference.posts "
+                    + "is.";
         }
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
@@ -432,7 +441,8 @@ public final class NaturalCmsStageService {
                 + excluded + ". When the port is "
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
                 + "screen cannot do. A request this screen can do stays feasible even when it "
-                + "needs several fields or a confirmation.";
+                + "needs several fields or a confirmation."
+                + note;
     }
 
     private JsonNode callTool(

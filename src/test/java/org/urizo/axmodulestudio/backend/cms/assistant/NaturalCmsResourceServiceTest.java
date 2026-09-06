@@ -512,6 +512,39 @@ class NaturalCmsResourceServiceTest {
         verify(cms, never()).deleteBoard(anyLong());
     }
 
+    /**
+     * 판정 단계가 삭제 조건을 스스로 확인할 수 있게 게시물 수를 준다.
+     *
+     * <p>제목까지 주지 않는다. 필요한 것은 0인지 아닌지뿐이다.
+     */
+    @Test
+    void givesTheModelThePostCountSoItCanJudgeBoardDeletion() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.posts(4)).thenReturn(java.util.List.of(
+                post(12, 4, "공지", "본문"), post(13, 4, "안내", "본문")));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode context = resources.promptContext(
+                new NaturalCmsContract.ResourceRef("BOARD", "4"));
+
+        assertThat(context.path("posts").asInt()).isEqualTo(2);
+        assertThat(context.fieldNames()).toIterable().containsExactly("posts");
+    }
+
+    @Test
+    void leavesTheReferenceEmptyForABoardThatDoesNotExistYet() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        assertThat(resources.promptContext(
+                new NaturalCmsContract.ResourceRef("BOARD", "new"))).isNull();
+        verify(cms, never()).posts(anyLong());
+    }
+
     @Test
     void snapshotsANewPostWithTheCombinedTargetIdSoTheToolCanMatchIt() {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();

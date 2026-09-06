@@ -488,7 +488,12 @@ class NaturalCmsStageServiceTest {
                 .doesNotContain("including writing posts");
     }
 
-    /** 게시판 대상은 게시물 작성이 범위 밖이다. 게시물 대상과 반대 방향이다. */
+    /**
+     * 게시판 대상은 게시물 작성이 범위 밖이고, 삭제 조건의 근거를 함께 준다.
+     *
+     * <p>조건만 알리고 근거를 주지 않으면 모델이 확인할 수단이 없어 같은 요청이 문장에 따라
+     * 갈렸다. `이 게시판 지워줘`는 통과하고 `지워줘`는 거부되던 흔들림이다.
+     */
     @Test
     void feasibilityPromptKeepsPostWritingOutsideTheBoardTarget() throws Exception {
         NaturalCmsContract.ResourceRef board =
@@ -507,7 +512,11 @@ class NaturalCmsStageServiceTest {
         verify(harness.models).executeNaturalCms(turn.capture(), any());
         assertThat(system(turn.getValue()))
                 .contains("boards only")
-                .contains("deleting an empty board")
+                .contains("deleting a board")
+                .contains("reference.posts")
+                // 조건이 삭제 밖으로 번지면 게시물 있는 게시판은 이름 변경까지 거부된다.
+                .contains("restricts deletion only")
+                .contains("stay feasible whatever reference.posts is")
                 .contains("writing or editing posts");
     }
 

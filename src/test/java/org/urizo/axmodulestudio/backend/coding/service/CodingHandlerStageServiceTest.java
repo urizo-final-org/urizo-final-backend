@@ -290,9 +290,20 @@ class CodingHandlerStageServiceTest {
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(fixture.gateway(), times(3)).chat(routed.capture());
+        // The exit hands over instead of verifying: review and the deterministic preview
+        // run the same checks, and this stage's conversation is the most expensive place
+        // to run them (66k vs 8k tokens, Jobs 60401f37 / a8d8005a).
+        // Files open one at a time: an unused read is re-sent with every later answer
+        // (5,827 tokens x 8 answers on Job 60401f37), so the stage is told to open the
+        // first targetFile and reach for the next only when the change does not fit.
+        assertThat(routed.getAllValues().get(0).prompt())
+                .contains("open the first")
+                .contains("Open a later");
         assertThat(routed.getAllValues().get(1).prompt())
                 .contains("apply_patch succeeded")
-                .contains("run_check")
+                .contains("stop editing and finish with the stage result")
+                .contains("review stage receives your work")
+                .doesNotContain("call run_check")
                 .contains("do not re-edit work that is already correct");
         // One patch landed, so the nudge is said once. read_diff is not an edit and adds none.
         assertThat(routed.getAllValues().get(2).prompt().split("apply_patch succeeded", -1))
@@ -589,6 +600,12 @@ class CodingHandlerStageServiceTest {
         assertThat(systemPrompt).contains("guardrail.deniedAreas");
         assertThat(systemPrompt).contains("\"infeasible\"");
         assertThat(systemPrompt).contains("super administrator");
+        // Data-versus-code refusal: a stored menu name cannot be edited here (Job a40a115d
+        // burned 326k tokens tracing one), while wording hard-coded in a screen file can.
+        // The unsure case must stay feasible, or screen-wording requests start bouncing.
+        assertThat(systemPrompt).contains("stored data rather than code");
+        assertThat(systemPrompt).contains("CMS administration screens");
+        assertThat(systemPrompt).contains("when genuinely unsure, proceed");
         String contextMessage = structuredRequest.getValue().messages().get(1).path("content").asText();
         assertThat(contextMessage).contains("CMS 기능");
         assertThat(contextMessage).contains("상태 점검");

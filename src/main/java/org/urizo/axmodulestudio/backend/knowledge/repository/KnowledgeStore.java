@@ -121,6 +121,7 @@ public class KnowledgeStore {
                             + "WHERE job_id = ? AND status = 'WAITING_APPROVAL'",
                     Timestamp.from(now), Timestamp.from(now), row.buildJobId());
         }
+        resolveOpenActivationRequests(row.knowledgeBaseId(), now);
         return getKnowledgeVersion(id, traceId);
     }
 
@@ -154,7 +155,82 @@ public class KnowledgeStore {
         jdbc.update("UPDATE app.knowledge_base SET active_version_id = ?, updated_at = ? "
                 + "WHERE knowledge_base_id = ?",
                 targetId, Timestamp.from(now), knowledgeBaseId);
+        resolveOpenActivationRequests(knowledgeBaseId, now);
         return getKnowledgeVersion(targetId, traceId);
+    }
+
+    /**
+     * 자료 갱신 요청을 남긴다. 같은 사람이 같은 대상으로 이미 열어 둔 요청이 있으면
+     * 새 행을 만들지 않고 그것을 돌려준다 — 재촉이 목록을 늘리면 읽히지 않는다.
+     */
+    public ProductApiContract.ActivationRequestResponse createActivationRequest(
+            UUID knowledgeBaseId,
+            UUID traceId,
+            org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor actor,
+            ProductApiContract.CreateActivationRequestRequest request) {
+        getKnowledgeBase(knowledgeBaseId, traceId);
+        UUID versionId = request.knowledgeVersionId();
+        if (versionId != null) {
+            // 다른 지식 베이스의 버전을 지목한 요청은 목록에서 의미가 없다.
+            one(jdbc.query(
+                    "SELECT knowledge_version_id FROM app.knowledge_version "
+                            + "WHERE knowledge_version_id = ? AND knowledge_base_id = ?",
+                    (rs, row) -> rs.getObject(1, UUID.class), versionId, knowledgeBaseId),
+                    "KNOWLEDGE_VERSION_NOT_FOUND", "Knowledge version not found.");
+        }
+        List<ProductApiContract.ActivationRequestResponse> existing = jdbc.query(
+                activationRequestSelect()
+                        + " WHERE knowledge_base_id = ? AND requested_by = ? AND status = 'OPEN' "
+                        + "AND knowledge_version_id IS NOT DISTINCT FROM ?",
+                (rs, row) -> activationRequest(rs, traceId), knowledgeBaseId, actor.actorId(), versionId);
+        if (!existing.isEmpty()) {
+            return existing.get(0);
+        }
+        UUID requestId = UUID.randomUUID();
+        Instant now = Instant.now(clock);
+        jdbc.update(
+                "INSERT INTO app.knowledge_activation_request "
+                        + "(request_id, knowledge_base_id, knowledge_version_id, reason, status, "
+                        + "requested_by, requested_by_name, created_at) "
+                        + "VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?)",
+                requestId, knowledgeBaseId, versionId, blankToNull(request.reason()),
+                actor.actorId(), actor.name(), Timestamp.from(now));
+        return new ProductApiContract.ActivationRequestResponse(
+                version(), traceId, requestId, knowledgeBaseId, versionId,
+                blankToNull(request.reason()), "OPEN", actor.actorId(), actor.name(), now);
+    }
+
+    public List<ProductApiContract.ActivationRequestResponse> listOpenActivationRequests(
+            UUID knowledgeBaseId, UUID traceId) {
+        getKnowledgeBase(knowledgeBaseId, traceId);
+        return jdbc.query(
+                activationRequestSelect()
+                        + " WHERE knowledge_base_id = ? AND status = 'OPEN' ORDER BY created_at DESC",
+                (rs, row) -> activationRequest(rs, traceId), knowledgeBaseId);
+    }
+
+    /**
+     * 활성화·롤백이 곧 요청 처리다. 별도 처리 엔드포인트를 두지 않는다 — 두면 "바꿨는데
+     * 요청은 열려 있는" 상태가 생기고, 그 상태를 맞추는 일이 다시 사람 몫이 된다.
+     */
+    private void resolveOpenActivationRequests(UUID knowledgeBaseId, Instant now) {
+        jdbc.update(
+                "UPDATE app.knowledge_activation_request SET status = 'RESOLVED', resolved_at = ? "
+                        + "WHERE knowledge_base_id = ? AND status = 'OPEN'",
+                Timestamp.from(now), knowledgeBaseId);
+    }
+
+    private String activationRequestSelect() {
+        return "SELECT request_id, knowledge_base_id, knowledge_version_id, reason, status, "
+                + "requested_by, requested_by_name, created_at FROM app.knowledge_activation_request";
+    }
+
+    private ProductApiContract.ActivationRequestResponse activationRequest(
+            ResultSet rs, UUID traceId) throws SQLException {
+        return new ProductApiContract.ActivationRequestResponse(
+                version(), traceId, rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
+                rs.getObject(3, UUID.class), rs.getString(4), rs.getString(5),
+                rs.getObject(6, UUID.class), rs.getString(7), instant(rs, 8));
     }
 
     private ProductApiContract.KnowledgeBaseResponse knowledgeBase(ResultSet rs, UUID traceId)

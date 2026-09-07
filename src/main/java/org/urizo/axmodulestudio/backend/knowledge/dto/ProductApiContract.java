@@ -92,6 +92,19 @@ public final class ProductApiContract {
         public RollbackKnowledgeRequest { requireVersion(schemaVersion); }
     }
 
+    /**
+     * 권한 없는 관리자가 최고 관리자에게 자료 갱신을 요청한다.
+     *
+     * <p>{@code knowledgeVersionId}는 선택이다 — 이미 승인 대기 중인 버전을 지목한 요청과
+     * "새로 만들어 달라"는 요청을 한 계약으로 받는다. 후자는 대상 버전이 아직 없다.
+     */
+    public record CreateActivationRequestRequest(
+            @NotBlank String schemaVersion,
+            UUID knowledgeVersionId,
+            @Size(max = 500) String reason) {
+        public CreateActivationRequestRequest { requireVersion(schemaVersion); }
+    }
+
     public record CreateChatbotRequest(
             @NotBlank String schemaVersion,
             @NotBlank @Size(max = 120) String name,
@@ -226,6 +239,27 @@ public final class ProductApiContract {
             UUID traceId,
             List<KnowledgeVersionResponse> items) {
         public KnowledgeVersionListResponse { items = List.copyOf(items); }
+    }
+
+    /** 요청은 지시가 아니라 표시다. 처리 주체·기한·에스컬레이션을 담지 않는다. */
+    public record ActivationRequestResponse(
+            String schemaVersion,
+            UUID traceId,
+            UUID requestId,
+            UUID knowledgeBaseId,
+            UUID knowledgeVersionId,
+            String reason,
+            String status,
+            UUID requestedBy,
+            String requestedByName,
+            Instant createdAt) {
+    }
+
+    public record ActivationRequestListResponse(
+            String schemaVersion,
+            UUID traceId,
+            List<ActivationRequestResponse> items) {
+        public ActivationRequestListResponse { items = List.copyOf(items); }
     }
 
     public record ChatbotResponse(

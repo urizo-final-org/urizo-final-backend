@@ -156,6 +156,24 @@ public final class ProductService implements
                         knowledgeBaseId, request.targetKnowledgeVersionId(), traceId));
     }
 
+    /**
+     * 요청 생성은 멱등 Key로 감싸지 않는다. 저장소가 "같은 사람 · 같은 대상 · 열린 요청"을
+     * 하나로 유지하므로 중복 호출이 행을 늘리지 않는다 — 멱등 장치가 이미 데이터에 있다.
+     */
+    public ProductApiContract.ActivationRequestResponse createActivationRequest(
+            UUID knowledgeBaseId,
+            UUID traceId,
+            org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor actor,
+            ProductApiContract.CreateActivationRequestRequest request) {
+        return store.createActivationRequest(knowledgeBaseId, traceId, actor, request);
+    }
+
+    public ProductApiContract.ActivationRequestListResponse listOpenActivationRequests(
+            UUID knowledgeBaseId, UUID traceId) {
+        return new ProductApiContract.ActivationRequestListResponse(
+                version(), traceId, store.listOpenActivationRequests(knowledgeBaseId, traceId));
+    }
+
     public ProductApiContract.ChatbotResponse createChatbot(
             UUID projectId,
             UUID traceId,

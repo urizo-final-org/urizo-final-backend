@@ -214,6 +214,18 @@ services:
       AXMS_OUTBOX_POLL: 250ms
       AXMS_WORKER_POLL: 300ms
       AXMS_PRODUCT_WORKER_ID: axms-spring-app-local-1
+      # Public tour-portal chatbot. Empty by default so the endpoint answers
+      # 404 PUBLIC_CHATBOT_NOT_CONFIGURED instead of guessing a chatbot; set the
+      # id in a local .env (gitignored) to enable /api/public/chat/query.
+      AXMS_PUBLIC_CHATBOT_ID: ${AXMS_PUBLIC_CHATBOT_ID:-}
+      # Rewrites the public answer as LLM prose. Off by default: turning it on is
+      # the only thing that makes this product spend provider credits. Off keeps
+      # the extractive answer, so the recorded retrieval, citation and refusal
+      # baselines still reproduce without touching the flag back.
+      AXMS_PUBLIC_CHAT_LLM: ${AXMS_PUBLIC_CHAT_LLM:-false}
+      AXMS_PUBLIC_CHAT_LLM_TIMEOUT: ${AXMS_PUBLIC_CHAT_LLM_TIMEOUT:-20s}
+      AXMS_PUBLIC_CHAT_LLM_PROVIDER: ${AXMS_PUBLIC_CHAT_LLM_PROVIDER:-ANTHROPIC}
+      AXMS_PUBLIC_CHAT_LLM_MODEL: ${AXMS_PUBLIC_CHAT_LLM_MODEL:-}
       AXMS_MCP_PLATFORM_ENABLED: "true"
       AXMS_MCP_PLATFORM_ENDPOINT: http://mcp-server:8091/mcp
       AXMS_MCP_PLATFORM_CREDENTIAL_FILE: /run/secrets/mcp_service_token

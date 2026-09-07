@@ -546,18 +546,19 @@ function Get-PreviewArguments {
 function Set-PreviewEnvironment {
     # Which screen the preview shows. A frontend Job passes its own exported workspace: the
     # whole point of the preview is the screen the model just changed, and the shared
-    # ai-frontend checkout is not that. Without a source given, that checkout is still the
-    # right answer - a backend Job's preview keeps showing the screen it always showed.
+    # checkout is not that. A backend Job did not change the screen, so it uses the canonical
+    # frontend checkout next to the Backend repository.
     param([string]$FrontendSource)
 
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
-    $frontend = if ($FrontendSource) { $FrontendSource } else { Join-Path $WorkRoot 'ai-frontend' }
-    if (Test-Path -LiteralPath $frontend -PathType Container) {
-        $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontend
+    $frontend = if ($FrontendSource) { $FrontendSource } else { Get-RepositorySourcePath -Repository 'frontend' }
+    if (-not (Test-Path -LiteralPath $frontend -PathType Container)) {
+        throw "RUNNER_REPOSITORY_MISSING|Frontend 미리보기 Source가 없습니다: $frontend"
     }
+    $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontend
 }
 
 function Clear-PreviewEnvironment {
@@ -658,8 +659,8 @@ function Invoke-PreviewUp {
     $dumpBytes = 0
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    Set-PreviewEnvironment -FrontendSource $frontendSource
     try {
+        Set-PreviewEnvironment -FrontendSource $frontendSource
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
 
@@ -698,10 +699,12 @@ function Invoke-ComposeBuild {
     $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
     if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
 
-    # One repository maps to a fixed set of services. The runner never accepts a
-    # service name from the payload: that would let the queue pick build targets.
+    # One repository maps to a fixed set of services. A backend preview still serves the
+    # frontend, so BUILD prepares that fixed image from the canonical frontend checkout.
+    # The runner never accepts a service name from the payload: that would let the queue
+    # pick build targets.
     $services = switch ($repository) {
-        'backend' { @('spring-app', 'flyway-migration') }
+        'backend' { @('spring-app', 'flyway-migration', 'frontend') }
         'frontend' { @('frontend') }
         default { throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository" }
     }
@@ -728,14 +731,11 @@ function Invoke-ComposeBuild {
     }
     else {
         $backendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'backend' }
-        $frontendWorktree = ''
+        $frontendWorktree = Get-RepositorySourcePath -Repository 'frontend'
     }
     if (-not (Test-Path -LiteralPath $PreviewOverlay -PathType Leaf)) {
         throw "RUNNER_OVERLAY_MISSING|미리보기 설정 파일이 없습니다: $PreviewOverlay"
     }
-
-    $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
-    if ($frontendWorktree) { $env:AXMS_PREVIEW_FRONTEND_SOURCE = $frontendWorktree }
 
     $arguments = @(
         'compose', '-p', 'axms-preview', '--profile', 'spring-core',
@@ -748,12 +748,12 @@ function Invoke-ComposeBuild {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
+        Set-PreviewEnvironment -FrontendSource $frontendWorktree
         $output = & docker @arguments 2>&1
     }
     finally {
         $ErrorActionPreference = $previous
-        Remove-Item Env:AXMS_PREVIEW_FRONTEND_SOURCE -ErrorAction SilentlyContinue
-        Remove-Item Env:AXMS_PREVIEW_SECRETS_ROOT -ErrorAction SilentlyContinue
+        Clear-PreviewEnvironment
     }
     if ($LASTEXITCODE -ne 0) {
         $tail = ($output | Select-Object -Last 5) -join ' '

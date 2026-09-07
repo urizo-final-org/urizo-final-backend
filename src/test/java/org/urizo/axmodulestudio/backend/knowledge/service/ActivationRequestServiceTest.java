@@ -38,7 +38,9 @@ class ActivationRequestServiceTest {
     @BeforeEach
     void setUp() {
         store = mock(ProductStore.class);
-        service = new ProductService(store);
+        // AI02-006이 생성자에 Composer를 더했다. 요청 경로는 답변 문장을 만들지 않으므로
+        // 006 테스트와 같은 비활성 Composer를 쓴다 — 응답을 그대로 통과시킨다.
+        service = new ProductService(store, PublicAnswerComposerTest.disabled());
     }
 
     private static ProductApiContract.ActivationRequestResponse response() {

@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 import org.mockito.invocation.InvocationOnMock;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -89,6 +91,21 @@ class CodingRunnerLivenessTest {
 
         assertThat(liveness.lastSeenAt()).isEqualTo(START);
         assertThat(liveness.alive()).isTrue();
+    }
+
+    @Test
+    void terminalCreateWorktreeParentsAreExcludedByTheClaimQueryWithoutUuidCasts() {
+        runnerAuthenticates();
+
+        ArgumentCaptor<String> claimQuery = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(claimQuery.capture(), any(RowMapper.class));
+
+        assertThat(claimQuery.getValue())
+                .contains("task.kind = 'CREATE_WORKTREE'")
+                .contains("job.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')")
+                .contains("LOWER(task.payload ->> 'workspaceId') = job.job_id::text")
+                .contains("ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1")
+                .doesNotContain("::uuid");
     }
 
     @Test

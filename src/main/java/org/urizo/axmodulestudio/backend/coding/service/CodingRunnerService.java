@@ -78,7 +78,11 @@ public class CodingRunnerService {
             reapExpiredLeases(now);
             List<TaskRow> waiting = jdbc.query(
                     "SELECT task_id, kind, payload::text, attempt, max_attempts "
-                            + "FROM app.coding_runner_task WHERE status = 'PENDING' "
+                            + "FROM app.coding_runner_task task WHERE status = 'PENDING' "
+                            + "AND NOT (task.kind = 'CREATE_WORKTREE' AND EXISTS ("
+                            + "SELECT 1 FROM app.coding_job job "
+                            + "WHERE job.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') "
+                            + "AND LOWER(task.payload ->> 'workspaceId') = job.job_id::text)) "
                             + "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
                     (rs, row) -> new TaskRow(rs.getObject(1, UUID.class), rs.getString(2),
                             rs.getString(3), rs.getInt(4), rs.getInt(5)));

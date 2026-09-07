@@ -377,18 +377,116 @@ class NaturalCmsResourceServiceTest {
         verify(cms, never()).deleteMenu(anyLong());
     }
 
+    /** 템플릿만 남은 수정 전용 리소스다. 컨텐츠는 `AI05-015`로 등록·삭제가 열렸다. */
     @Test
     void keepsCreateAndDeleteClosedForResourcesThatOnlyOpenUpdate() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         NaturalCmsResourceService resources = new NaturalCmsResourceService(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
-                {"operation":"CREATE","fields":{"title":"새 글","body":"본문"}}
+                {"operation":"CREATE","fields":{"siteName":"새 사이트"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "DEFAULT"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("operations only: UPDATE");
+    }
+
+    @Test
+    void snapshotsANewContentWithoutReadingTheDatabase() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode state = resources.snapshot(
+                new NaturalCmsContract.ResourceRef("CONTENT", "new"));
+
+        // 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 빈 자리를 갖춘 틀을 준다.
+        assertThat(state.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("id", "title", "body");
+        assertThat(state.path("id").asText()).isEqualTo("new");
+        assertThat(state.path("title").isNull()).isTrue();
+        verify(cms, never()).content(anyLong());
+    }
+
+    @Test
+    void createsAContentAndKeepsTheRequesterAsAuthor() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.createContent(AUTHOR, "채용 안내", "## 모집\n\n- 개발자"))
+                .thenReturn(content("채용 안내", "## 모집\n\n- 개발자"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"title":"채용 안내",
+                 "body":"## 모집\\n\\n- 개발자"}}
+                """);
+
+        JsonNode created = resources.apply(
+                new NaturalCmsContract.ResourceRef("CONTENT", "new"), command, AUTHOR);
+
+        assertThat(created.path("id").asLong()).isEqualTo(7);
+        // 등록은 현재 값이 없다. 기존 행을 읽지 않는다.
+        verify(cms).createContent(AUTHOR, "채용 안내", "## 모집\n\n- 개발자");
+        verify(cms, never()).content(anyLong());
+    }
+
+    /** 등록 경로도 수정과 같은 문법 검사를 탄다. 검증과 반영이 같은 merged를 쓰기 때문이다. */
+    @Test
+    void refusesANewContentBodyThatUsesUnsupportedMarkdown() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"title":"안내","body":"1. 첫째"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("CONTENT", "new"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("headings (##)");
+        verify(cms, never()).createContent(any(), any(), any());
+    }
+
+    /**
+     * 컨텐츠 삭제는 막지 않는다. 연결한 메뉴가 있어도 기존 {@code deleteContent}가 연결만 끊는다.
+     *
+     * <p>무엇이 끊기는지는 화면이 승인 전에 보여준다. 게시판 삭제와 다른 점이다.
+     */
+    @Test
+    void deletesAContentAndReportsTheRemovedState() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.content(7)).thenReturn(content("회사 소개", "## 소개"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        JsonNode removed = resources.apply(RESOURCE, command, AUTHOR);
+
+        assertThat(removed.path("title").asText()).isEqualTo("회사 소개");
+        verify(cms).deleteContent(7);
+    }
+
+    @Test
+    void refusesAContentDeleteThatCarriesFields() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{"title":"회사 소개"}}
                 """);
 
         assertThatThrownBy(() -> resources.validateCommand(RESOURCE, command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("operations only: UPDATE");
+                .hasMessageContaining("DELETE command carries no fields");
+        verify(cms, never()).deleteContent(anyLong());
     }
 
     @Test

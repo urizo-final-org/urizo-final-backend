@@ -18,9 +18,11 @@ public final class ProductService implements
         ProductJobOperations {
 
     private final ProductStore store;
+    private final PublicAnswerComposer answers;
 
-    ProductService(ProductStore store) {
+    ProductService(ProductStore store, PublicAnswerComposer answers) {
         this.store = store;
+        this.answers = answers;
     }
 
     public ProductApiContract.ProjectResponse createProject(
@@ -215,7 +217,10 @@ public final class ProductService implements
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
             List<String> category) {
-        return store.query(chatbotId, traceId, request, category);
+        // 검색·인용·거절은 store가 확정한 그대로 두고 answer 문장만 다시 쓴다.
+        // 플래그가 꺼져 있거나 LLM이 실패하면 추출식 응답이 그대로 나간다.
+        return answers.rewrite(
+                request.query(), store.query(chatbotId, traceId, request, category));
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

@@ -29,7 +29,8 @@ class ProductServiceCharacterizationTest {
     @BeforeEach
     void setUp() {
         store = mock(ProductStore.class);
-        service = new ProductService(store);
+        // 플래그가 꺼진 Composer는 응답을 그대로 통과시킨다. 기존 위임 특성을 바꾸지 않는다.
+        service = new ProductService(store, PublicAnswerComposerTest.disabled());
     }
 
     @Test

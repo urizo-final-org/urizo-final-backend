@@ -796,17 +796,37 @@ public final class NaturalCmsResourceService {
         }
     }
 
+    /**
+     * 컨텐츠는 담고 있는 것이 없는 말단이지만, 지우면 위에서 참조하던 메뉴의 연결이 끊긴다.
+     *
+     * <p>그 연결 해제는 기존 {@code deleteContent}가 {@code clearMenuTarget}으로 이미 수행하므로
+     * 자연어가 새로 할 일이 없다. 게시판과 달리 <b>삭제를 막지 않는다</b>. 메뉴가 남고 사이트에서
+     * 빈 페이지가 될 뿐이라 게시글이 사라지는 것만큼 치명적이지 않다. 무엇이 끊기는지는 화면이
+     * 승인 전에 보여준다.
+     */
     private final class ContentHandler implements ResourceHandler<CmsRequests.ArticleRequest> {
+
+        @Override
+        public Set<String> operations() {
+            return Set.of("CREATE", "UPDATE", "DELETE");
+        }
 
         @Override
         public Map<String, FieldType> fields() {
             return Map.of("title", FieldType.TEXT, "body", FieldType.TEXT);
         }
 
+        /** 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 등록 대상도 빈 틀을 준다. */
         @Override
         public ObjectNode snapshot(String id) {
-            ContentView view = cmsService.content(numericId(id, "CONTENT"));
             ObjectNode state = objectMapper.createObjectNode();
+            if (NEW_ID.equals(id)) {
+                state.put("id", NEW_ID);
+                state.putNull("title");
+                state.putNull("body");
+                return state;
+            }
+            ContentView view = cmsService.content(numericId(id, "CONTENT"));
             state.put("id", view.id());
             state.put("title", view.title());
             state.put("body", view.body());
@@ -816,17 +836,39 @@ public final class NaturalCmsResourceService {
 
         @Override
         public CmsRequests.ArticleRequest merged(Command command, String id) {
-            ContentView view = cmsService.content(numericId(id, "CONTENT"));
             JsonNode fields = command.fields();
-            String body = text(fields, "body", view.body());
-            requireSupportedMarkdown(body);
-            return new CmsRequests.ArticleRequest(text(fields, "title", view.title()), body);
+            if (command.deletes()) {
+                cmsService.content(numericId(id, "CONTENT"));
+                return null;
+            }
+            if (command.creates()) {
+                return article(fields, null, null);
+            }
+            ContentView view = cmsService.content(numericId(id, "CONTENT"));
+            return article(fields, view.title(), view.body());
         }
 
         @Override
         public JsonNode save(Command command, String id, CmsRequests.ArticleRequest request) {
+            if (command.deletes()) {
+                long contentId = numericId(id, "CONTENT");
+                ObjectNode removed = snapshot(id);
+                cmsService.deleteContent(contentId);
+                return removed;
+            }
+            if (command.creates()) {
+                return objectMapper.valueToTree(cmsService.createContent(
+                        command.actorId(), request.title(), request.body()));
+            }
             return objectMapper.valueToTree(cmsService.updateContent(
                     numericId(id, "CONTENT"), request.title(), request.body()));
+        }
+
+        private CmsRequests.ArticleRequest article(
+                JsonNode fields, String currentTitle, String currentBody) {
+            String body = text(fields, "body", currentBody);
+            requireSupportedMarkdown(body);
+            return new CmsRequests.ArticleRequest(text(fields, "title", currentTitle), body);
         }
     }
 

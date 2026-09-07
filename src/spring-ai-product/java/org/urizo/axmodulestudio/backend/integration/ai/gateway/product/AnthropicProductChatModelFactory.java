@@ -11,6 +11,12 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 @Component
 final class AnthropicProductChatModelFactory implements ProductChatModelFactory {
 
+    private final ObservationRegistry observationRegistry;
+
+    AnthropicProductChatModelFactory(ObservationRegistry observationRegistry) {
+        this.observationRegistry = observationRegistry;
+    }
+
     @Override
     public ModelProvider provider() {
         return ModelProvider.ANTHROPIC;
@@ -31,7 +37,7 @@ final class AnthropicProductChatModelFactory implements ProductChatModelFactory 
                 .anthropicApi(api)
                 .defaultOptions(options)
                 .retryTemplate(singleAttempt())
-                .observationRegistry(ObservationRegistry.NOOP)
+                .observationRegistry(observationRegistry)
                 .build();
         return new ProductChatModelSession(model, () -> { });
     }

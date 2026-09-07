@@ -17,6 +17,12 @@ services:
         - source: host_build_extra_ca
           target: node_build_extra_ca
 
+  coding-runtime:
+    build:
+      secrets:
+        - source: host_build_extra_ca
+          target: python_build_extra_ca
+
 secrets:
   host_build_extra_ca:
     file: ./.local/runtime-trust/build-extra-ca.pem

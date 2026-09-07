@@ -313,7 +313,8 @@ public final class ProductApiContract {
             String title,
             URI sourceUrl,
             String excerpt,
-            double score) {
+            double score,
+            String categoryLabel) {
     }
 
     public record ProductSessionResponse(

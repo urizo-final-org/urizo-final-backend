@@ -32,6 +32,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 
 @Service
@@ -299,11 +300,12 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            modelResponse = modelTurn(
+            CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, messages,
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
+            modelResponse = execution;
             if (modelResponse.toolCalls().isEmpty()) {
                 try {
                     terminalOutcome = parseOutcome(
@@ -1018,7 +1020,11 @@ public final class CodingHandlerStageService {
             return permit.cachedResponse();
         }
         try {
-            CodingModelTurnContract.Response response = models.execute(request, modelBindings);
+            CodingModelTurnContract.Response response;
+            try (ModelObservationScope ignored = ModelObservationScope.open(
+                    jobId, stage.traceId(), authority.profileVersionId(), stage.nodeId())) {
+                response = models.execute(request, modelBindings);
+            }
             modelGuard.complete(permit, response);
             return response;
         }

@@ -23,6 +23,8 @@ public final class CodingRepositories {
     /** The value already stored on every Job created before repositories were told apart. */
     private static final UUID BACKEND_ID =
             UUID.fromString("11111111-1111-4111-8111-111111111111");
+    private static final UUID LEGACY_CONSOLE_BACKEND_ID =
+            UUID.fromString("33333333-3333-4333-8333-333333333333");
     private static final UUID FRONTEND_ID =
             UUID.fromString("22222222-2222-4222-8222-222222222222");
 
@@ -60,5 +62,17 @@ public final class CodingRepositories {
             throw new IllegalArgumentException("Unknown Coding repository id: " + repositoryId);
         }
         return name;
+    }
+
+    /**
+     * Reads Stage 4 fixture history for the administrator console only.
+     *
+     * <p>The full-local contract used this identifier before repository selection existed, when
+     * every Coding Job was a Backend Job. Execution routing remains fail-closed in
+     * {@link #nameOf(UUID)} so an unknown identifier can never choose a checkout.
+     */
+    static String consoleNameOf(UUID repositoryId) {
+        return LEGACY_CONSOLE_BACKEND_ID.equals(repositoryId)
+                ? BACKEND : nameOf(repositoryId);
     }
 }

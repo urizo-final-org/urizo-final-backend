@@ -33,6 +33,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -74,30 +75,32 @@ public class CodingModelTurnService {
     }
 
     public CodingModelTurnContract.Response execute(CodingModelTurnContract.Request request) {
-        return execute(request, false, null);
+        return execute(request, false, null, null, null);
     }
 
     public CodingModelTurnContract.Response execute(
             CodingModelTurnContract.Request request,
             List<ProviderModelRegistration> boundModels) {
-        return execute(request, false, List.copyOf(boundModels));
+        return execute(request, false, List.copyOf(boundModels), null, null);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request) {
-        return execute(request, true, null);
+        return execute(request, true, null, null, null);
     }
 
     public CodingModelTurnContract.Response executeNaturalCms(
             CodingModelTurnContract.Request request,
             List<ProviderModelRegistration> boundModels) {
-        return execute(request, true, List.copyOf(boundModels));
+        return execute(request, true, List.copyOf(boundModels), null, null);
     }
 
     private CodingModelTurnContract.Response execute(
             CodingModelTurnContract.Request request,
             boolean naturalCms,
-            List<ProviderModelRegistration> boundModels) {
+            List<ProviderModelRegistration> boundModels,
+            UUID profileVersionId,
+            String nodeId) {
         Objects.requireNonNull(request, "request is required");
         ToolMode toolMode = requireSupportedSubset(request, naturalCms);
         ModelUseCase useCase = switch (toolMode) {
@@ -106,29 +109,30 @@ public class CodingModelTurnService {
             case NONE, LOCAL_FIXTURE -> ModelUseCase.CHAT;
         };
         List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
-        ProviderGatewayException lastFailure = null;
-        for (ProviderModelRegistration selected : candidates) {
-            try {
-                return executeSelected(request, toolMode, selected);
-            }
-            catch (ProviderGatewayException failure) {
-                // The only place this reason survives. The stored turn keeps the code alone,
-                // and the code is shared by every way a provider answer can be refused, so
-                // without this line a failed run cannot be diagnosed at all.
-                LOG.warn("Coding model turn refused: model={} code={} reason={}",
-                        selected.modelId(), failure.code(), failure.getMessage());
-                lastFailure = failure;
-                if (!fallbackEligible(failure.code())) {
-                    throw failure;
+        // The outer Stage scope owns profile/node identity; nodeName is only a handler label.
+        try (ModelObservationScope ignored = ModelObservationScope.open(
+                request.jobId(), request.traceId(), profileVersionId, nodeId)) {
+            ProviderGatewayException lastFailure = null;
+            for (ProviderModelRegistration selected : candidates) {
+                try {
+                    return executeSelected(request, toolMode, selected);
+                }
+                catch (ProviderGatewayException failure) {
+                    LOG.warn("Coding model turn refused: provider={} model={} code={}",
+                            selected.provider(), selected.modelId(), failure.code());
+                    lastFailure = failure;
+                    if (!fallbackEligible(failure.code())) {
+                        throw failure;
+                    }
                 }
             }
+            if (lastFailure != null) {
+                throw lastFailure;
+            }
+            throw new ProviderGatewayException(
+                    ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                    "No configured model can satisfy the requested capability.");
         }
-        if (lastFailure != null) {
-            throw lastFailure;
-        }
-        throw new ProviderGatewayException(
-                ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
-                "No configured model can satisfy the requested capability.");
     }
 
     private List<ProviderModelRegistration> modelCandidates(

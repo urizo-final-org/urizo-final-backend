@@ -110,6 +110,7 @@ public class SecurityConfig {
                         .requestMatchers("/api/health", "/api/readiness",
                                 "/api/auth/login", "/api/auth/refresh").permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/site/**").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/api/public/**").permitAll()
                         .requestMatchers("/api/auth/logout", "/api/auth/me").authenticated()
                         .requestMatchers("/api/admin/cms/**").hasRole("SUPER_ADMIN")
                         .requestMatchers("/api/cms/**")
@@ -117,7 +118,8 @@ public class SecurityConfig {
                         .requestMatchers(
                                 "/api/admin/ai/profile-versions",
                                 "/api/admin/ai/profile-versions/**",
-                                "/api/admin/ai/profile-templates/**")
+                                "/api/admin/ai/profile-templates/**",
+                                "/api/admin/ai/observability/**")
                                 .hasRole("SUPER_ADMIN")
                         // The guardrail decides what the model may change, so choosing it is not
                         // ordinary administration.

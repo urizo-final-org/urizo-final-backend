@@ -188,7 +188,8 @@ public class CodingConsoleService {
                 """,
                 (rs, row) -> new CodingConsoleContract.JobSummary(
                         rs.getObject("job_id", UUID.class),
-                        CodingRepositories.nameOf(rs.getObject("repository_id", UUID.class)),
+                        CodingRepositories.consoleNameOf(
+                                rs.getObject("repository_id", UUID.class)),
                         rs.getString("request_text"),
                         rs.getString("status"),
                         stageLabel(rs.getString("stage")),
@@ -295,7 +296,8 @@ public class CodingConsoleService {
                         rs.getInt("state_version"),
                         rs.getString("graph_step"),
                         rs.getString("base_sha"),
-                        CodingRepositories.nameOf(rs.getObject("repository_id", UUID.class)),
+                        CodingRepositories.consoleNameOf(
+                                rs.getObject("repository_id", UUID.class)),
                         rs.getString("request_text"),
                         instant(rs, "created_at"),
                         instant(rs, "finished_at")),

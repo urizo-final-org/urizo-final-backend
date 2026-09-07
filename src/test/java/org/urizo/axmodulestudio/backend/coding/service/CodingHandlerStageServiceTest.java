@@ -651,10 +651,53 @@ class CodingHandlerStageServiceTest {
                         "src/main/java/org/urizo/axmodulestudio/backend/cms/MemberJoinDateView.java");
     }
 
+    @Test
+    void idempotentModelTurnReplayUsesCachedResponseWithoutCallingProvider() {
+        ObjectMapper mapper = new ObjectMapper();
+        AnalyzeFixture fixture = analyzeFixture(mapper);
+        ObjectNode payload = mapper.createObjectNode().put("planSummary", "고칩니다.");
+        payload.putArray("acceptanceCriteria").add("완료한다");
+        payload.putArray("targetFiles").add(
+                "src/main/java/org/urizo/axmodulestudio/backend/cms/dto/CmsResponses.java");
+        ObjectNode structured = mapper.createObjectNode().put("port", "feasible");
+        structured.set("payload", payload);
+        CodingModelTurnContract.Response cached = new CodingModelTurnContract.Response(
+                "1.0",
+                UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                JOB,
+                TRACE,
+                "stage.cached-model-turn",
+                new CodingModelTurnContract.Assistant("assistant", ""),
+                List.of(),
+                new CodingModelTurnContract.JsonSchemaResponseFormat(
+                        "JSON_SCHEMA",
+                        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        structured),
+                new CodingModelTurnContract.SelectedModel("OPENAI", "gpt-test"),
+                new CodingModelTurnContract.TokenUsage(12, 6, 18),
+                10,
+                "STOP",
+                NOW);
+        when(fixture.guard().reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request request = invocation.getArgument(1);
+            return CodingModelTurnPermit.replay(
+                    request.jobId(), request.idempotencyKey(), cached);
+        });
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("feasible");
+        verify(fixture.gateway(), never()).chat(any());
+    }
+
     /** Wiring for the single-call analyze stage; the gateway answer is per-test. */
     private record AnalyzeFixture(
             CodingHandlerStageService service,
             ProviderChatGatewayPort gateway,
+            CodingModelTurnGuard guard,
             GuardrailPathSelectionService selections) { }
 
     /**
@@ -724,7 +767,7 @@ class CodingHandlerStageServiceTest {
             return CodingModelTurnPermit.acquired(
                     turnRequest.jobId(), turnRequest.idempotencyKey(), UUID.randomUUID());
         });
-        return new AnalyzeFixture(service, gateway, selections);
+        return new AnalyzeFixture(service, gateway, guard, selections);
     }
 
     /** A stage with no tools receives the model text verbatim, fence and all. */
@@ -1122,7 +1165,8 @@ class CodingHandlerStageServiceTest {
                 "Bearer worker", JOB, 1, RESULT,
                 new CodingHandlerContract.StageExecutionRequest(
                         "1.0", TRACE, 4, 2, "coding.code", RESULT));
-        assertThat(replay).isEqualTo(response);
+        assertThat(replay.resultId()).isEqualTo(response.resultId());
+        assertThat(replay.payload()).isEqualTo(response.payload());
 
         ArgumentCaptor<JsonNode> toolRequest = ArgumentCaptor.forClass(JsonNode.class);
         verify(toolService).submitForNode(

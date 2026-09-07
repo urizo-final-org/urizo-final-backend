@@ -83,15 +83,9 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                 throw failure;
             }
             catch (RuntimeException failure) {
-                // The provider's own words, before they are replaced. The normalizer answers
-                // with a safe sentence on purpose - it is what reaches an operator - and the
-                // original is dropped, so a run that dies here says only "failed validation".
-                // Measured 2026-09-03: three providers stopped on that sentence and none of
-                // them could be diagnosed from it.
-                LOG.warn("Model provider call failed: model={} error={} message={}",
-                        registration.modelId(), failure.getClass().getName(),
-                        failure.getMessage(), failure);
                 NormalizedProviderError error = errorNormalizer.normalize(failure);
+                LOG.warn("Model provider call failed: provider={} model={} code={}",
+                        registration.provider(), registration.modelId(), error.code());
                 RetryDecision decision = retryPolicy.evaluate(
                         error,
                         completedAttempts,

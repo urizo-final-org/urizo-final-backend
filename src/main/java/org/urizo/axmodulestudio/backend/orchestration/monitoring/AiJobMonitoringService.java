@@ -181,12 +181,13 @@ public final class AiJobMonitoringService {
                        AND EXCLUDED.status = app.ai_job_node_occurrence.status
                        AND app.ai_job_node_occurrence.observation_trace_id IS NULL
                        AND EXCLUDED.observation_trace_id IS NOT NULL)
-                RETURNING status, last_reported_at
+                RETURNING status, observation_trace_id, last_reported_at
                 """, (resultSet, row) -> new OccurrenceRow(
                         report.jobId(), report.profileVersionId(), report.pipelineAttempt(),
                         report.executionAttempt(), report.nodeId(), report.nodeSequence(),
                         NodeStatus.valueOf(resultSet.getString(1)),
-                        resultSet.getTimestamp(2).toInstant(), true),
+                        resultSet.getString(2),
+                        resultSet.getTimestamp(3).toInstant(), true),
                 report.jobId(), report.profileVersionId(), report.pipelineAttempt(),
                 report.executionAttempt(), report.nodeId(), report.nodeSequence(),
                 report.traceId(), report.observationTraceId(), report.nodeType(),
@@ -201,7 +202,7 @@ public final class AiJobMonitoringService {
             return changed.get(0);
         }
         return jdbc.queryForObject("""
-                SELECT status, last_reported_at
+                SELECT status, observation_trace_id, last_reported_at
                 FROM app.ai_job_node_occurrence
                 WHERE job_id = ? AND profile_version_id = ? AND pipeline_attempt = ?
                   AND execution_attempt = ? AND node_id = ? AND node_sequence = ?
@@ -209,7 +210,8 @@ public final class AiJobMonitoringService {
                         report.jobId(), report.profileVersionId(), report.pipelineAttempt(),
                         report.executionAttempt(), report.nodeId(), report.nodeSequence(),
                         NodeStatus.valueOf(resultSet.getString(1)),
-                        resultSet.getTimestamp(2).toInstant(), false),
+                        resultSet.getString(2),
+                        resultSet.getTimestamp(3).toInstant(), false),
                 report.jobId(), report.profileVersionId(), report.pipelineAttempt(),
                 report.executionAttempt(), report.nodeId(), report.nodeSequence());
     }
@@ -260,7 +262,7 @@ public final class AiJobMonitoringService {
                 RETURNING monitor_revision, pipeline_attempt, execution_attempt,
                           current_node_id, current_node_sequence, updated_at
                 """, (resultSet, row) -> state(resultSet, true),
-                report.jobId(), report.traceId(), report.observationTraceId(),
+                report.jobId(), report.traceId(), occurrence.observationTraceId(),
                 report.profileVersionId(), report.pipelineAttempt(), report.executionAttempt(),
                 monitorStatus.name(), report.nodeId(), report.nodeSequence(), report.nodeType(),
                 report.handlerKey(), occurrence.status().name(),
@@ -530,6 +532,7 @@ public final class AiJobMonitoringService {
             String nodeId,
             long nodeSequence,
             NodeStatus status,
+            String observationTraceId,
             Instant lastReportedAt,
             boolean applied) { }
 

@@ -133,6 +133,8 @@ class AiJobMonitoringServiceTest {
         assertThat(response.monitorRevision()).isEqualTo(11);
         assertThat(response.current()).isTrue();
         assertThat(response.status()).isEqualTo(NodeStatus.FAILED);
+        assertThat(database.callContaining("INSERT INTO app.ai_job_monitoring_state")
+                .parameters().get(2)).isNull();
     }
 
     @Test
@@ -148,6 +150,8 @@ class AiJobMonitoringServiceTest {
         assertThat(response.monitorRevision()).isEqualTo(11);
         assertThat(response.current()).isTrue();
         assertThat(response.status()).isEqualTo(NodeStatus.COMPLETED);
+        assertThat(database.callContaining("INSERT INTO app.ai_job_monitoring_state")
+                .parameters().get(2)).isNull();
     }
 
     @Test
@@ -167,6 +171,8 @@ class AiJobMonitoringServiceTest {
                 .contains("EXCLUDED.status = app.ai_job_node_occurrence.status")
                 .contains("app.ai_job_node_occurrence.observation_trace_id IS NULL")
                 .contains("EXCLUDED.observation_trace_id IS NOT NULL");
+        assertThat(database.callContaining("INSERT INTO app.ai_job_monitoring_state")
+                .parameters().get(2)).isEqualTo("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
     }
 
     private static AiJobMonitoringService service(FakeDatabase database) {
@@ -306,7 +312,9 @@ class AiJobMonitoringServiceTest {
         private ResultSet occurrenceResult() throws Exception {
             ResultSet result = mock(ResultSet.class);
             when(result.getString(1)).thenReturn(occurrenceStatus.name());
-            when(result.getTimestamp(2)).thenReturn(Timestamp.from(NOW));
+            when(result.getString(2)).thenReturn(occurrenceChanged
+                    ? "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" : null);
+            when(result.getTimestamp(3)).thenReturn(Timestamp.from(NOW));
             return result;
         }
 

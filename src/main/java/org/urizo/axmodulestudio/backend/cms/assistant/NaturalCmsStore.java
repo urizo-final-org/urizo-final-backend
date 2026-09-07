@@ -114,6 +114,23 @@ public final class NaturalCmsStore {
         return authenticated(authorization, () -> requireJob(jobId, false));
     }
 
+    /**
+     * 이 Job을 낸 관리자. 게시물 등록의 작성자로 쓴다.
+     *
+     * <p>Job 생성 때 이미 저장한 값이라 모델도 Runtime도 새 값을 만들지 않는다.
+     */
+    UUID actorId(String authorization, UUID jobId) {
+        return authenticated(authorization, () -> {
+            List<UUID> actors = jdbc.query(
+                    "SELECT actor_id FROM app.natural_cms_job WHERE job_id = ?",
+                    (rs, row) -> rs.getObject(1, UUID.class), jobId);
+            if (actors.size() != 1) {
+                throw conflict("Natural CMS Job is not available.");
+            }
+            return actors.get(0);
+        });
+    }
+
     RuntimePolicy runtimePolicy(String authorization, UUID profileVersionId) {
         return authenticated(authorization, () -> {
             List<String> policies = jdbc.query("""

@@ -42,6 +42,7 @@ class NaturalCmsStageServiceTest {
     private static final UUID PROFILE = UUID.fromString("33333333-3333-4333-8333-333333333333");
     private static final UUID RESULT = UUID.fromString("44444444-4444-4444-8444-444444444444");
     private static final UUID PREVIEW = UUID.fromString("55555555-5555-4555-8555-555555555555");
+    private static final UUID ACTOR = UUID.fromString("66666666-6666-4666-8666-666666666666");
     private static final String PREVIEW_HASH = "sha256:" + "a".repeat(64);
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
@@ -128,11 +129,12 @@ class NaturalCmsStageServiceTest {
                     ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
             verify(harness.models).executeNaturalCms(request.capture(), any());
             List<JsonNode> messages = request.getValue().messages();
-            // 메뉴만 CREATE·DELETE까지 열려 있어(AI05-006·AI05-007) 첫 문장이 다르다.
-            // 나머지 셋은 AI05-013이 정한 UPDATE 문구를 그대로 쓴다.
-            String opening = "MENU".equals(promptCase.resource().type())
-                    ? "Create one MENU command with operation CREATE, UPDATE or DELETE"
-                    : "Create one " + promptCase.resource().type() + " UPDATE command";
+            // 메뉴(AI05-006·AI05-007)와 게시판(AI05-014)은 CREATE·DELETE까지 열려 첫 문장이 다르다.
+            // 나머지는 AI05-013이 정한 UPDATE 문구를 그대로 쓴다.
+            String type = promptCase.resource().type();
+            String opening = "MENU".equals(type) || "BOARD".equals(type)
+                    ? "Create one " + type + " command with operation CREATE, UPDATE or DELETE"
+                    : "Create one " + type + " UPDATE command";
             assertThat(messages.get(0).path("content").asText())
                     .contains(opening)
                     .contains("Call validate_cms_command exactly once")
@@ -261,7 +263,7 @@ class NaturalCmsStageServiceTest {
         assertThat(response.previewHash()).isEqualTo(PREVIEW_HASH);
         assertThat(response.structuredCommand().has("workspaceId")).isFalse();
         assertThat(response.structuredCommand().has("candidateSha")).isFalse();
-        verify(harness.resources, never()).apply(any(), any());
+        verify(harness.resources, never()).apply(any(), any(), any());
 
         ArgumentCaptor<CodingModelTurnContract.Request> turns =
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
@@ -323,7 +325,7 @@ class NaturalCmsStageServiceTest {
         ready.set("command", command.deepCopy());
         when(harness.mcp.callTool(eq("apply_cms_preview"), any()))
                 .thenReturn(structured(ready));
-        when(harness.resources.apply(RESOURCE, command)).thenReturn(
+        when(harness.resources.apply(RESOURCE, command, ACTOR)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7).put("title", "New"));
 
         NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
@@ -333,7 +335,7 @@ class NaturalCmsStageServiceTest {
         assertThat(response.resultPort()).isEqualTo("applied");
         verify(harness.mcp).callTool(eq("revalidate_cms_preview"), any());
         verify(harness.mcp).callTool(eq("apply_cms_preview"), any());
-        verify(harness.resources).apply(RESOURCE, command);
+        verify(harness.resources).apply(RESOURCE, command, ACTOR);
     }
 
     @Test
@@ -352,7 +354,7 @@ class NaturalCmsStageServiceTest {
         ready.set("command", command.deepCopy());
         when(harness.mcp.callTool(eq("apply_cms_preview"), any()))
                 .thenReturn(structured(ready));
-        when(harness.resources.apply(RESOURCE, command)).thenReturn(
+        when(harness.resources.apply(RESOURCE, command, ACTOR)).thenReturn(
                 harness.mapper.createObjectNode().put("id", 7).put("title", "New"));
         when(harness.store.recordApplied(
                 eq("Bearer worker"), eq(JOB), eq(1), eq(RESULT), eq(1), any()))
@@ -365,7 +367,7 @@ class NaturalCmsStageServiceTest {
                 .hasMessage("handler result insert failed");
 
         verify(harness.mcp).callTool(eq("revalidate_cms_preview"), any());
-        verify(harness.resources, never()).apply(RESOURCE, command);
+        verify(harness.resources, never()).apply(RESOURCE, command, ACTOR);
     }
 
     /**
@@ -427,6 +429,117 @@ class NaturalCmsStageServiceTest {
                 .contains("Linking sends targetType and targetId alone and never changes the name")
                 .contains("DELETE carries no fields")
                 .contains("never send displayOrder");
+    }
+
+    /** 게시판은 등록·삭제까지 열렸고 삭제에는 게시물 0건 조건이 붙는다. */
+    @Test
+    void boardCommandPromptOpensCreateAndDeleteAndNamesTheDeleteLimit() throws Exception {
+        NaturalCmsContract.ResourceRef board =
+                new NaturalCmsContract.ResourceRef("BOARD", "4");
+        ObjectNode state = new ObjectMapper().createObjectNode()
+                .put("id", 4).put("name", "공지사항").put("description", "안내");
+
+        assertThat(commandPrompt(board, state))
+                .contains("Create one BOARD command with operation CREATE, UPDATE or DELETE")
+                .contains("CREATE sends at least name")
+                .contains("DELETE carries no fields")
+                .contains("A board that still has posts cannot be deleted");
+    }
+
+    /** 게시물은 같은 화면의 말단 리소스다. 소속 게시판은 대상 id가 들고 있어 모델이 못 바꾼다. */
+    @Test
+    void postCommandPromptKeepsThePostInItsBoardAndLimitsMarkdown() throws Exception {
+        NaturalCmsContract.ResourceRef post =
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12");
+        ObjectNode state = new ObjectMapper().createObjectNode()
+                .put("id", "board:4:post:12").put("title", "공지").put("body", "본문");
+
+        assertThat(commandPrompt(post, state))
+                .contains("Create one POST command with operation CREATE, UPDATE or DELETE")
+                .contains("CREATE sends title and body")
+                .contains("never send a board field")
+                .contains("headings (##)");
+    }
+
+    /**
+     * 게시판 화면에서는 글쓰기가 범위 안이다.
+     *
+     * <p>공통 문구가 게시물 작성을 범위 밖으로 못박고 있어 그대로 쓰면 전부 거부된다.
+     */
+    @Test
+    void feasibilityPromptOpensPostWritingOnlyOnTheBoardScreen() throws Exception {
+        NaturalCmsContract.ResourceRef post =
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12");
+        Harness harness = new Harness(activeJob(post));
+        when(harness.resources.snapshot(post)).thenReturn(
+                harness.mapper.createObjectNode().put("id", "board:4:post:12"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("writing a new post")
+                .contains("changing the board itself")
+                .doesNotContain("including writing posts");
+    }
+
+    /**
+     * 게시판 대상은 게시물 작성이 범위 밖이고, 삭제 조건의 근거를 함께 준다.
+     *
+     * <p>조건만 알리고 근거를 주지 않으면 모델이 확인할 수단이 없어 같은 요청이 문장에 따라
+     * 갈렸다. `이 게시판 지워줘`는 통과하고 `지워줘`는 거부되던 흔들림이다.
+     */
+    @Test
+    void feasibilityPromptKeepsPostWritingOutsideTheBoardTarget() throws Exception {
+        NaturalCmsContract.ResourceRef board =
+                new NaturalCmsContract.ResourceRef("BOARD", "4");
+        Harness harness = new Harness(activeJob(board));
+        when(harness.resources.snapshot(board)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 4));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("boards only")
+                .contains("deleting a board")
+                .contains("reference.posts")
+                // 조건이 삭제 밖으로 번지면 게시물 있는 게시판은 이름 변경까지 거부된다.
+                .contains("restricts deletion only")
+                .contains("stay feasible whatever reference.posts is")
+                .contains("writing or editing posts");
+    }
+
+    /** 명령 단계의 system 지시문 하나만 꺼내 본다. */
+    private static String commandPrompt(
+            NaturalCmsContract.ResourceRef resource, ObjectNode state) throws Exception {
+        Harness harness = new Harness(activeJob(resource));
+        when(harness.resources.snapshot(resource)).thenReturn(state);
+        when(harness.resources.validateCommand(eq(resource), any()))
+                .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+        ObjectNode command = harness.mapper.createObjectNode().put("operation", "UPDATE");
+        command.putObject("fields").put("title", "새 제목");
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                toolResponse("validate_cms_command", command));
+        stubPreviewTools(harness, state);
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.preview", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        return system(turn.getValue());
     }
 
     private static String system(CodingModelTurnContract.Request request) {
@@ -556,6 +669,7 @@ class NaturalCmsStageServiceTest {
 
         private Harness(NaturalCmsContract.JobResponse job) {
             when(store.get("Bearer worker", JOB, 1)).thenReturn(job);
+            when(store.actorId("Bearer worker", JOB)).thenReturn(ACTOR);
             when(store.findResult("Bearer worker", JOB, 1, RESULT))
                     .thenReturn(Optional.empty());
             when(store.runtimePolicy("Bearer worker", PROFILE)).thenReturn(

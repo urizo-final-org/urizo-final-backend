@@ -186,7 +186,7 @@ public final class ProductService implements
         return store.idempotent("QUERY_CHATBOT", key,
                 new ScopedRequest(chatbotId, request), 200,
                 ProductApiContract.RagQueryResponse.class,
-                () -> store.query(chatbotId, traceId, request, null));
+                () -> store.query(chatbotId, traceId, request, null, null));
     }
 
     /**
@@ -198,11 +198,17 @@ public final class ProductService implements
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category) {
+            List<String> category,
+            String previousQuery) {
         // 검색·인용·거절은 store가 확정한 그대로 두고 answer 문장만 다시 쓴다.
         // 플래그가 꺼져 있거나 LLM이 실패하면 추출식 응답이 그대로 나간다.
+        //
+        // rewrite에는 직전 질문을 넘기지 않는다. LLM은 이미 이번 검색이 고른 근거만 보고,
+        // 그 근거가 대명사의 지시 대상을 확정한다. 프롬프트를 늘리면 단일 턴 측정치와
+        // 비교가 끊긴다 — 켠 뒤 대명사 질문이 실제로 흔들리면 그때 넣는다.
         return answers.rewrite(
-                request.query(), store.query(chatbotId, traceId, request, category));
+                request.query(),
+                store.query(chatbotId, traceId, request, category, previousQuery));
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

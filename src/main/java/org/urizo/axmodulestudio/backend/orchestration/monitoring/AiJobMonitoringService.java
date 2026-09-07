@@ -144,10 +144,14 @@ public final class AiJobMonitoringService {
                     handler_key, status, started_at, waiting_at, completed_at, failed_at,
                     error_code, last_reported_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    CASE WHEN ? = 'RUNNING' THEN ? ELSE NULL END,
-                    CASE WHEN ? = 'WAITING_APPROVAL' THEN ? ELSE NULL END,
-                    CASE WHEN ? = 'COMPLETED' THEN ? ELSE NULL END,
-                    CASE WHEN ? = 'FAILED' THEN ? ELSE NULL END,
+                    CASE WHEN ? = 'RUNNING'
+                        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END,
+                    CASE WHEN ? = 'WAITING_APPROVAL'
+                        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END,
+                    CASE WHEN ? = 'COMPLETED'
+                        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END,
+                    CASE WHEN ? = 'FAILED'
+                        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END,
                     ?, ?, ?)
                 ON CONFLICT (
                     job_id, profile_version_id, pipeline_attempt,

@@ -55,6 +55,14 @@ class AiJobMonitoringServiceTest {
                 "INSERT INTO app.ai_job_node_occurrence");
         SqlCall state = database.callContaining("INSERT INTO app.ai_job_monitoring_state");
         assertThat(occurrence.sql())
+                .contains("CASE WHEN ? = 'RUNNING'\n"
+                                + "        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END",
+                        "CASE WHEN ? = 'WAITING_APPROVAL'\n"
+                                + "        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END",
+                        "CASE WHEN ? = 'COMPLETED'\n"
+                                + "        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END",
+                        "CASE WHEN ? = 'FAILED'\n"
+                                + "        THEN CAST(? AS TIMESTAMPTZ) ELSE NULL END")
                 .contains("WHEN 'RUNNING' THEN 1 WHEN 'WAITING_APPROVAL' THEN 2 ELSE 3 END")
                 .contains("EXCLUDED.status = app.ai_job_node_occurrence.status")
                 .contains("app.ai_job_node_occurrence.observation_trace_id IS NULL")

@@ -365,19 +365,22 @@ public final class CodingHandlerStageService {
             }
             if ("apply_patch".equals(call.name())) {
                 // Measured on Job cb3cd98b: the model applied a working patch, then kept
-                // editing - thirteen apply_patch calls, one of which reverted its own work -
-                // and spent the whole turn budget without ever reaching the checks. Nothing
-                // told it the edit had landed and what came next, so it kept polishing. The
-                // same run a day earlier finished in two patches: this is model variance,
-                // not a broken pipeline, which is why the nudge states the next step
-                // instead of forbidding a second patch that a two-part change still needs.
+                // editing - thirteen apply_patch calls, one of which reverted its own work.
+                // The nudge that ended that loop first routed the exit through the
+                // self-checks, but the review stage and the deterministic preview run the
+                // same checks anyway, and this stage pays the most per call because its
+                // conversation is heaviest: the same three checks cost 66k tokens here and
+                // 8k in review (Jobs 60401f37 / a8d8005a). Job a8d8005a completed end to
+                // end with no self-checks at all, so the exit now hands the work over
+                // instead of verifying it. "Stop editing" stays - that sentence is the one
+                // that ended the polishing, not the checks it used to point at.
                 messages.add(userMessage(
                         "apply_patch succeeded and the change is now in the workspace. If the "
-                        + "requested change is complete, stop editing and verify it: call "
-                        + "run_check, then check_package_allowlist and scan_changed_files, and "
-                        + "finish with the stage result. Call apply_patch again only for a part "
-                        + "of the request that is still missing - do not re-edit work that is "
-                        + "already correct."));
+                        + "requested change is complete, stop editing and finish with the "
+                        + "stage result now: the review stage receives your work next and "
+                        + "runs the checks itself, so checking is not this stage's job. Call "
+                        + "apply_patch again only for a part of the request that is still "
+                        + "missing - do not re-edit work that is already correct."));
             }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(
@@ -1306,6 +1309,21 @@ public final class CodingHandlerStageService {
                     + "the change plausibly touches, most likely first, and prefer naming one "
                     + "file too many over leaving the list empty. When the request is "
                     + "infeasible, or the context lists no files, answer with an empty array. "
+                    // Measured on Job a40a115d: a request to rename a top menu was waved
+                    // through, but menu titles live in the database, not in code - the
+                    // coding stage traced api.menus() through seventeen searches and died
+                    // at the turn limit, 326k tokens for nothing. The refusal path costs
+                    // 1.7k (Job 594c6d6a). The line drawn here is data versus code: stored
+                    // content is managed through the CMS screens this AI cannot and must
+                    // not reach (the AI has no path to the database by decision), while
+                    // wording hard-coded in a screen's own file is ordinary code work.
+                    + "When the request changes stored data rather than code - a menu's "
+                    + "name, a post or its content, a setting's saved value - answer port "
+                    + "\"infeasible\" and say in plain language that this kind of change is "
+                    + "made through the CMS administration screens, not by changing code. "
+                    + "Wording that is written into the screen's own code stays feasible: "
+                    + "judge by where the text lives, and when genuinely unsure, proceed "
+                    + "as feasible. "
                     // The early block the design asks of the analyst. The post-check on the
                     // finished candidate remains the authority; this only saves the coding
                     // stage's cost when the refusal is obvious from the request alone.
@@ -1357,8 +1375,17 @@ public final class CodingHandlerStageService {
                         + "This stage ends after " + MAX_MODEL_TURNS + " answers, and every "
                         + "answer spends one whether it searches or edits. The coding.analyze "
                         + "payload in priorResults carries targetFiles, the files chosen for "
-                        + "this change from the guardrail's own list: read those with "
-                        + "read_file and start editing. Do not search to confirm what "
+                        // Measured on Job 60401f37: targetFiles named two files, the model
+                        // read both, edited only the first - and the unused file's 5,827
+                        // tokens were re-sent on each of the eight answers that followed,
+                        // 46k tokens for a file no edit touched. Every read is permanent
+                        // conversation weight, so files are opened one at a time.
+                        + "this change from the guardrail's own list: open the first "
+                        + "targetFile with read_file and start editing. Open a later "
+                        + "targetFile only when the requested change does not belong in the "
+                        + "files already read - every file you read is re-sent with every "
+                        + "later answer, so an unneeded read keeps costing until the stage "
+                        + "ends. Do not search to confirm what "
                         + "targetFiles already names. Search only when those files turn out "
                         + "not to hold the change, and then search for code identifiers in "
                         + "English (class, field, and path names), never for words of the "

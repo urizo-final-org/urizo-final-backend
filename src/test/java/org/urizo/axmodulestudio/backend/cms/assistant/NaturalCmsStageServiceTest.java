@@ -129,12 +129,12 @@ class NaturalCmsStageServiceTest {
                     ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
             verify(harness.models).executeNaturalCms(request.capture(), any());
             List<JsonNode> messages = request.getValue().messages();
-            // 메뉴(AI05-006·AI05-007)와 게시판(AI05-014)은 CREATE·DELETE까지 열려 첫 문장이 다르다.
-            // 나머지는 AI05-013이 정한 UPDATE 문구를 그대로 쓴다.
+            // 메뉴(AI05-006·AI05-007), 게시판(AI05-014), 컨텐츠(AI05-015)는 CREATE·DELETE까지
+            // 열려 첫 문장이 다르다. 남은 템플릿은 AI05-013이 정한 UPDATE 문구를 그대로 쓴다.
             String type = promptCase.resource().type();
-            String opening = "MENU".equals(type) || "BOARD".equals(type)
-                    ? "Create one " + type + " command with operation CREATE, UPDATE or DELETE"
-                    : "Create one " + type + " UPDATE command";
+            String opening = "TEMPLATE".equals(type)
+                    ? "Create one " + type + " UPDATE command"
+                    : "Create one " + type + " command with operation CREATE, UPDATE or DELETE";
             assertThat(messages.get(0).path("content").asText())
                     .contains(opening)
                     .contains("Call validate_cms_command exactly once")
@@ -391,7 +391,9 @@ class NaturalCmsStageServiceTest {
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
         verify(harness.models).executeNaturalCms(turn.capture(), any());
         assertThat(system(turn.getValue()))
-                .contains("title and body only")
+                .contains("static content pages only")
+                .contains("creating a content page")
+                .contains("deleting the selected page")
                 .contains("Anything else is infeasible")
                 .contains("payload.reason");
     }
@@ -459,6 +461,22 @@ class NaturalCmsStageServiceTest {
                 .contains("CREATE sends title and body")
                 .contains("never send a board field")
                 .contains("headings (##)");
+    }
+
+    /** 컨텐츠도 등록·삭제까지 열렸다. 게시판과 달리 삭제에 붙는 조건이 없다. */
+    @Test
+    void contentCommandPromptOpensCreateAndDeleteWithoutADeleteCondition() throws Exception {
+        NaturalCmsContract.ResourceRef content =
+                new NaturalCmsContract.ResourceRef("CONTENT", "7");
+        ObjectNode state = new ObjectMapper().createObjectNode()
+                .put("id", 7).put("title", "회사 소개").put("body", "## 소개");
+
+        assertThat(commandPrompt(content, state))
+                .contains("Create one CONTENT command with operation CREATE, UPDATE or DELETE")
+                .contains("CREATE sends title and body")
+                .contains("DELETE carries no fields")
+                .contains("headings (##)")
+                .doesNotContain("cannot be deleted");
     }
 
     /**

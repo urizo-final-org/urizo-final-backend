@@ -348,9 +348,9 @@ public final class NaturalCmsStageService {
     /**
      * 리소스마다 열린 operation이 다르므로 지시문도 갈린다.
      *
-     * <p>메뉴(`AI05-006`·`AI05-007`)와 게시판·게시물(`AI05-014`)은 {@code CREATE}·{@code DELETE}까지
-     * 열려 있어 첫 문장이 다르다. 나머지는 `AI05-013`이 정한 {@code UPDATE} 문구를 그대로 쓰고
-     * 공통 규칙만 덧붙인다.
+     * <p>메뉴(`AI05-006`·`AI05-007`), 게시판·게시물(`AI05-014`), 컨텐츠(`AI05-015`)는
+     * {@code CREATE}·{@code DELETE}까지 열려 있어 첫 문장이 다르다. 남은 템플릿은 `AI05-013`이 정한
+     * {@code UPDATE} 문구를 그대로 쓰고 공통 규칙만 덧붙인다.
      *
      * <p>Tool Call 한 번으로 명령을 받는 구조는 `AI05-013`을 그대로 따른다. Tool Schema의
      * {@code operation}은 자유 문자열이라 이 지시문만으로 세 operation을 모두 표현할 수 있다.
@@ -382,6 +382,16 @@ public final class NaturalCmsStageService {
                     + " does not give one."
                     + emptyDelete
                     + " A board that still has posts cannot be deleted.";
+        }
+        if ("CONTENT".equals(resourceType)) {
+            return "Create one CONTENT command with operation CREATE, UPDATE or DELETE. "
+                    + "Call validate_cms_command exactly once with that command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly
+                    + " CREATE sends title and body."
+                    + emptyDelete
+                    + " A body may use headings (##), emphasis (**text**) and list"
+                    + " items (-) only.";
         }
         if (!"MENU".equals(resourceType)) {
             return "Create one " + resourceType + " UPDATE command. "
@@ -439,6 +449,14 @@ public final class NaturalCmsStageService {
                     + "changing a name or description stay feasible whatever reference.posts "
                     + "is.";
         }
+        else if ("CONTENT".equals(resource.type())) {
+            // 컨텐츠 삭제에는 조건이 없다. 삭제하면 그 컨텐츠를 연결한 메뉴가 `연결 없음`이 될 뿐이고
+            // 그 정리는 기존 CMS가 한다. 조건이 없으니 판단할 참고 값도 주지 않는다.
+            scope = "static content pages only: creating a content page, changing the selected "
+                    + "page's title and body, and deleting the selected page";
+            excluded = "writing posts, boards, menus, templates and members";
+        }
+        // 남은 기본값은 이제 템플릿 전용이다. 컨텐츠 분기를 새로 만들었으므로 여기는 건드리지 않는다.
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "

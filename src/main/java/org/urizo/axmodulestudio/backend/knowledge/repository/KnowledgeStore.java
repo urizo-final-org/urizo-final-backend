@@ -13,6 +13,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.exception.ProductApiException;
 
@@ -21,11 +22,17 @@ import org.urizo.axmodulestudio.backend.knowledge.exception.ProductApiException;
 public class KnowledgeStore {
 
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
     private final Clock clock;
     private final ProjectStore projects;
 
-    KnowledgeStore(JdbcTemplate productJdbcTemplate, Clock clock, ProjectStore projects) {
+    KnowledgeStore(
+            JdbcTemplate productJdbcTemplate,
+            TransactionTemplate productTransactionTemplate,
+            Clock clock,
+            ProjectStore projects) {
         this.jdbc = productJdbcTemplate;
+        this.transactions = productTransactionTemplate;
         this.clock = clock;
         this.projects = projects;
     }
@@ -178,26 +185,35 @@ public class KnowledgeStore {
                     (rs, row) -> rs.getObject(1, UUID.class), versionId, knowledgeBaseId),
                     "KNOWLEDGE_VERSION_NOT_FOUND", "Knowledge version not found.");
         }
-        List<ProductApiContract.ActivationRequestResponse> existing = jdbc.query(
-                activationRequestSelect()
-                        + " WHERE knowledge_base_id = ? AND requested_by = ? AND status = 'OPEN' "
-                        + "AND knowledge_version_id IS NOT DISTINCT FROM ?",
-                (rs, row) -> activationRequest(rs, traceId), knowledgeBaseId, actor.actorId(), versionId);
-        if (!existing.isEmpty()) {
-            return existing.get(0);
-        }
-        UUID requestId = UUID.randomUUID();
-        Instant now = Instant.now(clock);
-        jdbc.update(
-                "INSERT INTO app.knowledge_activation_request "
-                        + "(request_id, knowledge_base_id, knowledge_version_id, reason, status, "
-                        + "requested_by, requested_by_name, created_at) "
-                        + "VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?)",
-                requestId, knowledgeBaseId, versionId, blankToNull(request.reason()),
-                actor.actorId(), actor.name(), Timestamp.from(now));
-        return new ProductApiContract.ActivationRequestResponse(
-                version(), traceId, requestId, knowledgeBaseId, versionId,
-                blankToNull(request.reason()), "OPEN", actor.actorId(), actor.name(), now);
+        // 트랜잭션으로 감싼다. productDataSource가 autoCommit=false라 트랜잭션 밖의 INSERT는
+        // 예외 없이 커밋되지 않고 커넥션 반납 시 롤백된다 — 201을 받고도 행이 남지 않는다.
+        // 다른 쓰기는 store.idempotent(...)가 트랜잭션을 열어 주는데, 이 경로는 멱등 Key를
+        // 요구하지 않기로 해서 그 진입점을 함께 잃었다.
+        //
+        // 조회와 INSERT를 한 트랜잭션에 둔다. 둘이 갈라지면 같은 사람이 동시에 두 번 눌렀을 때
+        // 양쪽 다 "열린 요청 없음"을 보고 INSERT로 진입해 부분 유니크 인덱스에 부딪힌다.
+        return transactions.execute(status -> {
+            List<ProductApiContract.ActivationRequestResponse> existing = jdbc.query(
+                    activationRequestSelect()
+                            + " WHERE knowledge_base_id = ? AND requested_by = ? AND status = 'OPEN' "
+                            + "AND knowledge_version_id IS NOT DISTINCT FROM ?",
+                    (rs, row) -> activationRequest(rs, traceId), knowledgeBaseId, actor.actorId(), versionId);
+            if (!existing.isEmpty()) {
+                return existing.get(0);
+            }
+            UUID requestId = UUID.randomUUID();
+            Instant now = Instant.now(clock);
+            jdbc.update(
+                    "INSERT INTO app.knowledge_activation_request "
+                            + "(request_id, knowledge_base_id, knowledge_version_id, reason, status, "
+                            + "requested_by, requested_by_name, created_at) "
+                            + "VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?)",
+                    requestId, knowledgeBaseId, versionId, blankToNull(request.reason()),
+                    actor.actorId(), actor.name(), Timestamp.from(now));
+            return new ProductApiContract.ActivationRequestResponse(
+                    version(), traceId, requestId, knowledgeBaseId, versionId,
+                    blankToNull(request.reason()), "OPEN", actor.actorId(), actor.name(), now);
+        });
     }
 
     public List<ProductApiContract.ActivationRequestResponse> listOpenActivationRequests(

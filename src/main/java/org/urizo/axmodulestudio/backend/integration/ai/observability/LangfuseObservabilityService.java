@@ -30,9 +30,14 @@ public final class LangfuseObservabilityService {
 
     static final String ENVIRONMENT = "local";
     private static final Duration MAX_RANGE = Duration.ofDays(31);
+    private static final Duration SELECTED_PADDING = Duration.ofMinutes(1);
+    private static final Duration MAX_SELECTED_RANGE = Duration.ofHours(24);
+    private static final int SELECTED_ANCHOR_LIMIT = 2;
+    private static final int SELECTED_CHILD_LIMIT = 50;
     private static final int MAX_CACHE_ENTRIES = 64;
+    private static final String NODE_OBSERVATION_NAME = "axms.node";
     private static final Set<String> OBSERVATION_NAMES = Set.of(
-            "axms.node", "axms.model", "axms.tool", "axms.check");
+            NODE_OBSERVATION_NAME, "axms.model", "axms.tool", "axms.check");
     private static final Set<String> SCORE_TYPES = Set.of(
             "NUMERIC", "BOOLEAN", "CATEGORICAL");
     private static final Set<String> SCORE_SOURCES = Set.of("API", "ANNOTATION", "EVAL");
@@ -107,6 +112,77 @@ public final class LangfuseObservabilityService {
         }
         catch (UpstreamFailure failure) {
             return ObservationsResponse.empty(Availability.UNAVAILABLE, range);
+        }
+    }
+
+    public SelectedObservationsResponse selectedObservations(
+            String jobId,
+            String traceId,
+            String profileVersionId,
+            int pipelineAttempt,
+            int executionAttempt,
+            String nodeId,
+            long nodeSequence,
+            String observationTraceId,
+            Instant startedAt,
+            Instant lastReportedAt) {
+        TimeRange range = selectedRange(startedAt, lastReportedAt);
+        SelectedObservationKey selection = new SelectedObservationKey(
+                jobId, traceId, profileVersionId, pipelineAttempt, executionAttempt,
+                nodeId, nodeSequence, observationTraceId);
+        if (observationTraceId == null) {
+            return SelectedObservationsResponse.empty(
+                    Availability.UNCONNECTED, selection, range, false);
+        }
+        Availability unavailable = configurationAvailability();
+        if (unavailable != null) {
+            return SelectedObservationsResponse.empty(
+                    unavailable, selection, range, false);
+        }
+        CacheKey key = new CacheKey("selected:" + selection, range.from(), range.to());
+        SelectedObservationsResponse cached = cached(
+                key, SelectedObservationsResponse.class);
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            JsonNode anchorRoot = request(selectedAnchorPath(range, selection));
+            List<ObservationRow> anchors = data(anchorRoot).stream()
+                    .filter(row -> NODE_OBSERVATION_NAME.equals(row.path("name").asText()))
+                    .map(this::observationRow)
+                    .filter(row -> matchesOccurrence(row.metadata(), selection))
+                    .toList();
+            boolean anchorTruncated = hasCursor(anchorRoot);
+            if (anchors.size() != 1 || anchorTruncated) {
+                SelectedObservationsResponse response = SelectedObservationsResponse.empty(
+                        Availability.UNCONNECTED, selection, range, anchorTruncated);
+                put(key, response);
+                return response;
+            }
+            ObservationRow anchor = anchors.get(0);
+            JsonNode childRoot = request(selectedChildrenPath(
+                    range, selection, anchor.id()));
+            List<ObservationRow> children = data(childRoot).stream()
+                    .filter(row -> OBSERVATION_NAMES.contains(row.path("name").asText()))
+                    .map(this::observationRow)
+                    .filter(row -> anchor.id().equals(row.parentObservationId()))
+                    .filter(row -> matchesBusinessIdentity(row.metadata(), selection))
+                    .toList();
+            List<ObservationRow> rows = new java.util.ArrayList<>(children.size() + 1);
+            rows.add(anchor);
+            rows.addAll(children);
+            SelectedObservationsResponse response = new SelectedObservationsResponse(
+                    Availability.AVAILABLE, null, selection.jobId(), selection.traceId(),
+                    selection.observationTraceId(), selection.profileVersionId(),
+                    selection.pipelineAttempt(), selection.executionAttempt(),
+                    selection.nodeId(), selection.nodeSequence(), range.from(), range.to(),
+                    ENVIRONMENT, List.copyOf(rows), hasCursor(childRoot));
+            put(key, response);
+            return response;
+        }
+        catch (UpstreamFailure failure) {
+            return SelectedObservationsResponse.empty(
+                    Availability.UNAVAILABLE, selection, range, false);
         }
     }
 
@@ -230,6 +306,72 @@ public final class LangfuseObservabilityService {
                 + "&toStartTime=" + encode(range.to().toString());
     }
 
+    private String selectedAnchorPath(
+            TimeRange range, SelectedObservationKey selection) {
+        ArrayNode filters = objectMapper.createArrayNode();
+        commonSelectedFilters(filters, range, selection);
+        filter(filters, "string", "name", null, "=", NODE_OBSERVATION_NAME);
+        metadataFilter(filters, "jobId", selection.jobId());
+        metadataFilter(filters, "profileVersionId", selection.profileVersionId());
+        metadataFilter(filters, "nodeId", selection.nodeId());
+        metadataFilter(filters, "pipelineAttempt",
+                Integer.toString(selection.pipelineAttempt()));
+        metadataFilter(filters, "executionAttempt",
+                Integer.toString(selection.executionAttempt()));
+        metadataFilter(filters, "nodeSequence", Long.toString(selection.nodeSequence()));
+        return selectedPath(filters, SELECTED_ANCHOR_LIMIT);
+    }
+
+    private String selectedChildrenPath(
+            TimeRange range, SelectedObservationKey selection, String parentObservationId) {
+        ArrayNode filters = objectMapper.createArrayNode();
+        commonSelectedFilters(filters, range, selection);
+        filter(filters, "string", "parentObservationId", null, "=", parentObservationId);
+        return selectedPath(filters, SELECTED_CHILD_LIMIT);
+    }
+
+    private static void commonSelectedFilters(
+            ArrayNode filters, TimeRange range, SelectedObservationKey selection) {
+        filter(filters, "string", "traceId", null, "=", selection.observationTraceId());
+        filter(filters, "string", "environment", null, "=", ENVIRONMENT);
+        filter(filters, "datetime", "startTime", null, ">=", range.from().toString());
+        filter(filters, "datetime", "startTime", null, "<", range.to().toString());
+    }
+
+    private String selectedPath(ArrayNode filters, int limit) {
+        try {
+            return "/api/public/v2/observations"
+                    + "?fields=core%2Cbasic%2Cmetadata%2Cmodel%2Cusage%2Cmetrics"
+                    + "&limit=" + limit
+                    + "&filter=" + encode(objectMapper.writeValueAsString(filters));
+        }
+        catch (JsonProcessingException failure) {
+            throw new IllegalStateException(
+                    "The selected Langfuse observation query cannot be encoded.");
+        }
+    }
+
+    private static void metadataFilter(ArrayNode filters, String key, String value) {
+        filter(filters, "stringObject", "metadata", key, "=", value);
+    }
+
+    private static void filter(
+            ArrayNode filters,
+            String type,
+            String column,
+            String key,
+            String operator,
+            String value) {
+        ObjectNode filter = filters.addObject();
+        filter.put("type", type);
+        filter.put("column", column);
+        if (key != null) {
+            filter.put("key", key);
+        }
+        filter.put("operator", operator);
+        filter.put("value", value);
+    }
+
     private static String scoresPath(TimeRange range) {
         return "/api/public/v3/scores?limit=50&environment=local"
                 + "&fromTimestamp=" + encode(range.from().toString())
@@ -313,7 +455,8 @@ public final class LangfuseObservabilityService {
     private static ObservationMetadata metadata(JsonNode value) {
         if (value == null || value.isMissingNode() || value.isNull()) {
             return new ObservationMetadata(null, null, null, null, null, null,
-                    null, null, null, null, null, null, null, null, null);
+                    null, null, null, null, null, null, null, null, null, null,
+                    null, null);
         }
         requireObject(value);
         return new ObservationMetadata(
@@ -324,6 +467,9 @@ public final class LangfuseObservabilityService {
                 nullableText(value, "nodeType"),
                 nullableText(value, "nodeStatus"),
                 nullableInteger(value, "attempt"),
+                identityInteger(value, "pipelineAttempt"),
+                identityInteger(value, "executionAttempt"),
+                identityLong(value, "nodeSequence"),
                 nullableText(value, "provider"),
                 nullableText(value, "model"),
                 nullableInteger(value, "inputTokens"),
@@ -332,6 +478,39 @@ public final class LangfuseObservabilityService {
                 nullableText(value, "errorCode"),
                 nullableText(value, "toolStatus"),
                 nullableText(value, "checkStatus"));
+    }
+
+    private static boolean matchesOccurrence(
+            ObservationMetadata metadata, SelectedObservationKey selection) {
+        return matchesBusinessIdentity(metadata, selection)
+                && Integer.valueOf(selection.pipelineAttempt()).equals(
+                        metadata.pipelineAttempt())
+                && Integer.valueOf(selection.executionAttempt()).equals(
+                        metadata.executionAttempt())
+                && Long.valueOf(selection.nodeSequence()).equals(metadata.nodeSequence());
+    }
+
+    private static boolean matchesBusinessIdentity(
+            ObservationMetadata metadata, SelectedObservationKey selection) {
+        return selection.jobId().equals(metadata.jobId())
+                && selection.traceId().equals(metadata.traceId())
+                && selection.profileVersionId().equals(metadata.profileVersionId())
+                && selection.nodeId().equals(metadata.nodeId());
+    }
+
+    private static TimeRange selectedRange(Instant startedAt, Instant lastReportedAt) {
+        Instant start = startedAt == null ? lastReportedAt : startedAt;
+        if (start == null || lastReportedAt == null) {
+            throw new IllegalArgumentException("The selected occurrence has no valid time range.");
+        }
+        Instant from = start.minus(SELECTED_PADDING);
+        Instant uncappedTo = lastReportedAt.plus(SELECTED_PADDING);
+        Instant maximumTo = from.plus(MAX_SELECTED_RANGE);
+        Instant to = uncappedTo.isAfter(maximumTo) ? maximumTo : uncappedTo;
+        if (!to.isAfter(from)) {
+            to = from.plus(SELECTED_PADDING);
+        }
+        return new TimeRange(from, to);
     }
 
     private static TimeRange timeRange(String from, String to) {
@@ -360,6 +539,10 @@ public final class LangfuseObservabilityService {
     private static List<JsonNode> data(JsonNode root) {
         return java.util.stream.StreamSupport.stream(root.path("data").spliterator(), false)
                 .toList();
+    }
+
+    private static boolean hasCursor(JsonNode root) {
+        return root.path("meta").path("cursor").isTextual();
     }
 
     private static void requireObject(JsonNode value) {
@@ -421,6 +604,36 @@ public final class LangfuseObservabilityService {
         return result.intValue();
     }
 
+    private static Integer identityInteger(JsonNode value, String field) {
+        Long result = identityLong(value, field);
+        if (result == null) {
+            return null;
+        }
+        if (result > Integer.MAX_VALUE) {
+            throw new UpstreamFailure();
+        }
+        return result.intValue();
+    }
+
+    private static Long identityLong(JsonNode value, String field) {
+        JsonNode node = value.path(field);
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (node.isIntegralNumber() && node.canConvertToLong() && node.longValue() >= 1) {
+            return node.longValue();
+        }
+        if (node.isTextual() && node.textValue().matches("[1-9][0-9]{0,18}")) {
+            try {
+                return Long.parseLong(node.textValue());
+            }
+            catch (NumberFormatException failure) {
+                throw new UpstreamFailure();
+            }
+        }
+        throw new UpstreamFailure();
+    }
+
     private static BigDecimal nullableDecimal(JsonNode value, String field) {
         JsonNode node = value.path(field);
         if (node.isMissingNode() || node.isNull()) {
@@ -472,6 +685,7 @@ public final class LangfuseObservabilityService {
 
     public enum Availability {
         AVAILABLE,
+        UNCONNECTED,
         DISABLED,
         UNAVAILABLE
     }
@@ -540,6 +754,9 @@ public final class LangfuseObservabilityService {
             String nodeType,
             String nodeStatus,
             Integer attempt,
+            Integer pipelineAttempt,
+            Integer executionAttempt,
+            Long nodeSequence,
             String provider,
             String model,
             Integer inputTokens,
@@ -548,6 +765,38 @@ public final class LangfuseObservabilityService {
             String errorCode,
             String toolStatus,
             String checkStatus) { }
+
+    public record SelectedObservationsResponse(
+            Availability status,
+            String errorCode,
+            String jobId,
+            String traceId,
+            String observationTraceId,
+            String profileVersionId,
+            int pipelineAttempt,
+            int executionAttempt,
+            String nodeId,
+            long nodeSequence,
+            Instant from,
+            Instant to,
+            String environment,
+            List<ObservationRow> observations,
+            boolean truncated) {
+
+        static SelectedObservationsResponse empty(
+                Availability status,
+                SelectedObservationKey selection,
+                TimeRange range,
+                boolean truncated) {
+            return new SelectedObservationsResponse(
+                    status, LangfuseObservabilityService.errorCode(status),
+                    selection.jobId(), selection.traceId(), selection.observationTraceId(),
+                    selection.profileVersionId(),
+                    selection.pipelineAttempt(), selection.executionAttempt(),
+                    selection.nodeId(), selection.nodeSequence(), range.from(), range.to(),
+                    ENVIRONMENT, List.of(), truncated);
+        }
+    }
 
     public record ScoresResponse(
             Availability status,
@@ -584,11 +833,24 @@ public final class LangfuseObservabilityService {
     }
 
     private static String errorCode(Availability status) {
-        return status == Availability.DISABLED
-                ? "LANGFUSE_DISABLED" : "LANGFUSE_UPSTREAM_UNAVAILABLE";
+        return switch (status) {
+            case AVAILABLE -> null;
+            case UNCONNECTED -> "OBSERVATION_NOT_CONNECTED";
+            case DISABLED -> "LANGFUSE_DISABLED";
+            case UNAVAILABLE -> "LANGFUSE_UPSTREAM_UNAVAILABLE";
+        };
     }
 
     private record TimeRange(Instant from, Instant to) { }
+    private record SelectedObservationKey(
+            String jobId,
+            String traceId,
+            String profileVersionId,
+            int pipelineAttempt,
+            int executionAttempt,
+            String nodeId,
+            long nodeSequence,
+            String observationTraceId) { }
     private record CacheKey(String kind, Instant from, Instant to) { }
     private record TimedValue(Object value, Instant expiresAt) { }
     private static final class UpstreamFailure extends RuntimeException { }

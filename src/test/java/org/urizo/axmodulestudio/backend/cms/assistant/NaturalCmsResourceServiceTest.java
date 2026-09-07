@@ -25,6 +25,7 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
@@ -33,6 +34,9 @@ class NaturalCmsResourceServiceTest {
 
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
+    /** 반영 경로가 Job의 요청자를 그대로 받는다. 게시물 등록의 작성자로만 쓰인다. */
+    private static final UUID AUTHOR =
+            UUID.fromString("11111111-1111-4111-8111-111111111111");
 
     private static ContentView content(String title, String body) {
         return new ContentView(
@@ -70,7 +74,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.updateContent(7, "New title", "New body"))
                 .thenReturn(content("New title", "New body"));
 
-        JsonNode result = resources.apply(RESOURCE, command);
+        JsonNode result = resources.apply(RESOURCE, command, AUTHOR);
 
         assertThat(result.path("id").asLong()).isEqualTo(7);
         assertThat(result.path("title").asText()).isEqualTo("New title");
@@ -90,7 +94,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"title":"New title"}}
                 """);
 
-        resources.apply(RESOURCE, command);
+        resources.apply(RESOURCE, command, AUTHOR);
 
         verify(cms).updateContent(7, "New title", "Old body");
     }
@@ -167,7 +171,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"name":"회사 소개","displayOrder":2,"parentId":null}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "3"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "3"), command, AUTHOR);
 
         verify(cms).updateMenu(3, "회사 소개", "/about", null, 2, "NONE", null);
     }
@@ -185,7 +189,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"description":null}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("BOARD", "4"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("BOARD", "4"), command, AUTHOR);
 
         verify(cms).updateBoard(4, "공지사항", null);
     }
@@ -204,7 +208,7 @@ class NaturalCmsResourceServiceTest {
         NaturalCmsContract.ResourceRef resource =
                 new NaturalCmsContract.ResourceRef("TEMPLATE", "classic");
         assertThat(resources.snapshot(resource).path("id").asText()).isEqualTo("classic");
-        resources.apply(resource, command);
+        resources.apply(resource, command, AUTHOR);
 
         verify(cms).saveTemplate(
                 "classic", "wide", "#112233", "새 사이트", "머리말", "꼬리말",
@@ -251,7 +255,7 @@ class NaturalCmsResourceServiceTest {
                  "parentId":40}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command, AUTHOR);
 
         verify(cms).createMenu("자료실", "/support/archive", 40L, 42, "NONE", null);
         verify(cms, never()).updateMenu(
@@ -271,7 +275,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"CREATE","fields":{"name":"회사","path":"/company","position":1}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "new"), command, AUTHOR);
 
         verify(cms).createMenu("회사", "/company", null, 10, "NONE", null);
         verify(cms).updateMenu(10, "소개", "/about", null, 20, "NONE", null);
@@ -291,7 +295,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"position":1}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "12"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "12"), command, AUTHOR);
 
         verify(cms).updateMenu(12, "비전", "/about/vision", 10L, 11, "CONTENT", 4L);
         verify(cms).updateMenu(11, "회사 소개", "/about/company", 10L, 12, "CONTENT", 3L);
@@ -309,7 +313,7 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"position":9}}
                 """);
 
-        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "11"), command);
+        resources.apply(new NaturalCmsContract.ResourceRef("MENU", "11"), command, AUTHOR);
 
         verify(cms).updateMenu(11, "회사 소개", "/about/company", 10L, 12, "CONTENT", 3L);
         verify(cms).updateMenu(12, "비전", "/about/vision", 10L, 11, "CONTENT", 4L);
@@ -326,7 +330,7 @@ class NaturalCmsResourceServiceTest {
                 """);
 
         JsonNode removed = resources.apply(
-                new NaturalCmsContract.ResourceRef("MENU", "10"), command);
+                new NaturalCmsContract.ResourceRef("MENU", "10"), command, AUTHOR);
 
         assertThat(removed.path("name").asText()).isEqualTo("소개");
         verify(cms).deleteMenu(10);
@@ -427,6 +431,274 @@ class NaturalCmsResourceServiceTest {
         assertThat(context.path("menus").get(0).has("displayOrder")).isFalse();
         assertThat(context.path("contents").get(0).path("id").asLong()).isEqualTo(7);
         assertThat(context.path("boards").get(0).path("name").asText()).isEqualTo("공지사항");
+    }
+
+    @Test
+    void snapshotsANewBoardWithoutReadingTheDatabase() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("BOARD", "new"));
+
+        // 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 빈 자리를 갖춘 틀을 준다.
+        assertThat(state.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("id", "name", "description");
+        assertThat(state.path("id").asText()).isEqualTo("new");
+        assertThat(state.path("name").isNull()).isTrue();
+        verify(cms, never()).board(anyLong());
+    }
+
+    @Test
+    void createsABoardAndLeavesTheDescriptionOutWhenTheRequestGivesNone() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.createBoard("자료실", null)).thenReturn(board(9, "자료실", null));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"name":"자료실"}}
+                """);
+
+        JsonNode created = resources.apply(
+                new NaturalCmsContract.ResourceRef("BOARD", "new"), command, AUTHOR);
+
+        assertThat(created.path("id").asLong()).isEqualTo(9);
+        verify(cms).createBoard("자료실", null);
+    }
+
+    @Test
+    void deletesAnEmptyBoardAndReportsTheRemovedState() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.board(4)).thenReturn(board(4, "자료실", "빈 게시판"));
+        when(cms.posts(4)).thenReturn(java.util.List.of());
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        JsonNode removed = resources.apply(
+                new NaturalCmsContract.ResourceRef("BOARD", "4"), command, AUTHOR);
+
+        assertThat(removed.path("name").asText()).isEqualTo("자료실");
+        verify(cms).deleteBoard(4);
+    }
+
+    /**
+     * 기준은 0건이다. 게시물이 남아 있으면 자연어로 지우지 않는다.
+     *
+     * <p>기존 CMS의 {@code deleteBoard}는 게시물을 먼저 지우고 진행한다. 그 경로는 그대로 두고
+     * 자연어에만 선을 둔다.
+     */
+    @Test
+    void refusesToDeleteABoardThatStillHasPosts() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.posts(4)).thenReturn(java.util.List.of(
+                post(12, 4, "공지", "본문"), post(13, 4, "안내", "본문")));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("BOARD", "4"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("still has 2 posts");
+        verify(cms, never()).deleteBoard(anyLong());
+    }
+
+    /**
+     * 판정 단계가 삭제 조건을 스스로 확인할 수 있게 게시물 수를 준다.
+     *
+     * <p>제목까지 주지 않는다. 필요한 것은 0인지 아닌지뿐이다.
+     */
+    @Test
+    void givesTheModelThePostCountSoItCanJudgeBoardDeletion() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.posts(4)).thenReturn(java.util.List.of(
+                post(12, 4, "공지", "본문"), post(13, 4, "안내", "본문")));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode context = resources.promptContext(
+                new NaturalCmsContract.ResourceRef("BOARD", "4"));
+
+        assertThat(context.path("posts").asInt()).isEqualTo(2);
+        assertThat(context.fieldNames()).toIterable().containsExactly("posts");
+    }
+
+    @Test
+    void leavesTheReferenceEmptyForABoardThatDoesNotExistYet() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        assertThat(resources.promptContext(
+                new NaturalCmsContract.ResourceRef("BOARD", "new"))).isNull();
+        verify(cms, never()).posts(anyLong());
+    }
+
+    @Test
+    void snapshotsANewPostWithTheCombinedTargetIdSoTheToolCanMatchIt() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+
+        JsonNode state = resources.snapshot(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:new"));
+
+        assertThat(state.path("id").asText()).isEqualTo("board:4:post:new");
+        assertThat(state.fieldNames()).toIterable()
+                .containsExactlyInAnyOrder("id", "title", "body");
+        verify(cms, never()).post(anyLong());
+    }
+
+    @Test
+    void createsAPostInTheBoardTheTargetIdCarriesAndKeepsTheRequesterAsAuthor()
+            throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.board(4)).thenReturn(board(4, "공지사항", "안내"));
+        when(cms.createPost(AUTHOR, 4, "점검 안내", "## 안내\n\n- 항목"))
+                .thenReturn(post(21, 4, "점검 안내", "## 안내\n\n- 항목"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"CREATE","fields":{"title":"점검 안내","body":"## 안내\\n\\n- 항목"}}
+                """);
+
+        JsonNode created = resources.apply(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:new"),
+                command, AUTHOR);
+
+        assertThat(created.path("id").asLong()).isEqualTo(21);
+        verify(cms).board(4);
+        verify(cms).createPost(AUTHOR, 4, "점검 안내", "## 안내\n\n- 항목");
+    }
+
+    @Test
+    void updatesAPostAndKeepsTheFieldsTheCommandDoesNotSend() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.post(12)).thenReturn(post(12, 4, "옛 제목", "옛 본문"));
+        when(cms.updatePost(12, "새 제목", "옛 본문"))
+                .thenReturn(post(12, 4, "새 제목", "옛 본문"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"title":"새 제목"}}
+                """);
+
+        resources.apply(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"),
+                command, AUTHOR);
+
+        verify(cms).updatePost(12, "새 제목", "옛 본문");
+    }
+
+    /** 4-4. 대상 게시물이 화면에서 연 게시판의 것이 아니면 건드리지 않는다. */
+    @Test
+    void refusesAPostThatBelongsToAnotherBoard() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.post(12)).thenReturn(post(12, 7, "다른 게시판 글", "본문"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"title":"새 제목"}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("belongs to another board");
+        verify(cms, never()).updatePost(anyLong(), any(), any());
+    }
+
+    @Test
+    void deletesAPostAfterConfirmingItsBoard() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.post(12)).thenReturn(post(12, 4, "지울 글", "본문"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"DELETE","fields":{}}
+                """);
+
+        JsonNode removed = resources.apply(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"),
+                command, AUTHOR);
+
+        assertThat(removed.path("title").asText()).isEqualTo("지울 글");
+        verify(cms).deletePost(12);
+    }
+
+    /** 게시판 사이 이동은 열지 않는다. 허용 필드 밖이라 그 자리에서 거부된다. */
+    @Test
+    void keepsAPostInItsBoardByRejectingABoardField() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"boardId":7}}
+                """);
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("fields only: body, title");
+    }
+
+    /** 게시물도 컨텐츠와 같은 렌더러를 타므로 같은 문법 제한을 받는다. */
+    @Test
+    void rejectsPostBodyMarkdownTheEditorCannotRender() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.post(12)).thenReturn(post(12, 4, "제목", "본문"));
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        JsonNode command = mapper.valueToTree(java.util.Map.of(
+                "operation", "UPDATE",
+                "fields", java.util.Map.of("body", "본문\n| 표 |")));
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("headings (##)");
+    }
+
+    @Test
+    void rejectsAPostTargetIdThatDoesNotCarryItsBoard() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
+
+        // 게시판 id 자리가 비면 게시판 대상으로 읽혀 숫자 id 검사에서 멈춘다.
+        assertThatThrownBy(() -> resources.snapshot(
+                new NaturalCmsContract.ResourceRef("BOARD", "post:12")))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("BOARD id is invalid");
+    }
+
+    private static BoardView board(long id, String name, String description) {
+        return new BoardView(
+                id, name, description,
+                Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z"));
+    }
+
+    private static PostView post(long id, long boardId, String title, String body) {
+        return new PostView(
+                id, boardId, AUTHOR, "Admin", title, body,
+                Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z"));
     }
 
     /** 대메뉴 둘과 하위 셋. 번호는 시드 관례대로 대메뉴 10 간격, 하위는 부모 구역 안이다. */

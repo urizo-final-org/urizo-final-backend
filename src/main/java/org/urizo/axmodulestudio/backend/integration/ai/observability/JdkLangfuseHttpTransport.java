@@ -1,15 +1,21 @@
 package org.urizo.axmodulestudio.backend.integration.ai.observability;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Flow;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 final class JdkLangfuseHttpTransport implements LangfuseHttpTransport {
 
@@ -32,25 +38,85 @@ final class JdkLangfuseHttpTransport implements LangfuseHttpTransport {
                 .timeout(timeout)
                 .GET();
         headers.forEach(request::header);
-        HttpResponse<InputStream> response = client.send(
-                request.build(), HttpResponse.BodyHandlers.ofInputStream());
-        try (InputStream body = response.body()) {
-            return new Response(response.statusCode(), readBounded(body, maxResponseBytes));
+        var pending = client.sendAsync(
+                request.build(), ignored -> new BoundedBodySubscriber(maxResponseBytes));
+        try {
+            // The future completes only after the bounded body has been received.
+            HttpResponse<byte[]> response = pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+            return new Response(response.statusCode(),
+                    new String(response.body(), StandardCharsets.UTF_8));
+        }
+        catch (TimeoutException failure) {
+            pending.cancel(true);
+            throw new HttpTimeoutException("Langfuse response timed out.");
+        }
+        catch (InterruptedException failure) {
+            pending.cancel(true);
+            throw failure;
+        }
+        catch (ExecutionException failure) {
+            if (failure.getCause() instanceof IOException cause) {
+                throw cause;
+            }
+            throw new IOException("Langfuse request failed.", failure.getCause());
         }
     }
 
-    private static String readBounded(InputStream input, int maximumBytes) throws IOException {
-        ByteArrayOutputStream output = new ByteArrayOutputStream(Math.min(maximumBytes, 8_192));
-        byte[] buffer = new byte[4_096];
-        int total = 0;
-        int read;
-        while ((read = input.read(buffer)) != -1) {
-            total += read;
-            if (total > maximumBytes) {
-                throw new IOException("Langfuse response exceeded the configured size limit.");
-            }
-            output.write(buffer, 0, read);
+    private static final class BoundedBodySubscriber
+            implements HttpResponse.BodySubscriber<byte[]> {
+
+        private final HttpResponse.BodySubscriber<byte[]> delegate =
+                HttpResponse.BodySubscribers.ofByteArray();
+        private final int maximumBytes;
+        private Flow.Subscription subscription;
+        private int received;
+        private boolean exceeded;
+
+        private BoundedBodySubscriber(int maximumBytes) {
+            this.maximumBytes = maximumBytes;
         }
-        return output.toString(StandardCharsets.UTF_8);
+
+        @Override
+        public CompletionStage<byte[]> getBody() {
+            return delegate.getBody();
+        }
+
+        @Override
+        public void onSubscribe(Flow.Subscription subscription) {
+            this.subscription = subscription;
+            delegate.onSubscribe(subscription);
+        }
+
+        @Override
+        public void onNext(List<ByteBuffer> buffers) {
+            if (exceeded) {
+                return;
+            }
+            for (ByteBuffer buffer : buffers) {
+                if (buffer.remaining() > maximumBytes - received) {
+                    exceeded = true;
+                    subscription.cancel();
+                    delegate.onError(new IOException(
+                            "Langfuse response exceeded the configured size limit."));
+                    return;
+                }
+                received += buffer.remaining();
+            }
+            delegate.onNext(buffers);
+        }
+
+        @Override
+        public void onError(Throwable failure) {
+            if (!exceeded) {
+                delegate.onError(failure);
+            }
+        }
+
+        @Override
+        public void onComplete() {
+            if (!exceeded) {
+                delegate.onComplete();
+            }
+        }
     }
 }

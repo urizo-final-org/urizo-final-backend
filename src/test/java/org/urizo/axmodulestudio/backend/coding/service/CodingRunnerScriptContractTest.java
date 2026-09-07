@@ -53,4 +53,18 @@ class CodingRunnerScriptContractTest {
                 .doesNotContain("Get-AiWorktreePath")
                 .doesNotContain("Remove-Item");
     }
+
+    @Test
+    void preparesCanonicalFrontendForBackendBuildAndPreview() throws Exception {
+        String script = Files.readString(Path.of("scripts", "runner.ps1"), StandardCharsets.UTF_8);
+
+        assertThat(script)
+                .contains("else { Get-RepositorySourcePath -Repository 'frontend' }")
+                .contains("RUNNER_REPOSITORY_MISSING|Frontend 미리보기 Source가 없습니다")
+                .contains("'backend' { @('spring-app', 'flyway-migration', 'frontend') }")
+                .contains("$frontendWorktree = Get-RepositorySourcePath -Repository 'frontend'")
+                .contains("Set-PreviewEnvironment -FrontendSource $frontendWorktree")
+                .doesNotContain("Join-Path $WorkRoot 'ai-frontend'")
+                .doesNotContain("$frontendWorktree = ''");
+    }
 }

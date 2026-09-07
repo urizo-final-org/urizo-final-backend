@@ -83,8 +83,18 @@ public final class CodingHandlerStageService {
             + "target file and send path, oldText and newText instead: copy the exact text "
             + "to replace out of what read_file returned as oldText, and the server builds "
             + "the diff. Retyping a long line is what fails.";
-    private static final Set<String> CODE_TOOLS = Set.copyOf(
-            CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet());
+    /**
+     * The code stage edits; it does not verify. The review stage and the deterministic
+     * preview run run_check, check_package_allowlist and scan_changed_files anyway, and
+     * this stage is the most expensive place to run them because its conversation is
+     * heaviest (66k vs 8k tokens for the same three calls, Jobs 60401f37 / a8d8005a).
+     * Measured on Job 8220994f: told in the prompt that checking is not this stage's
+     * job, the model ran all three checks regardless. A request does not bind a model;
+     * not offering the tool does, so the checks are not in this set. modelTools()
+     * intersects with the profile's bindings, so the profile snapshot stays untouched.
+     */
+    private static final Set<String> CODE_TOOLS = Set.of(
+            "read_file", "search_code", "read_diff", "apply_patch");
     /**
      * The files that declare a dependency. Lock files are included: a library arrives through
      * one just as surely as through the manifest that names it.
@@ -1366,7 +1376,12 @@ public final class CodingHandlerStageService {
                     // silently loses all but its head unless the model is told.
                     ? "Request one tool call per answer; when an answer carries several, only "
                         + "the first is executed. "
-                        + "Use read_diff before any diff-bound tool and again after the final change. "
+                        // apply_patch's own result carries the final diff digest (measured,
+                        // Job 60401f37), and the review stage re-reads the diff itself, so
+                        // a read_diff after the last edit only re-buys conversation weight.
+                        + "Use read_diff once before the first apply_patch; after a "
+                        + "successful apply_patch its result already reports the change, so "
+                        + "do not call read_diff again - hand the stage result over. "
                         // A measured failure spent four of its turns on a natural-language
                         // query that can never match code and on near-duplicate retries of
                         // searches that had already answered. The budget and the search

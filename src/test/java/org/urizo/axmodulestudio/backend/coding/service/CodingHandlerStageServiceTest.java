@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -29,6 +30,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
@@ -1966,6 +1968,7 @@ class CodingHandlerStageServiceTest {
                 new CodingHandlerResultService.JobRequestIdentity(
                         "SYSTEM-LLMOPS-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
                         "system-llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        when(resultService.jobRepository(JOB)).thenReturn("backend");
         String headSha = "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         when(runner.taskOutcome(RESULT, "CREATE_PR")).thenReturn(
                 new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
@@ -1990,8 +1993,277 @@ class CodingHandlerStageServiceTest {
                 .isEqualTo(WORKSPACE.toString());
         assertThat(command.getValue().path("diffDigest").asText())
                 .isEqualTo(DIFF_DIGEST);
+        assertThat(command.getValue().path("repo").asText()).isEqualTo("backend");
+        assertThat(response.payload().path("repository").asText()).isEqualTo("backend");
         assertThat(response.payload().path("headSha").asText()).isEqualTo(headSha);
         assertThat(response.payload().path("prNumber").asInt()).isEqualTo(42);
+    }
+
+    @Test
+    void prCompletionPublishesToTheRepositoryTheJobWorksIn() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        ArgumentCaptor<JsonNode> command = ArgumentCaptor.forClass(JsonNode.class);
+        verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), command.capture());
+        assertThat(command.getValue().path("repo").asText()).isEqualTo("frontend");
+        assertThat(response.payload().path("repository").asText()).isEqualTo("frontend");
+    }
+
+    @Test
+    void prCompletionRefusesAReceiptFromAnotherRepository() {
+        PullRequestFixture fixture = pullRequestFixture("frontend", "backend");
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("receipt");
+    }
+
+    @Test
+    void prCompletionTakesTheOverlappingPreviewDownBeforeExporting() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+
+        fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        // Order matters: the runner claims one pending row at a time, so the preview has to be
+        // queued down first or the export still meets the folder the preview holds.
+        InOrder order = inOrder(fixture.runner());
+        order.verify(fixture.runner())
+                .enqueue(any(UUID.class), eq("PREVIEW_DOWN"), any());
+        order.verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), any());
+    }
+
+    @Test
+    void prBodyCarriesEverythingTheReviewerHasToCheck() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+
+        fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        ArgumentCaptor<JsonNode> command = ArgumentCaptor.forClass(JsonNode.class);
+        verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), command.capture());
+        String body = command.getValue().path("body").asText();
+        assertThat(body)
+                .contains("## 결과", "## 변경", "## 검증", "## 연결·영향", "## 확인")
+                .contains("사업 소개 보기 버튼 옆에 버튼을 하나 만들어줘")
+                .contains("사업 소개 옆에 버튼을 하나 추가합니다.")
+                .contains("src/features/site/PublicSite.tsx")
+                .contains("1개 · 12줄")
+                .contains("git-diff-check")
+                .contains("충족 · 버튼이 추가된다")
+                .contains("SCOPE · 승인 · GENERAL_ADMIN")
+                .contains("GITHUB · 승인 · SUPER_ADMIN")
+                .contains("1번째 시도")
+                .contains(BASE_SHA);
+    }
+
+    @Test
+    void prBodySaysWhatWasNeverRecordedInsteadOfLeavingItBlank() {
+        PullRequestFixture fixture = pullRequestFixture("backend");
+        // A Job whose earlier stages left no payload still has to produce a readable body.
+        when(fixture.resultService().aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "요청문",
+                        List.of(fixture.requested()), List.of(),
+                        List.of(fixture.githubApproval()), NOW, null));
+
+        fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        ArgumentCaptor<JsonNode> command = ArgumentCaptor.forClass(JsonNode.class);
+        verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), command.capture());
+        String body = command.getValue().path("body").asText();
+        assertThat(body)
+                .contains("- 계획: 기록 없음")
+                .contains("- 바뀐 파일: 기록 없음")
+                .contains("- 검토 판정: 기록 없음");
+    }
+
+    private record PullRequestFixture(
+            CodingHandlerStageService service,
+            CodingRunnerService runner,
+            CodingHandlerResultService resultService,
+            CodingHandlerContract.HandlerResultResponse requested,
+            CodingHandlerContract.ApprovalDecisionSummary githubApproval) { }
+
+
+    @Test
+    void prCompletionWaitsForTheRunnerInsteadOfSpendingTheJobsAttempts() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+        // Taking the preview down and exporting the workspace took forty seconds in the
+        // measured run. Failing over each poll would charge the Job a worker attempt, and it
+        // only has three of those for its whole life.
+        when(fixture.runner().taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null),
+                new CodingRunnerService.TaskOutcome("RUNNING", null, null),
+                new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
+                        new ObjectMapper().createObjectNode()
+                                .put("repository", "frontend")
+                                .put("base", "dev")
+                                .put("head",
+                                        "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("candidateSha", BASE_SHA)
+                                .put("headSha",
+                                        "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("prNumber", 45)
+                                .put("prUrl", "https://github.example/pr/45")
+                                .put("state", "OPEN")));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        assertThat(response.payload().path("prNumber").asInt()).isEqualTo(45);
+        assertThat(response.payload().path("prUrl").asText())
+                .isEqualTo("https://github.example/pr/45");
+        verify(fixture.runner(), times(3)).taskOutcome(RESULT, "CREATE_PR");
+    }
+
+    @Test
+    void prCompletionStillGivesUpWhenTheRunnerNeverFinishes() {
+        PullRequestFixture fixture =
+                pullRequestFixture("frontend", "frontend", 3, Duration.ofMillis(1));
+        when(fixture.runner().taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null));
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .extracting(failure -> ((CodingWorkerException) failure).code())
+                .isEqualTo("RUNNER_TASK_PENDING");
+        // One look before the wait, then one per poll: the outer net is still there.
+        verify(fixture.runner(), times(4)).taskOutcome(RESULT, "CREATE_PR");
+    }
+
+    private PullRequestFixture pullRequestFixture(String repository) {
+        return pullRequestFixture(repository, repository);
+    }
+
+    /**
+     * A Job approved at GITHUB, ready for {@code coding.pr_complete}.
+     *
+     * <p>{@code jobRepository} and the runner receipt are separate arguments on purpose: the
+     * stage has to notice when the receipt names a repository the Job does not work in.
+     */
+    private PullRequestFixture pullRequestFixture(
+            String repository, String receiptRepository) {
+        return pullRequestFixture(
+                repository, receiptRepository, 120, Duration.ofMillis(500));
+    }
+
+    /** The last two arguments shorten the runner wait so a test need not sit through it. */
+    private PullRequestFixture pullRequestFixture(
+            String repository,
+            String receiptRepository,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), runner, mock(DeploymentAdapter.class),
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), maxRunnerPolls, runnerPollInterval);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        CodingHandlerContract.HandlerResultResponse requested =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_request",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "requested",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                        mapper.createObjectNode(), NOW);
+        CodingHandlerContract.ApprovalDecisionSummary githubApproval =
+                new CodingHandlerContract.ApprovalDecisionSummary(
+                        UUID.randomUUID(), "github_approval",
+                        CodingHandlerContract.ApprovalStage.GITHUB, 1,
+                        CodingHandlerContract.Decision.APPROVED,
+                        BASE_SHA, DIFF_DIGEST, null, UUID.randomUUID(),
+                        "SUPER_ADMIN", 4, null, NOW);
+        CodingHandlerContract.HandlerResultResponse analyzed =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.analyze",
+                        CodingHandlerContract.ResultType.ANALYSIS, "feasible",
+                        WORKSPACE, null, null, null,
+                        mapper.createObjectNode()
+                                .put("planSummary", "사업 소개 옆에 버튼을 하나 추가합니다."),
+                        NOW);
+        ObjectNode reviewPayload = mapper.createObjectNode();
+        reviewPayload.putArray("criteriaResults")
+                .addObject().put("criterion", "버튼이 추가된다").put("met", true);
+        CodingHandlerContract.HandlerResultResponse reviewed =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.review",
+                        CodingHandlerContract.ResultType.REVIEW, "passed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, reviewPayload, NOW);
+        ObjectNode previewPayload = mapper.createObjectNode();
+        previewPayload.putArray("changedPaths").add("src/features/site/PublicSite.tsx");
+        previewPayload.put("changedLines", 12).put("checkProfile", "git-diff-check");
+        CodingHandlerContract.HandlerResultResponse previewed =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.preview",
+                        CodingHandlerContract.ResultType.DIFF, "ready",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, previewPayload, NOW);
+        CodingHandlerContract.ApprovalDecisionSummary scopeApproval =
+                new CodingHandlerContract.ApprovalDecisionSummary(
+                        UUID.randomUUID(), "scope_approval",
+                        CodingHandlerContract.ApprovalStage.SCOPE, 1,
+                        CodingHandlerContract.Decision.APPROVED,
+                        null, null, null, UUID.randomUUID(),
+                        "GENERAL_ADMIN", 2, null, NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "사업 소개 보기 버튼 옆에 버튼을 하나 만들어줘",
+                        List.of(analyzed, reviewed, previewed, requested), List.of(),
+                        List.of(scopeApproval, githubApproval), NOW, null));
+        when(resultService.jobRequestIdentity(JOB)).thenReturn(
+                new CodingHandlerResultService.JobRequestIdentity(
+                        "SYSTEM-LLMOPS-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                        "system-llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        when(resultService.jobRepository(JOB)).thenReturn(repository);
+        when(runner.taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
+                        mapper.createObjectNode()
+                                .put("repository", receiptRepository)
+                                .put("base", "dev")
+                                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("candidateSha", BASE_SHA)
+                                .put("headSha", "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("prNumber", 42)
+                                .put("prUrl", "https://github.example/pr/42")
+                                .put("state", "OPEN")));
+        return new PullRequestFixture(
+                service, runner, resultService, requested, githubApproval);
     }
 
     @Test

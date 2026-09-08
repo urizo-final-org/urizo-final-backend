@@ -51,7 +51,20 @@ public class CodingJobIntakeService {
     private static final String PROFILE_KEY = "LLM_OPS";
     private static final String GRAPH_STEP = "start";
     private static final String PROMPT_VERSION = "coding-plan-v1";
-    private static final Duration JOB_LIFETIME = Duration.ofHours(1);
+    /**
+     * How long a Job stays claimable, counted from the moment it is requested.
+     *
+     * <p>This clock runs while the Job waits for a person, and a worker refuses an
+     * expired Job outright with JOB_EXPIRED. An hour therefore meant that an approver
+     * who read the request the next morning could press approve and get nothing: the
+     * Job could no longer be resumed, and no screen had said so while it sat there.
+     * A day matches how approvals actually arrive and is what the lifecycle contract
+     * already allows as its maximum, so nothing outside this service changes. The
+     * candidate is still checked against the branch it was written on, so an old Job
+     * that no longer applies is caught by the staleness it really has rather than by
+     * a clock standing in for it.
+     */
+    private static final Duration JOB_LIFETIME = Duration.ofHours(24);
     private static final int MAX_REQUEST_CHARACTERS = 10_000;
     private static final Duration CLASSIFY_DEADLINE = Duration.ofSeconds(30);
 

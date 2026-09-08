@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -16,6 +17,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -60,6 +62,16 @@ public final class CodingHandlerStageService {
      * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
      */
     private static final int MAX_MODEL_TURNS = 24;
+    /**
+     * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
+     * of it, so a request of ten thousand characters or a change touching a thousand files is
+     * summarised rather than pasted whole. What was cut is always stated.
+     */
+    private static final int MAX_BODY_CHARACTERS = 8_000;
+    private static final int MAX_BODY_FIELD_CHARACTERS = 600;
+    private static final int MAX_BODY_LIST_ENTRIES = 20;
+    /** Printed where a prior stage recorded nothing, so an absence never reads as a blank. */
+    private static final String MISSING_RECORD = "기록 없음";
     /**
      * The digest of an empty diff - SHA-256 over zero bytes. Every apply_patch of Job
      * 7e600583 was refused, yet read_diff, the package check and the guardrail scan all
@@ -121,7 +133,24 @@ public final class CodingHandlerStageService {
     private final DeploymentAdapter deploymentAdapter;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    /**
+     * How long a stage waits here for a host runner task before it gives up.
+     *
+     * <p>Counted in polls rather than measured against the clock, for the reason the
+     * intake counts them too: a deadline computed from a fixed test Clock never arrives
+     * and the loop then spins forever. A hundred and twenty half-second polls is one
+     * minute, which sits inside both the worker's stage call timeout and the two-minute
+     * turn deadline a claim carries.
+     */
+    private final int maxRunnerPolls;
+    private final Duration runnerPollInterval;
 
+    /**
+     * Two constructors mean Spring cannot guess, and without this it looks for a no-arg
+     * one and fails the whole context at startup. The second exists so a test can shorten
+     * the runner poll; production takes these defaults.
+     */
+    @Autowired
     CodingHandlerStageService(
             CodingHandlerResultService results,
             CodingToolService tools,
@@ -134,6 +163,25 @@ public final class CodingHandlerStageService {
             GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, 120, Duration.ofMillis(500));
+    }
+
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -149,6 +197,12 @@ public final class CodingHandlerStageService {
                 guardrailRules, "guardrailRules are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
+        if (maxRunnerPolls < 1) {
+            throw new IllegalArgumentException("maxRunnerPolls must be at least one");
+        }
+        this.maxRunnerPolls = maxRunnerPolls;
+        this.runnerPollInterval = Objects.requireNonNull(
+                runnerPollInterval, "runnerPollInterval is required");
     }
 
     public CodingHandlerContract.StageExecutionResponse execute(
@@ -560,6 +614,9 @@ public final class CodingHandlerStageService {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "READY");
         payload.set("changedPaths", diff.path("changedPaths").deepCopy());
+        // The line count is already computed here for the third guardrail layer. Recording it
+        // costs one field and saves the pull request body from re-reading the diff later.
+        payload.put("changedLines", changedLines(diff));
         payload.put("checkProfile", check.path("profile").asText());
         return response(resultId, request.handlerKey(), "ready",
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
@@ -741,9 +798,16 @@ public final class CodingHandlerStageService {
             throw conflict("The pull request has no approved Diff digest.");
         }
         CodingHandlerResultService.JobRequestIdentity identity = results.jobRequestIdentity(jobId);
+        // Which repository this Job works in is recorded on the Job itself, and the build,
+        // check and preview stages already queue against it. This stage used to name backend
+        // outright, which was true only while every Job was a backend Job: a frontend Job then
+        // asked the runner to publish a checkout the runner knows belongs elsewhere, and the
+        // workspace marker refused it. Read once, so the command, the receipt check and the
+        // recorded result cannot disagree about where the pull request went.
+        String repository = results.jobRepository(jobId);
         String branch = "system/" + identity.workSlug().substring("system-".length());
         ObjectNode command = objectMapper.createObjectNode();
-        command.put("repo", "backend");
+        command.put("repo", repository);
         command.put("branch", branch);
         command.put("candidateSha", requested.candidateSha());
         command.put("diffDigest", requested.diffDigest());
@@ -753,13 +817,21 @@ public final class CodingHandlerStageService {
         }
         command.put("workspaceId", aggregate.workspaceId().toString());
         command.put("title", identity.systemWorkId() + " automated coding change");
-        command.put("body", "Automated Coding Job " + identity.systemWorkId()
-                + ". Candidate and validation evidence are recorded by the control plane.");
+        command.put("body", pullRequestBody(aggregate, identity, repository, requested));
+        // The preview and this export are the same folder on the host. PREVIEW_UP binds
+        // <workspace>/src into the preview container, and a second export cannot replace a
+        // directory Docker still holds - the copy fails with "File exists" on a path the host
+        // already deleted. The preview has also finished its job by now: the screen offers its
+        // link at the candidate approval and never again, and this runs only after someone
+        // approved GITHUB. Queued before CREATE_PR because the runner claims one pending row at
+        // a time in created order.
+        runner.enqueue(
+                UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down:" + resultId).getBytes(StandardCharsets.UTF_8)),
+                "PREVIEW_DOWN", objectMapper.createObjectNode());
         runner.enqueue(resultId, "CREATE_PR", command);
-        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
-        if (runnerPending(outcome)) {
-            throw runnerPending("Pull request creation is still pending.");
-        }
+        CodingRunnerService.TaskOutcome outcome = awaitRunnerOutcome(
+                resultId, "CREATE_PR", "Pull request creation is still pending.");
         if (!"SUCCEEDED".equals(outcome.status())) {
             throw new CodingWorkerException(
                     outcome.errorCode() == null ? "PR_CREATION_BLOCKED" : outcome.errorCode(),
@@ -768,7 +840,7 @@ public final class CodingHandlerStageService {
         }
         JsonNode receipt = outcome.result();
         if (receipt == null
-                || !"backend".equals(receipt.path("repository").asText())
+                || !repository.equals(receipt.path("repository").asText())
                 || !"dev".equals(receipt.path("base").asText())
                 || !branch.equals(receipt.path("head").asText())
                 || !requested.candidateSha().equals(receipt.path("candidateSha").asText())
@@ -779,7 +851,7 @@ public final class CodingHandlerStageService {
             throw contract("The pull request runner receipt is invalid.");
         }
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("repository", "backend");
+        payload.put("repository", repository);
         payload.put("base", "dev");
         payload.put("head", branch);
         payload.put("candidateSha", requested.candidateSha());
@@ -950,6 +1022,40 @@ public final class CodingHandlerStageService {
 
     private static boolean runnerPending(CodingRunnerService.TaskOutcome outcome) {
         return "PENDING".equals(outcome.status()) || "RUNNING".equals(outcome.status());
+    }
+
+    /**
+     * Waits here for a host runner task instead of failing and letting the worker return.
+     *
+     * <p>A retryable failure costs a worker attempt, and those attempts belong to the
+     * whole Job rather than to this stage: three of them, two and four seconds apart, so
+     * the Job holds about six seconds of patience for work that takes forty. Job d73f8b98
+     * spent them and was marked FAILED; the runner opened its pull request thirty-three
+     * seconds later with nothing left to record it, and the request became an orphan.
+     * Waiting in place spends no attempts, so they stay available for a real fault, and
+     * the pending failure still stands as the outer net for when a minute is not enough.
+     */
+    private CodingRunnerService.TaskOutcome awaitRunnerOutcome(
+            UUID taskId, String kind, String pendingMessage) {
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(taskId, kind);
+        for (int poll = 0; poll < maxRunnerPolls && runnerPending(outcome); poll++) {
+            sleep(runnerPollInterval);
+            outcome = runner.taskOutcome(taskId, kind);
+        }
+        if (runnerPending(outcome)) {
+            throw runnerPending(pendingMessage);
+        }
+        return outcome;
+    }
+
+    private void sleep(Duration interval) {
+        try {
+            Thread.sleep(interval.toMillis());
+        }
+        catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw runnerPending("Waiting for the host runner was interrupted.");
+        }
     }
 
     private static void requireApproved(
@@ -1683,6 +1789,126 @@ public final class CodingHandlerStageService {
         }
         return new ModelOutcome(
                 value.path("port").asText(), value.path("payload").deepCopy());
+    }
+
+    /**
+     * The pull request body, written from what the pipeline already recorded.
+     *
+     * <p>No model writes this. A reviewer has to find the same item in the same place on every
+     * pull request, and a sentence rewritten on every run is a sentence that gets skimmed. Every
+     * value here is one the control plane already stores, so nothing in it has to be believed.
+     *
+     * <p>Sections follow the repository pull request template so an automated pull request reads
+     * like the ones people open. A missing prior result is reported as missing rather than
+     * omitted: a body that silently drops the plan looks the same as a Job that never planned.
+     */
+    private String pullRequestBody(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            CodingHandlerResultService.JobRequestIdentity identity,
+            String repository,
+            CodingHandlerContract.HandlerResultResponse requested) {
+        CodingHandlerContract.HandlerResultResponse analyze =
+                latestResultOrNull(aggregate, "coding.analyze", "feasible");
+        CodingHandlerContract.HandlerResultResponse review =
+                latestResultOrNull(aggregate, "coding.review", "passed");
+        CodingHandlerContract.HandlerResultResponse preview =
+                latestResultOrNull(aggregate, "coding.preview", "ready");
+
+        StringBuilder body = new StringBuilder();
+        body.append("## 결과\n\n");
+        body.append("- 요청: ")
+                .append(oneLine(aggregate.requestText(), MAX_BODY_FIELD_CHARACTERS)).append('\n');
+        body.append("- 계획: ")
+                .append(analyze == null ? MISSING_RECORD
+                        : oneLine(analyze.payload().path("planSummary").asText(),
+                                MAX_BODY_FIELD_CHARACTERS))
+                .append('\n');
+
+        body.append("\n## 변경\n\n");
+        body.append("- 저장소: ").append(repository).append('\n');
+        if (preview == null) {
+            body.append("- 바뀐 파일: ").append(MISSING_RECORD).append('\n');
+        } else {
+            List<String> changed = new ArrayList<>();
+            for (JsonNode path : preview.payload().path("changedPaths")) {
+                if (path.isTextual()) {
+                    changed.add(path.textValue());
+                }
+            }
+            body.append("- 바뀐 파일: ").append(changed.size()).append("개");
+            int lines = preview.payload().path("changedLines").asInt(-1);
+            if (lines >= 0) {
+                body.append(" · ").append(lines).append("줄");
+            }
+            body.append('\n');
+            body.append(bulletList(changed));
+        }
+
+        body.append("\n## 검증\n\n");
+        body.append("- 검사 프로필: ")
+                .append(preview == null ? MISSING_RECORD
+                        : oneLine(preview.payload().path("checkProfile").asText(), 120))
+                .append('\n');
+        List<String> verdicts = new ArrayList<>();
+        if (review != null) {
+            for (JsonNode criterion : review.payload().path("criteriaResults")) {
+                verdicts.add((criterion.path("met").asBoolean() ? "충족 · " : "미충족 · ")
+                        + oneLine(criterion.path("criterion").asText(), 200));
+            }
+        }
+        body.append(verdicts.isEmpty()
+                ? "- 검토 판정: " + MISSING_RECORD + "\n" : bulletList(verdicts));
+
+        body.append("\n## 연결·영향\n\n");
+        body.append("- Coding Job: ").append(identity.systemWorkId()).append('\n');
+        body.append("- Candidate SHA: ").append(requested.candidateSha()).append('\n');
+        body.append("- Diff digest: ").append(requested.diffDigest()).append('\n');
+        body.append("- 재시도: ").append(aggregate.pipelineAttempt()).append("번째 시도\n");
+
+        body.append("\n## 확인\n\n");
+        List<String> decisions = new ArrayList<>();
+        for (CodingHandlerContract.ApprovalDecisionSummary decision : aggregate.decisions()) {
+            decisions.add(decision.stage() + " · "
+                    + (decision.decision() == CodingHandlerContract.Decision.APPROVED
+                            ? "승인" : "반려")
+                    + " · " + decision.actorRole() + " · " + decision.decidedAt());
+        }
+        body.append(decisions.isEmpty()
+                ? "- 승인 이력: " + MISSING_RECORD + "\n" : bulletList(decisions));
+
+        String text = body.toString();
+        return text.length() <= MAX_BODY_CHARACTERS
+                ? text
+                : text.substring(0, MAX_BODY_CHARACTERS) + "\n\n…(본문이 길어 줄였습니다)\n";
+    }
+
+    /**
+     * Renders one bullet per entry, capped so a thousand changed files cannot produce a body
+     * nobody reads. What was dropped is stated rather than left silent.
+     */
+    private static String bulletList(List<String> entries) {
+        StringBuilder rendered = new StringBuilder();
+        int shown = Math.min(entries.size(), MAX_BODY_LIST_ENTRIES);
+        for (int index = 0; index < shown; index++) {
+            rendered.append("- ").append(entries.get(index)).append('\n');
+        }
+        if (entries.size() > shown) {
+            rendered.append("- 그 외 ").append(entries.size() - shown).append("개\n");
+        }
+        return rendered.toString();
+    }
+
+    /**
+     * Collapses recorded free text into one bounded line. Newlines inside a model answer would
+     * otherwise break the surrounding list and read as body sections of their own.
+     */
+    private static String oneLine(String text, int maxCharacters) {
+        if (text == null || text.isBlank()) {
+            return MISSING_RECORD;
+        }
+        String collapsed = text.replaceAll("\\s+", " ").strip();
+        return collapsed.length() <= maxCharacters
+                ? collapsed : collapsed.substring(0, maxCharacters) + "…(줄임)";
     }
 
     private static CodingHandlerContract.HandlerResultResponse latestResult(

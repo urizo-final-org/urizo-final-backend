@@ -4,6 +4,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -16,6 +17,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -131,7 +133,24 @@ public final class CodingHandlerStageService {
     private final DeploymentAdapter deploymentAdapter;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    /**
+     * How long a stage waits here for a host runner task before it gives up.
+     *
+     * <p>Counted in polls rather than measured against the clock, for the reason the
+     * intake counts them too: a deadline computed from a fixed test Clock never arrives
+     * and the loop then spins forever. A hundred and twenty half-second polls is one
+     * minute, which sits inside both the worker's stage call timeout and the two-minute
+     * turn deadline a claim carries.
+     */
+    private final int maxRunnerPolls;
+    private final Duration runnerPollInterval;
 
+    /**
+     * Two constructors mean Spring cannot guess, and without this it looks for a no-arg
+     * one and fails the whole context at startup. The second exists so a test can shorten
+     * the runner poll; production takes these defaults.
+     */
+    @Autowired
     CodingHandlerStageService(
             CodingHandlerResultService results,
             CodingToolService tools,
@@ -144,6 +163,25 @@ public final class CodingHandlerStageService {
             GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, 120, Duration.ofMillis(500));
+    }
+
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -159,6 +197,12 @@ public final class CodingHandlerStageService {
                 guardrailRules, "guardrailRules are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
+        if (maxRunnerPolls < 1) {
+            throw new IllegalArgumentException("maxRunnerPolls must be at least one");
+        }
+        this.maxRunnerPolls = maxRunnerPolls;
+        this.runnerPollInterval = Objects.requireNonNull(
+                runnerPollInterval, "runnerPollInterval is required");
     }
 
     public CodingHandlerContract.StageExecutionResponse execute(
@@ -786,10 +830,8 @@ public final class CodingHandlerStageService {
                         ("axms:coding-preview-down:" + resultId).getBytes(StandardCharsets.UTF_8)),
                 "PREVIEW_DOWN", objectMapper.createObjectNode());
         runner.enqueue(resultId, "CREATE_PR", command);
-        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
-        if (runnerPending(outcome)) {
-            throw runnerPending("Pull request creation is still pending.");
-        }
+        CodingRunnerService.TaskOutcome outcome = awaitRunnerOutcome(
+                resultId, "CREATE_PR", "Pull request creation is still pending.");
         if (!"SUCCEEDED".equals(outcome.status())) {
             throw new CodingWorkerException(
                     outcome.errorCode() == null ? "PR_CREATION_BLOCKED" : outcome.errorCode(),
@@ -980,6 +1022,40 @@ public final class CodingHandlerStageService {
 
     private static boolean runnerPending(CodingRunnerService.TaskOutcome outcome) {
         return "PENDING".equals(outcome.status()) || "RUNNING".equals(outcome.status());
+    }
+
+    /**
+     * Waits here for a host runner task instead of failing and letting the worker return.
+     *
+     * <p>A retryable failure costs a worker attempt, and those attempts belong to the
+     * whole Job rather than to this stage: three of them, two and four seconds apart, so
+     * the Job holds about six seconds of patience for work that takes forty. Job d73f8b98
+     * spent them and was marked FAILED; the runner opened its pull request thirty-three
+     * seconds later with nothing left to record it, and the request became an orphan.
+     * Waiting in place spends no attempts, so they stay available for a real fault, and
+     * the pending failure still stands as the outer net for when a minute is not enough.
+     */
+    private CodingRunnerService.TaskOutcome awaitRunnerOutcome(
+            UUID taskId, String kind, String pendingMessage) {
+        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(taskId, kind);
+        for (int poll = 0; poll < maxRunnerPolls && runnerPending(outcome); poll++) {
+            sleep(runnerPollInterval);
+            outcome = runner.taskOutcome(taskId, kind);
+        }
+        if (runnerPending(outcome)) {
+            throw runnerPending(pendingMessage);
+        }
+        return outcome;
+    }
+
+    private void sleep(Duration interval) {
+        try {
+            Thread.sleep(interval.toMillis());
+        }
+        catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw runnerPending("Waiting for the host runner was interrupted.");
+        }
     }
 
     private static void requireApproved(

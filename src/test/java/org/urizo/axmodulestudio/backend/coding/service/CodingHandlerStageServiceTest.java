@@ -2101,6 +2101,58 @@ class CodingHandlerStageServiceTest {
             CodingHandlerContract.HandlerResultResponse requested,
             CodingHandlerContract.ApprovalDecisionSummary githubApproval) { }
 
+
+    @Test
+    void prCompletionWaitsForTheRunnerInsteadOfSpendingTheJobsAttempts() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+        // Taking the preview down and exporting the workspace took forty seconds in the
+        // measured run. Failing over each poll would charge the Job a worker attempt, and it
+        // only has three of those for its whole life.
+        when(fixture.runner().taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null),
+                new CodingRunnerService.TaskOutcome("RUNNING", null, null),
+                new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
+                        new ObjectMapper().createObjectNode()
+                                .put("repository", "frontend")
+                                .put("base", "dev")
+                                .put("head",
+                                        "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("candidateSha", BASE_SHA)
+                                .put("headSha",
+                                        "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("prNumber", 45)
+                                .put("prUrl", "https://github.example/pr/45")
+                                .put("state", "OPEN")));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        assertThat(response.payload().path("prNumber").asInt()).isEqualTo(45);
+        assertThat(response.payload().path("prUrl").asText())
+                .isEqualTo("https://github.example/pr/45");
+        verify(fixture.runner(), times(3)).taskOutcome(RESULT, "CREATE_PR");
+    }
+
+    @Test
+    void prCompletionStillGivesUpWhenTheRunnerNeverFinishes() {
+        PullRequestFixture fixture =
+                pullRequestFixture("frontend", "frontend", 3, Duration.ofMillis(1));
+        when(fixture.runner().taskOutcome(RESULT, "CREATE_PR")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null));
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .extracting(failure -> ((CodingWorkerException) failure).code())
+                .isEqualTo("RUNNER_TASK_PENDING");
+        // One look before the wait, then one per poll: the outer net is still there.
+        verify(fixture.runner(), times(4)).taskOutcome(RESULT, "CREATE_PR");
+    }
+
     private PullRequestFixture pullRequestFixture(String repository) {
         return pullRequestFixture(repository, repository);
     }
@@ -2111,7 +2163,18 @@ class CodingHandlerStageServiceTest {
      * <p>{@code jobRepository} and the runner receipt are separate arguments on purpose: the
      * stage has to notice when the receipt names a repository the Job does not work in.
      */
-    private PullRequestFixture pullRequestFixture(String repository, String receiptRepository) {
+    private PullRequestFixture pullRequestFixture(
+            String repository, String receiptRepository) {
+        return pullRequestFixture(
+                repository, receiptRepository, 120, Duration.ofMillis(500));
+    }
+
+    /** The last two arguments shorten the runner wait so a test need not sit through it. */
+    private PullRequestFixture pullRequestFixture(
+            String repository,
+            String receiptRepository,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
         ObjectMapper mapper = new ObjectMapper();
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
@@ -2122,7 +2185,7 @@ class CodingHandlerStageServiceTest {
                 mock(ProfileModelBindingService.class),
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC), maxRunnerPolls, runnerPollInterval);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),

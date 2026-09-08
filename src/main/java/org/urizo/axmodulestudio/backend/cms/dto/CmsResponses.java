@@ -31,6 +31,18 @@ public final class CmsResponses {
             Instant updatedAt) {
     }
 
+    /**
+     * 업로드 응답. 화면은 {@code id}로 본문에 넣을 주소를 만든다.
+     *
+     * <p>바이트는 담지 않는다. 이 기록은 JSON으로 나가고 바이트는 조회 경로가 따로 내보낸다.
+     */
+    public record ContentImageView(long id, String contentType, int byteSize) {
+    }
+
+    /** 조회 경로가 그대로 내보내는 바이트. JSON으로 직렬화하지 않는다. */
+    public record ContentImageBytes(String contentType, byte[] bytes) {
+    }
+
     public record BoardView(
             long id,
             String name,

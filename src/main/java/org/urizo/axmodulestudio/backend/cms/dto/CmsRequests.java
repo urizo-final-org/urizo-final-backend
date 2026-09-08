@@ -19,9 +19,15 @@ public final class CmsRequests {
             Long targetId) {
     }
 
+    /**
+     * 컨텐츠와 게시물이 함께 쓴다.
+     *
+     * <p>본문 상한은 컨텐츠가 Tiptap Document(JSON)로 저장되면서 올렸다. 같은 글이라도 부품과
+     * 속성이 붙어 마크다운의 여러 배가 된다. 게시물은 마크다운 그대로라 여유가 늘어날 뿐이다.
+     */
     public record ArticleRequest(
             @NotBlank @Size(max = 200) String title,
-            @NotBlank @Size(max = 20000) String body) {
+            @NotBlank @Size(max = 200000) String body) {
     }
 
     public record BoardRequest(

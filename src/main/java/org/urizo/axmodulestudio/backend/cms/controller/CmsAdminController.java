@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.cms.controller;
 
+import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 
@@ -16,13 +17,16 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.ArticleRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.BoardRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.MenuRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.TemplateRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MemberView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
@@ -104,6 +108,19 @@ public class CmsAdminController {
     ResponseEntity<Void> deleteContent(@PathVariable long id) {
         cms.deleteContent(id);
         return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * 컨텐츠 본문에 넣을 이미지를 올린다.
+     *
+     * <p>경로가 {@code /api/cms}라 관리자 권한 규칙이 그대로 적용된다. 응답의 {@code id}로
+     * 화면이 본문에 넣을 조회 주소를 만든다. 조회는 방문자도 봐야 하므로 {@code /api/site} 쪽에 있다.
+     */
+    @PostMapping("/images")
+    ContentImageView uploadImage(
+            Authentication authentication, @RequestParam("file") MultipartFile file)
+            throws IOException {
+        return cms.createContentImage(actor(authentication).actorId(), file.getBytes());
     }
 
     @GetMapping("/boards")

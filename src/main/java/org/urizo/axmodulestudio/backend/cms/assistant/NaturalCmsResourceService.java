@@ -26,6 +26,7 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
+import org.urizo.axmodulestudio.backend.cms.service.ContentBody;
 
 /**
  * Resource 타입별 상태 조회·검증·반영을 한 곳에 모은다.
@@ -109,8 +110,13 @@ public final class NaturalCmsResourceService {
     public JsonNode validateCommand(
             NaturalCmsContract.ResourceRef resource, JsonNode command) {
         ResourceHandler<?> handler = handler(resource);
-        validated(handler, resource.id(), parse(resource.type(), handler, command, null));
-        return command.deepCopy();
+        // 다듬은 뒤 검사한다. 검사한 것과 기록에 남는 것이 같아야 승인한 것이 반영된다.
+        JsonNode recorded = command.deepCopy();
+        if (recorded.path("fields") instanceof ObjectNode fields) {
+            handler.normalize(fields);
+        }
+        validated(handler, resource.id(), parse(resource.type(), handler, recorded, null));
+        return recorded;
     }
 
     /**
@@ -313,6 +319,15 @@ public final class NaturalCmsResourceService {
         /** 모델에게 줄 참고 목록. 없으면 {@code null}. */
         default ObjectNode promptContext(String id) {
             return null;
+        }
+
+        /**
+         * 기록에 남길 명령을 다듬는다. 손댈 것이 없는 리소스가 기본값이다.
+         *
+         * <p>이 결과가 미리보기에 그대로 보이고 승인 뒤 반영된다. 모델이 보낸 모양과 실제
+         * 저장되는 모양이 다르면 사람은 승인할 것을 못 보고 승인하게 된다.
+         */
+        default void normalize(ObjectNode fields) {
         }
     }
 
@@ -834,6 +849,20 @@ public final class NaturalCmsResourceService {
             return state;
         }
 
+        /**
+         * 모델이 문서를 한 번 더 escape 해 보내면 되돌린 뒤 기록한다.
+         *
+         * <p>되돌리기 전 값은 문서가 아니라 긴 글자라, 미리보기가 부품 이름이 늘어선 원문을
+         * 그대로 보여 준다. 반영되는 것과 같은 모양을 보고 승인해야 한다.
+         */
+        @Override
+        public void normalize(ObjectNode fields) {
+            JsonNode body = fields.get("body");
+            if (body != null && body.isTextual()) {
+                fields.put("body", ContentBody.normalize(body.textValue()));
+            }
+        }
+
         @Override
         public CmsRequests.ArticleRequest merged(Command command, String id) {
             JsonNode fields = command.fields();
@@ -864,10 +893,20 @@ public final class NaturalCmsResourceService {
                     numericId(id, "CONTENT"), request.title(), request.body()));
         }
 
+        /**
+         * 컨텐츠 본문은 편집기가 만든 문서만 받는다.
+         *
+         * <p>게시물의 마크다운 3문법 검사를 대신하는 가드레일이다. 모델이 구조를 틀리게 만들면
+         * 여기서 거부되고 Job은 반려로 정상 종료된다. 잘못된 본문이 저장되는 경로는 없다.
+         */
         private CmsRequests.ArticleRequest article(
                 JsonNode fields, String currentTitle, String currentBody) {
-            String body = text(fields, "body", currentBody);
-            requireSupportedMarkdown(body);
+            // 모델이 문서를 한 번 더 escape 해 보내는 일이 있어 되돌린 뒤 검사한다.
+            String body = ContentBody.normalize(text(fields, "body", currentBody));
+            String problem = ContentBody.problem(body);
+            if (problem != null) {
+                throw invalidCommand(problem);
+            }
             return new CmsRequests.ArticleRequest(text(fields, "title", currentTitle), body);
         }
     }

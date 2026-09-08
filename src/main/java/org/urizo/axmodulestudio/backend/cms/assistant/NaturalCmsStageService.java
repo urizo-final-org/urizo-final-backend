@@ -14,6 +14,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
@@ -35,6 +37,8 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
 @ConditionalOnProperty(
         prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class NaturalCmsStageService {
+
+    private static final Logger log = LoggerFactory.getLogger(NaturalCmsStageService.class);
 
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
     private static final Set<String> RESOURCE_METADATA_FIELDS =
@@ -163,8 +167,8 @@ public final class NaturalCmsStageService {
                 || !"validate_cms_command".equals(response.toolCalls().get(0).name())) {
             throw contract("Natural CMS Model must return one validate_cms_command Tool Call.");
         }
-        JsonNode command = resources.validateCommand(
-                job.resource(), response.toolCalls().get(0).arguments().path("command"));
+        JsonNode command = validatedCommand(
+                job, response.toolCalls().get(0).arguments().path("command"));
 
         ObjectNode targetArguments = baseArguments(job.resource(), currentState);
         callTool("resolve_cms_target", targetArguments, allowedTools);
@@ -384,14 +388,31 @@ public final class NaturalCmsStageService {
                     + " A board that still has posts cannot be deleted.";
         }
         if ("CONTENT".equals(resourceType)) {
+            // 본문이 Tiptap Document(JSON)다. 모델이 트리를 지어내지 않도록 현재 문서를 고쳐
+            // 쓰게 하고, 쓸 수 있는 부품을 이름으로 못박는다. 틀린 구조는 서버가 거부한다.
             return "Create one CONTENT command with operation CREATE, UPDATE or DELETE. "
                     + "Call validate_cms_command exactly once with that command. "
                     + "fields may use only names from editableFields."
                     + changedFieldsOnly
-                    + " CREATE sends title and body."
-                    + emptyDelete
-                    + " A body may use headings (##), emphasis (**text**) and list"
-                    + " items (-) only.";
+                    + " The body field is a ProseMirror document serialised as a JSON string,"
+                    + " the same shape currentState.body already has. Start from that document,"
+                    + " change only the parts the request asks for and keep everything else"
+                    + " exactly as it is, then send the whole document back as one JSON string."
+                    + " A document is {\"type\":\"doc\",\"content\":[...]} and its nodes may only"
+                    + " be paragraph, heading, bulletList, orderedList, listItem, text, image and"
+                    + " hardBreak; a text node may carry bold, italic or link marks."
+                    + " A heading uses attrs.level 2 or 3."
+                    + " A picture is an image node, never a link and never plain text: write"
+                    + " {\"type\":\"image\",\"attrs\":{\"src\":\"...\",\"alt\":\"short description\"}}"
+                    + " as its own node in content."
+                    + " An image src must be one that already appears in currentState.body or that"
+                    + " the request text lists as an attached image. When the request attaches an"
+                    + " image, place it as an image node with that exact src. Never invent a src."
+                    + " A mark is written as {\"type\":\"bold\"} or"
+                    + " {\"type\":\"link\",\"attrs\":{\"href\":\"...\"}}; never use the mark name as"
+                    + " the key."
+                    + " CREATE sends title and body, and its body is a new document."
+                    + emptyDelete;
         }
         if (!"MENU".equals(resourceType)) {
             return "Create one " + resourceType + " UPDATE command. "
@@ -452,9 +473,19 @@ public final class NaturalCmsStageService {
         else if ("CONTENT".equals(resource.type())) {
             // 컨텐츠 삭제에는 조건이 없다. 삭제하면 그 컨텐츠를 연결한 메뉴가 `연결 없음`이 될 뿐이고
             // 그 정리는 기존 CMS가 한다. 조건이 없으니 판단할 참고 값도 주지 않는다.
+            //
+            // 이미지는 사람이 올린다. 화면이 먼저 올려 요청에 주소를 실어 주므로 그 사진을
+            // 넣는 것도 범위 안이다. 모델이 어디선가 가져오는 것만 범위 밖이다.
+            //
+            // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 범위에 `놓기`만 있어 모델이 업로드를
+            // 화면 밖 일로 읽었다. 사람이 쓰는 말과 실제 하는 일을 이어 준다.
             scope = "static content pages only: creating a content page, changing the selected "
-                    + "page's title and body, and deleting the selected page";
-            excluded = "writing posts, boards, menus, templates and members";
+                    + "page's title and body, and deleting the selected page. Placing, moving or "
+                    + "removing an image the body already contains or the request attaches is "
+                    + "included. An attached image has already been uploaded, so asking to "
+                    + "upload, put up or add it means placing it in the body and stays feasible";
+            excluded = "finding an image that was neither attached nor already in the body, "
+                    + "writing posts, boards, menus, templates and members";
         }
         // 남은 기본값은 이제 템플릿 전용이다. 컨텐츠 분기를 새로 만들었으므로 여기는 건드리지 않는다.
         return "Decide whether this request can be done on this screen. Return only JSON with "
@@ -466,6 +497,29 @@ public final class NaturalCmsStageService {
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation."
                 + note;
+    }
+
+    /**
+     * 거부된 명령을 로그에 남기고 그대로 다시 던진다.
+     *
+     * <p>명령 단계 예외는 Handler 결과로 기록되지 않아 Job이 {@code ACTIVE}로 남고 화면은
+     * `미리보기를 받지 못했습니다`로 끝난다. 무엇이 왜 거부됐는지 남는 곳이 없으면 원인을 찾을
+     * 방법이 없다. 명령서에는 관리자가 쓴 CMS 내용만 들어 있고 Secret은 없다.
+     */
+    private JsonNode validatedCommand(
+            NaturalCmsContract.JobResponse job, JsonNode proposal) {
+        try {
+            return resources.validateCommand(job.resource(), proposal);
+        }
+        catch (NaturalCmsException failure) {
+            String command = encode(proposal);
+            log.warn("Natural CMS rejected a model command: jobId={} resource={}:{} code={} "
+                            + "reason={} command={}",
+                    job.jobId(), job.resource().type(), job.resource().id(),
+                    failure.code(), failure.getMessage(),
+                    command.length() > 2000 ? command.substring(0, 2000) + "…" : command);
+            throw failure;
+        }
     }
 
     private JsonNode callTool(

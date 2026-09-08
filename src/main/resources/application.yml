@@ -22,6 +22,12 @@ spring:
   jackson:
     deserialization:
       fail-on-unknown-properties: true
+  # 컨텐츠 본문 이미지 업로드. 기본값이 파일 1MB라 폰 사진이 앞단에서 막힌다.
+  # nginx client_max_body_size와 CmsService.MAX_IMAGE_BYTES도 같은 8MB에 맞춘다.
+  servlet:
+    multipart:
+      max-file-size: 8MB
+      max-request-size: 9MB
 
 server:
   shutdown: graceful

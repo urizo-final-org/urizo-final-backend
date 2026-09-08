@@ -6,6 +6,8 @@ import static org.urizo.axmodulestudio.backend.cms.service.CmsServiceException.n
 import java.util.List;
 import java.util.UUID;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -22,6 +24,8 @@ import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
 @Service
 @Profile("local-full")
 public class CmsService {
+
+    private static final Logger log = LoggerFactory.getLogger(CmsService.class);
 
     /** 폰 사진이 들어가는 선. nginx와 Spring multipart 상한도 이 값에 맞춘다. */
     private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -143,6 +147,10 @@ public class CmsService {
     private static void validateContentBody(String body) {
         String problem = ContentBody.problem(body);
         if (problem != null) {
+            // 무엇이 걸렸는지 남기지 않으면 화면에는 사유만 뜨고 원인을 찾을 수 없다.
+            // 자연어 경로에도 같은 로그가 있다. 본문에는 관리자가 쓴 내용만 있고 Secret은 없다.
+            log.warn("Content body rejected: reason={} body={}", problem,
+                    body != null && body.length() > 2000 ? body.substring(0, 2000) + "…" : body);
             throw invalidRequest(problem);
         }
     }

@@ -17,6 +17,7 @@ import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -34,6 +35,15 @@ class NaturalCmsResourceServiceTest {
 
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
+    /** 마크다운 3문법은 이제 게시물에만 남았다. 그 규칙을 확인하는 대상이다. */
+    private static final NaturalCmsContract.ResourceRef POST_RESOURCE =
+            new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12");
+
+    /** 컨텐츠 본문은 편집기가 만든 문서다. 문단 하나짜리 최소 문서를 만든다. */
+    private static String document(String text) {
+        return "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"" + text + "\"}]}]}";
+    }
     /** 반영 경로가 Job의 요청자를 그대로 받는다. 게시물 등록의 작성자로만 쓰인다. */
     private static final UUID AUTHOR =
             UUID.fromString("11111111-1111-4111-8111-111111111111");
@@ -56,10 +66,11 @@ class NaturalCmsResourceServiceTest {
         CmsRequestValidator validator = mock(CmsRequestValidator.class);
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, validator, mapper);
-        when(cms.content(7)).thenReturn(content("Old title", "Old body"));
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"title":"New title","body":"New body"}}
-                """);
+        when(cms.content(7)).thenReturn(content("Old title", document("Old body")));
+        ObjectNode command = mapper.createObjectNode().put("operation", "UPDATE");
+        command.putObject("fields")
+                .put("title", "New title")
+                .put("body", document("New body"));
 
         JsonNode validated = resources.validateCommand(RESOURCE, command);
 
@@ -68,17 +79,17 @@ class NaturalCmsResourceServiceTest {
                 ArgumentCaptor.forClass(CmsRequests.ArticleRequest.class);
         verify(validator).validate(request.capture());
         assertThat(request.getValue().title()).isEqualTo("New title");
-        assertThat(request.getValue().body()).isEqualTo("New body");
-        verify(cms, never()).updateContent(7, "New title", "New body");
+        assertThat(request.getValue().body()).isEqualTo(document("New body"));
+        verify(cms, never()).updateContent(7, "New title", document("New body"));
 
-        when(cms.updateContent(7, "New title", "New body"))
-                .thenReturn(content("New title", "New body"));
+        when(cms.updateContent(7, "New title", document("New body")))
+                .thenReturn(content("New title", document("New body")));
 
         JsonNode result = resources.apply(RESOURCE, command, AUTHOR);
 
         assertThat(result.path("id").asLong()).isEqualTo(7);
         assertThat(result.path("title").asText()).isEqualTo("New title");
-        verify(cms).updateContent(7, "New title", "New body");
+        verify(cms).updateContent(7, "New title", document("New body"));
     }
 
     @Test
@@ -87,16 +98,16 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
-        when(cms.content(7)).thenReturn(content("Old title", "Old body"));
-        when(cms.updateContent(7, "New title", "Old body"))
-                .thenReturn(content("New title", "Old body"));
+        when(cms.content(7)).thenReturn(content("Old title", document("Old body")));
+        when(cms.updateContent(7, "New title", document("Old body")))
+                .thenReturn(content("New title", document("Old body")));
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"title":"New title"}}
                 """);
 
         resources.apply(RESOURCE, command, AUTHOR);
 
-        verify(cms).updateContent(7, "New title", "Old body");
+        verify(cms).updateContent(7, "New title", document("Old body"));
     }
 
     @Test
@@ -127,18 +138,24 @@ class NaturalCmsResourceServiceTest {
                 .isInstanceOf(NaturalCmsException.class);
     }
 
+    /**
+     * 마크다운 3문법 제한은 게시물에만 남았다.
+     *
+     * <p>컨텐츠는 `AI05-016`으로 편집기 문서를 쓰게 되어 이 규칙을 타지 않는다.
+     */
     @Test
-    void acceptsTheThreeSupportedMarkdownForms() throws Exception {
+    void acceptsTheThreeSupportedMarkdownFormsInAPostBody() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
-        when(cms.content(7)).thenReturn(content("Old title", "Old body"));
+        when(cms.post(12)).thenReturn(post(12, 4, "공지", "본문"));
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"body":"## 제목\\n\\n**강조** 문구입니다.\\n\\n- 항목 하나\\n- 항목 둘"}}
                 """);
 
-        assertThatCode(() -> resources.validateCommand(RESOURCE, command)).doesNotThrowAnyException();
+        assertThatCode(() -> resources.validateCommand(POST_RESOURCE, command))
+                .doesNotThrowAnyException();
     }
 
     @ParameterizedTest
@@ -146,16 +163,16 @@ class NaturalCmsResourceServiceTest {
         "# 제목", "### 제목", "> 인용", "* 목록", "+ 목록", "1. 순서 목록",
         "```java", "| 표 |", "---", "![그림](/a.png)", "[링크](/a)",
     })
-    void rejectsMarkdownTheEditorCannotRender(String line) throws Exception {
+    void rejectsMarkdownTheEditorCannotRenderInAPostBody(String line) throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
-        when(cms.content(7)).thenReturn(content("Old title", "Old body"));
+        when(cms.post(12)).thenReturn(post(12, 4, "공지", "본문"));
         JsonNode command = mapper.valueToTree(java.util.Map.of(
                 "operation", "UPDATE", "fields", java.util.Map.of("body", "본문\n" + line)));
 
-        assertThatThrownBy(() -> resources.validateCommand(RESOURCE, command))
+        assertThatThrownBy(() -> resources.validateCommand(POST_RESOURCE, command))
                 .isInstanceOf(NaturalCmsException.class)
                 .hasMessageContaining("headings (##)");
     }
@@ -415,39 +432,78 @@ class NaturalCmsResourceServiceTest {
     void createsAContentAndKeepsTheRequesterAsAuthor() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
-        when(cms.createContent(AUTHOR, "채용 안내", "## 모집\n\n- 개발자"))
-                .thenReturn(content("채용 안내", "## 모집\n\n- 개발자"));
+        when(cms.createContent(AUTHOR, "채용 안내", document("모집합니다")))
+                .thenReturn(content("채용 안내", document("모집합니다")));
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
-        JsonNode command = mapper.readTree("""
-                {"operation":"CREATE","fields":{"title":"채용 안내",
-                 "body":"## 모집\\n\\n- 개발자"}}
-                """);
+        ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
+        command.putObject("fields")
+                .put("title", "채용 안내")
+                .put("body", document("모집합니다"));
 
         JsonNode created = resources.apply(
                 new NaturalCmsContract.ResourceRef("CONTENT", "new"), command, AUTHOR);
 
         assertThat(created.path("id").asLong()).isEqualTo(7);
         // 등록은 현재 값이 없다. 기존 행을 읽지 않는다.
-        verify(cms).createContent(AUTHOR, "채용 안내", "## 모집\n\n- 개발자");
+        verify(cms).createContent(AUTHOR, "채용 안내", document("모집합니다"));
         verify(cms, never()).content(anyLong());
     }
 
-    /** 등록 경로도 수정과 같은 문법 검사를 탄다. 검증과 반영이 같은 merged를 쓰기 때문이다. */
+    /**
+     * 등록 경로도 수정과 같은 문서 검사를 탄다. 검증과 반영이 같은 merged를 쓰기 때문이다.
+     *
+     * <p>모델이 구조를 틀리게 만들면 여기서 거부되고 Job은 반려로 정상 종료된다.
+     */
     @Test
-    void refusesANewContentBodyThatUsesUnsupportedMarkdown() throws Exception {
+    void refusesAContentBodyThatIsNotAnEditorDocument() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
-        JsonNode command = mapper.readTree("""
-                {"operation":"CREATE","fields":{"title":"안내","body":"1. 첫째"}}
-                """);
+        ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
+        command.putObject("fields").put("title", "안내").put("body", "## 모집\n\n- 개발자");
 
         assertThatThrownBy(() -> resources.validateCommand(
                 new NaturalCmsContract.ResourceRef("CONTENT", "new"), command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("headings (##)");
+                .hasMessageContaining("편집기가 만든 문서");
+        verify(cms, never()).createContent(any(), any(), any());
+    }
+
+    @Test
+    void refusesAContentDocumentThatUsesANodeTheRendererCannotDraw() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
+        command.putObject("fields").put("title", "안내").put("body",
+                "{\"type\":\"doc\",\"content\":[{\"type\":\"table\",\"content\":[]}]}");
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("CONTENT", "new"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("쓸 수 없는");
+        verify(cms, never()).createContent(any(), any(), any());
+    }
+
+    /** 이미지는 우리가 저장한 것만 가리킨다. 외부 주소는 저장 전에 막는다. */
+    @Test
+    void refusesAContentImageThatPointsOutsideThisCms() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsResourceService resources =
+                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
+        command.putObject("fields").put("title", "안내").put("body",
+                "{\"type\":\"doc\",\"content\":[{\"type\":\"image\",\"attrs\":"
+                        + "{\"src\":\"https://example.test/a.png\"}}]}");
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("CONTENT", "new"), command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("올린 것만");
         verify(cms, never()).createContent(any(), any(), any());
     }
 

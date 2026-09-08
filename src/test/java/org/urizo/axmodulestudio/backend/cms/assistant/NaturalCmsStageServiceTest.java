@@ -463,19 +463,27 @@ class NaturalCmsStageServiceTest {
                 .contains("headings (##)");
     }
 
-    /** 컨텐츠도 등록·삭제까지 열렸다. 게시판과 달리 삭제에 붙는 조건이 없다. */
+    /**
+     * 컨텐츠는 등록·삭제까지 열렸고, 본문이 편집기 문서다.
+     *
+     * <p>모델이 트리를 지어내지 않도록 현재 문서를 고쳐 쓰게 하고 쓸 수 있는 부품을 못박는다.
+     * 게시판과 달리 삭제에 붙는 조건은 없다.
+     */
     @Test
-    void contentCommandPromptOpensCreateAndDeleteWithoutADeleteCondition() throws Exception {
+    void contentCommandPromptNamesTheDocumentShapeAndKeepsImagesAsTheyAre() throws Exception {
         NaturalCmsContract.ResourceRef content =
                 new NaturalCmsContract.ResourceRef("CONTENT", "7");
         ObjectNode state = new ObjectMapper().createObjectNode()
-                .put("id", 7).put("title", "회사 소개").put("body", "## 소개");
+                .put("id", 7).put("title", "회사 소개")
+                .put("body", "{\"type\":\"doc\",\"content\":[]}");
 
         assertThat(commandPrompt(content, state))
                 .contains("Create one CONTENT command with operation CREATE, UPDATE or DELETE")
+                .contains("ProseMirror document serialised as a JSON string")
+                .contains("change only the parts the request asks for")
+                .contains("Never invent an image")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")
-                .contains("headings (##)")
                 .doesNotContain("cannot be deleted");
     }
 

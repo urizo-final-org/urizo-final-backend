@@ -384,14 +384,24 @@ public final class NaturalCmsStageService {
                     + " A board that still has posts cannot be deleted.";
         }
         if ("CONTENT".equals(resourceType)) {
+            // 본문이 Tiptap Document(JSON)다. 모델이 트리를 지어내지 않도록 현재 문서를 고쳐
+            // 쓰게 하고, 쓸 수 있는 부품을 이름으로 못박는다. 틀린 구조는 서버가 거부한다.
             return "Create one CONTENT command with operation CREATE, UPDATE or DELETE. "
                     + "Call validate_cms_command exactly once with that command. "
                     + "fields may use only names from editableFields."
                     + changedFieldsOnly
-                    + " CREATE sends title and body."
-                    + emptyDelete
-                    + " A body may use headings (##), emphasis (**text**) and list"
-                    + " items (-) only.";
+                    + " The body field is a ProseMirror document serialised as a JSON string,"
+                    + " the same shape currentState.body already has. Start from that document,"
+                    + " change only the parts the request asks for and keep everything else"
+                    + " exactly as it is, then send the whole document back as one JSON string."
+                    + " A document is {\"type\":\"doc\",\"content\":[...]} and its nodes may only"
+                    + " be paragraph, heading, bulletList, orderedList, listItem, text, image and"
+                    + " hardBreak; a text node may carry bold, italic or link marks."
+                    + " A heading uses attrs.level 2 or 3."
+                    + " Never invent an image: keep the image nodes that are already there with"
+                    + " their src unchanged, and never write a src of your own."
+                    + " CREATE sends title and body, and its body is a new document."
+                    + emptyDelete;
         }
         if (!"MENU".equals(resourceType)) {
             return "Create one " + resourceType + " UPDATE command. "
@@ -452,9 +462,14 @@ public final class NaturalCmsStageService {
         else if ("CONTENT".equals(resource.type())) {
             // 컨텐츠 삭제에는 조건이 없다. 삭제하면 그 컨텐츠를 연결한 메뉴가 `연결 없음`이 될 뿐이고
             // 그 정리는 기존 CMS가 한다. 조건이 없으니 판단할 참고 값도 주지 않는다.
+            //
+            // 이미지는 사람이 올린다. 본문에 이미 있는 이미지를 옮기거나 빼는 것은 범위 안이고,
+            // 새 이미지를 만들거나 가져오는 것은 범위 밖이다.
             scope = "static content pages only: creating a content page, changing the selected "
-                    + "page's title and body, and deleting the selected page";
-            excluded = "writing posts, boards, menus, templates and members";
+                    + "page's title and body, and deleting the selected page. Moving or removing "
+                    + "an image that the body already contains is included";
+            excluded = "adding an image that is not already in the body, writing posts, boards, "
+                    + "menus, templates and members";
         }
         // 남은 기본값은 이제 템플릿 전용이다. 컨텐츠 분기를 새로 만들었으므로 여기는 건드리지 않는다.
         return "Decide whether this request can be done on this screen. Return only JSON with "

@@ -1,0 +1,122 @@
+package org.urizo.axmodulestudio.backend.cms.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+class ContentBodyTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * 옛 마크다운 본문은 읽는 입구에서만 문서로 바뀐다.
+     *
+     * <p>이 변환 하나로 관리자 화면·공개 사이트·자연어 Snapshot이 모두 문서를 받는다.
+     */
+    @Test
+    void turnsTheOldThreeMarkdownFormsIntoADocument() throws Exception {
+        JsonNode document = MAPPER.readTree(ContentBody.toDocument(
+                "## 회사 소개\n\n우리는 **바이오** 기업입니다.\n\n- 첫째\n- 둘째"));
+
+        assertThat(document.path("type").asText()).isEqualTo("doc");
+        JsonNode nodes = document.path("content");
+        assertThat(nodes.get(0).path("type").asText()).isEqualTo("heading");
+        assertThat(nodes.get(0).path("attrs").path("level").asInt()).isEqualTo(2);
+        assertThat(nodes.get(1).path("type").asText()).isEqualTo("paragraph");
+        assertThat(nodes.get(1).path("content").get(1).path("marks").get(0).path("type").asText())
+                .isEqualTo("bold");
+        // 연속된 목록 줄은 하나의 목록으로 묶는다.
+        assertThat(nodes.get(2).path("type").asText()).isEqualTo("bulletList");
+        assertThat(nodes.get(2).path("content")).hasSize(2);
+        assertThat(nodes).hasSize(3);
+    }
+
+    @Test
+    void leavesADocumentAloneSoConvertedRowsAreNotTouchedAgain() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\"}]}";
+
+        assertThat(ContentBody.toDocument(document)).isEqualTo(document);
+    }
+
+    @Test
+    void acceptsTheNodesTheRendererCanDraw() {
+        String document = "{\"type\":\"doc\",\"content\":["
+                + "{\"type\":\"heading\",\"attrs\":{\"level\":3},\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"소개\"}]},"
+                + "{\"type\":\"paragraph\",\"content\":[{\"type\":\"text\",\"text\":\"본문\","
+                + "\"marks\":[{\"type\":\"link\",\"attrs\":{\"href\":\"https://a.test\"}}]}]},"
+                + "{\"type\":\"image\",\"attrs\":{\"src\":\"/api/site/images/12\",\"alt\":\"전경\"}}"
+                + "]}";
+
+        assertThat(ContentBody.problem(document)).isNull();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "## 제목",
+        "그냥 글자",
+        "[]",
+        "{\"type\":\"paragraph\"}",
+        "{\"type\":\"doc\"}",
+        "{\"type\":\"doc\",\"content\":[]}",
+    })
+    void refusesAnythingThatIsNotAFilledDocument(String body) {
+        assertThat(ContentBody.problem(body)).isNotNull();
+    }
+
+    @Test
+    void refusesANodeTheRendererCannotDraw() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"table\",\"content\":[]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("쓸 수 없는");
+    }
+
+    /** 문서 제목은 별도 필드다. 본문 제목은 2·3단계만 쓴다. */
+    @Test
+    void refusesAHeadingLevelTheSiteDoesNotRender() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"heading\","
+                + "\"attrs\":{\"level\":1},\"content\":[]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("2단계와 3단계");
+    }
+
+    /** 외부 주소를 열면 방문자 접속 기록이 남의 서버로 새어 나간다. */
+    @Test
+    void refusesAnImageThatIsNotStoredInThisCms() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"image\","
+                + "\"attrs\":{\"src\":\"https://example.test/a.png\"}}]}";
+
+        assertThat(ContentBody.problem(document)).contains("올린 것만");
+    }
+
+    @Test
+    void refusesALinkThatIsNotHttpOrASitePath() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"클릭\",\"marks\":[{\"type\":\"link\","
+                + "\"attrs\":{\"href\":\"javascript:alert(1)\"}}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("링크 주소");
+    }
+
+    @Test
+    void refusesAMarkTheRendererCannotDraw() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"본문\","
+                + "\"marks\":[{\"type\":\"strike\"}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("서식");
+    }
+
+    /** 변환한 문서는 그대로 저장 검사를 통과해야 한다. 옛 본문이 열자마자 막히면 안 된다. */
+    @Test
+    void keepsConvertedMarkdownAcceptableToTheSaveCheck() {
+        String converted = ContentBody.toDocument(
+                "## 회사 소개\n\n우리는 **바이오** 기업입니다.\n\n- 첫째");
+
+        assertThat(ContentBody.problem(converted)).isNull();
+    }
+}

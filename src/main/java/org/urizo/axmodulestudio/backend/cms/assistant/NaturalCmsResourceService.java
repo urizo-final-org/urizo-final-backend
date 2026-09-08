@@ -26,6 +26,7 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
+import org.urizo.axmodulestudio.backend.cms.service.ContentBody;
 
 /**
  * Resource 타입별 상태 조회·검증·반영을 한 곳에 모은다.
@@ -864,10 +865,19 @@ public final class NaturalCmsResourceService {
                     numericId(id, "CONTENT"), request.title(), request.body()));
         }
 
+        /**
+         * 컨텐츠 본문은 편집기가 만든 문서만 받는다.
+         *
+         * <p>게시물의 마크다운 3문법 검사를 대신하는 가드레일이다. 모델이 구조를 틀리게 만들면
+         * 여기서 거부되고 Job은 반려로 정상 종료된다. 잘못된 본문이 저장되는 경로는 없다.
+         */
         private CmsRequests.ArticleRequest article(
                 JsonNode fields, String currentTitle, String currentBody) {
             String body = text(fields, "body", currentBody);
-            requireSupportedMarkdown(body);
+            String problem = ContentBody.problem(body);
+            if (problem != null) {
+                throw invalidCommand(problem);
+            }
             return new CmsRequests.ArticleRequest(text(fields, "title", currentTitle), body);
         }
     }

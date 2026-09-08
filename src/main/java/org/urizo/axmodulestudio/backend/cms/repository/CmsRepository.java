@@ -12,6 +12,8 @@ import org.urizo.axmodulestudio.backend.auth.entity.AdminAccountEntity;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminRole;
 import org.urizo.axmodulestudio.backend.auth.repository.AdminAccountRepository;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageBytes;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MemberView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
@@ -19,6 +21,7 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.entity.CmsBoardEntity;
 import org.urizo.axmodulestudio.backend.cms.entity.CmsContentEntity;
+import org.urizo.axmodulestudio.backend.cms.entity.CmsContentImageEntity;
 import org.urizo.axmodulestudio.backend.cms.entity.CmsMenuEntity;
 import org.urizo.axmodulestudio.backend.cms.entity.CmsPostEntity;
 import org.urizo.axmodulestudio.backend.cms.entity.CmsTemplateEntity;
@@ -33,6 +36,7 @@ public class CmsRepository {
     private final AdminAccountRepository accountRepository;
     private final CmsMenuJpaRepository menuRepository;
     private final CmsContentJpaRepository contentRepository;
+    private final CmsContentImageJpaRepository contentImageRepository;
     private final CmsBoardJpaRepository boardRepository;
     private final CmsPostJpaRepository postRepository;
     private final CmsTemplateJpaRepository templateRepository;
@@ -41,12 +45,14 @@ public class CmsRepository {
             AdminAccountRepository accountRepository,
             CmsMenuJpaRepository menuRepository,
             CmsContentJpaRepository contentRepository,
+            CmsContentImageJpaRepository contentImageRepository,
             CmsBoardJpaRepository boardRepository,
             CmsPostJpaRepository postRepository,
             CmsTemplateJpaRepository templateRepository) {
         this.accountRepository = accountRepository;
         this.menuRepository = menuRepository;
         this.contentRepository = contentRepository;
+        this.contentImageRepository = contentImageRepository;
         this.boardRepository = boardRepository;
         this.postRepository = postRepository;
         this.templateRepository = templateRepository;
@@ -130,6 +136,19 @@ public class CmsRepository {
             content.softDelete(Instant.now());
             return 1;
         }).orElse(0);
+    }
+
+    public ContentImageView insertContentImage(UUID authorId, String contentType, byte[] bytes) {
+        AdminAccountEntity author = accountRepository.getReferenceById(authorId);
+        CmsContentImageEntity saved = contentImageRepository.save(
+                new CmsContentImageEntity(author, contentType, bytes, Instant.now()));
+        return new ContentImageView(
+                saved.getImageId(), saved.getContentType(), saved.getByteSize());
+    }
+
+    public Optional<ContentImageBytes> findContentImage(long id) {
+        return contentImageRepository.findById(id)
+                .map(image -> new ContentImageBytes(image.getContentType(), image.getBytes()));
     }
 
     public List<BoardView> findBoards() {

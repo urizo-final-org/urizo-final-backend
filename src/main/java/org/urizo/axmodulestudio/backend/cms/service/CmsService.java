@@ -10,6 +10,8 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageBytes;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MemberView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
@@ -20,6 +22,9 @@ import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
 @Service
 @Profile("local-full")
 public class CmsService {
+
+    /** 폰 사진이 들어가는 선. nginx와 Spring multipart 상한도 이 값에 맞춘다. */
+    private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
     private final CmsRepository repository;
 
@@ -89,27 +94,110 @@ public class CmsService {
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
     public List<ContentView> contents() {
-        return repository.findContents();
+        return repository.findContents().stream().map(CmsService::asDocument).toList();
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
     public ContentView content(long id) {
-        return repository.findContent(id).orElseThrow(() -> notFound("콘텐츠를 찾을 수 없습니다."));
+        return repository.findContent(id).map(CmsService::asDocument)
+                .orElseThrow(() -> notFound("콘텐츠를 찾을 수 없습니다."));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView createContent(UUID authorId, String title, String body) {
         validateArticle(title, body);
+        validateContentBody(body);
         return content(repository.insertContent(authorId, title.trim(), body));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView updateContent(long id, String title, String body) {
         validateArticle(title, body);
+        validateContentBody(body);
         if (repository.updateContent(id, title.trim(), body) == 0) {
             throw notFound("콘텐츠를 찾을 수 없습니다.");
         }
         return content(id);
+    }
+
+    /**
+     * 읽는 입구에서 옛 마크다운 본문을 Document JSON으로 바꾼다.
+     *
+     * <p>관리자 화면·공개 사이트·자연어 Snapshot이 모두 이 메서드를 지나므로 한 곳만 두면 된다.
+     * 어느 경로로든 저장되는 순간 DB도 JSON이 되어 변환은 저절로 끝난다.
+     */
+    private static ContentView asDocument(ContentView view) {
+        String document = ContentBody.toDocument(view.body());
+        return document.equals(view.body()) ? view : new ContentView(
+                view.id(), view.authorId(), view.authorName(), view.title(), document,
+                view.createdAt(), view.updatedAt());
+    }
+
+    /**
+     * 컨텐츠 본문은 편집기가 만든 문서만 받는다. 마크다운 3문법 제한을 대신하는 가드레일이다.
+     *
+     * <p>게시물은 이 검사를 타지 않는다. 마크다운을 그대로 쓴다.
+     */
+    private static void validateContentBody(String body) {
+        String problem = ContentBody.problem(body);
+        if (problem != null) {
+            throw invalidRequest(problem);
+        }
+    }
+
+    /**
+     * 컨텐츠 본문에 넣을 이미지를 저장한다.
+     *
+     * <p>형식은 파일 앞부분 바이트로 직접 확인한다. 확장자와 요청이 알려준 타입은 믿지 않는다.
+     * SVG는 그 안에 스크립트를 담을 수 있어 허용 목록에서 뺐다.
+     */
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ContentImageView createContentImage(UUID authorId, byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            throw invalidRequest("이미지가 비어 있습니다.");
+        }
+        if (bytes.length > MAX_IMAGE_BYTES) {
+            throw invalidRequest("이미지는 " + (MAX_IMAGE_BYTES / (1024 * 1024)) + "MB까지 올릴 수 있습니다.");
+        }
+        String contentType = detectImageType(bytes);
+        if (contentType == null) {
+            throw invalidRequest("JPG, PNG, WebP 이미지만 올릴 수 있습니다.");
+        }
+        return repository.insertContentImage(authorId, contentType, bytes);
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
+    public ContentImageBytes contentImage(long id) {
+        return repository.findContentImage(id)
+                .orElseThrow(() -> notFound("이미지를 찾을 수 없습니다."));
+    }
+
+    /** 파일 앞부분 바이트로 실제 형식을 가린다. 목록에 없으면 {@code null}이다. */
+    private static String detectImageType(byte[] bytes) {
+        if (startsWith(bytes, 0, 0xFF, 0xD8, 0xFF)) {
+            return "image/jpeg";
+        }
+        if (startsWith(bytes, 0, 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)) {
+            return "image/png";
+        }
+        // WebP는 RIFF 컨테이너다. 앞 네 바이트가 RIFF이고 8번째부터 WEBP가 온다.
+        if (startsWith(bytes, 0, 0x52, 0x49, 0x46, 0x46)
+                && startsWith(bytes, 8, 0x57, 0x45, 0x42, 0x50)) {
+            return "image/webp";
+        }
+        return null;
+    }
+
+    private static boolean startsWith(byte[] bytes, int offset, int... expected) {
+        if (bytes.length < offset + expected.length) {
+            return false;
+        }
+        for (int index = 0; index < expected.length; index++) {
+            if ((bytes[offset + index] & 0xFF) != expected[index]) {
+                return false;
+            }
+        }
+        return true;
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")

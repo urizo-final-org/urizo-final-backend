@@ -483,9 +483,11 @@ class NaturalCmsStageServiceTest {
                 .contains("Create one CONTENT command with operation CREATE, UPDATE or DELETE")
                 .contains("ProseMirror document serialised as a JSON string")
                 .contains("change only the parts the request asks for")
+                .contains("A picture is an image node, never a link")
                 .contains("already appears in currentState.body")
                 .contains("lists as an attached image")
-                .contains("never invent one")
+                .contains("Never invent a src")
+                .contains("never use the mark name as the key")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")
                 .doesNotContain("cannot be deleted");

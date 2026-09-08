@@ -402,9 +402,15 @@ public final class NaturalCmsStageService {
                     + " be paragraph, heading, bulletList, orderedList, listItem, text, image and"
                     + " hardBreak; a text node may carry bold, italic or link marks."
                     + " A heading uses attrs.level 2 or 3."
-                    + " An image node's src must be one that already appears in currentState.body"
-                    + " or that the request text lists as an attached image. Keep the src exactly"
-                    + " as written and never invent one."
+                    + " A picture is an image node, never a link and never plain text: write"
+                    + " {\"type\":\"image\",\"attrs\":{\"src\":\"...\",\"alt\":\"short description\"}}"
+                    + " as its own node in content."
+                    + " An image src must be one that already appears in currentState.body or that"
+                    + " the request text lists as an attached image. When the request attaches an"
+                    + " image, place it as an image node with that exact src. Never invent a src."
+                    + " A mark is written as {\"type\":\"bold\"} or"
+                    + " {\"type\":\"link\",\"attrs\":{\"href\":\"...\"}}; never use the mark name as"
+                    + " the key."
                     + " CREATE sends title and body, and its body is a new document."
                     + emptyDelete;
         }

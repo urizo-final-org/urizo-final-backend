@@ -774,6 +774,17 @@ public final class CodingHandlerStageService {
         command.put("workspaceId", aggregate.workspaceId().toString());
         command.put("title", identity.systemWorkId() + " automated coding change");
         command.put("body", pullRequestBody(aggregate, identity, repository, requested));
+        // The preview and this export are the same folder on the host. PREVIEW_UP binds
+        // <workspace>/src into the preview container, and a second export cannot replace a
+        // directory Docker still holds - the copy fails with "File exists" on a path the host
+        // already deleted. The preview has also finished its job by now: the screen offers its
+        // link at the candidate approval and never again, and this runs only after someone
+        // approved GITHUB. Queued before CREATE_PR because the runner claims one pending row at
+        // a time in created order.
+        runner.enqueue(
+                UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down:" + resultId).getBytes(StandardCharsets.UTF_8)),
+                "PREVIEW_DOWN", objectMapper.createObjectNode());
         runner.enqueue(resultId, "CREATE_PR", command);
         CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
         if (runnerPending(outcome)) {

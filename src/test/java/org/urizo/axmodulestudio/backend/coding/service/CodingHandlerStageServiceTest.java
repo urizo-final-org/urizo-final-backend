@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -29,6 +30,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
@@ -2022,6 +2024,23 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT)))
                 .isInstanceOf(CodingWorkerException.class)
                 .hasMessageContaining("receipt");
+    }
+
+    @Test
+    void prCompletionTakesTheOverlappingPreviewDownBeforeExporting() {
+        PullRequestFixture fixture = pullRequestFixture("frontend");
+
+        fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+
+        // Order matters: the runner claims one pending row at a time, so the preview has to be
+        // queued down first or the export still meets the folder the preview holds.
+        InOrder order = inOrder(fixture.runner());
+        order.verify(fixture.runner())
+                .enqueue(any(UUID.class), eq("PREVIEW_DOWN"), any());
+        order.verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), any());
     }
 
     @Test

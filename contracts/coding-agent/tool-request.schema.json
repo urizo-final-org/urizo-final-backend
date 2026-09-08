@@ -95,7 +95,9 @@
           "additionalProperties": false,
           "required": ["path"],
           "properties": {
-            "path": { "$ref": "#/$defs/RelativePath" }
+            "path": { "$ref": "#/$defs/RelativePath" },
+            "startLine": { "type": "integer", "minimum": 1 },
+            "endLine": { "type": "integer", "minimum": 1 }
           }
         }
       }

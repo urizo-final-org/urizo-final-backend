@@ -1198,7 +1198,14 @@ public final class CodingHandlerStageService {
         JsonNode source = call.arguments();
         ObjectNode result = objectMapper.createObjectNode();
         switch (call.name()) {
-            case "read_file" -> result.put("path", source.path("path").asText());
+            case "read_file" -> {
+                result.put("path", source.path("path").asText());
+                for (String field : List.of("startLine", "endLine")) {
+                    if (source.has(field)) {
+                        result.put(field, source.path(field).asInt());
+                    }
+                }
+            }
             case "search_code" -> {
                 result.put("query", source.path("query").asText());
                 result.putArray("roots").add(source.path("scope").asText("."));
@@ -1407,7 +1414,16 @@ public final class CodingHandlerStageService {
                         + "request's own language - those match nothing. Do not rerun a "
                         + "search that already answered with a slight variation of itself, "
                         + "and do not reword a search that found nothing - open the most "
-                        + "likely file instead. Once the files to change are in hand, stop "
+                        + "likely file instead. When a search returns several matches, "
+                        // Jobs 06b2b251 and bcb6806b: the phrase to change also sat in a
+                        // 42,695-character test file, the model opened that first match,
+                        // and the turn died. The screen text lives in the source file.
+                        + "prefer the one in a source file - a match inside a test file "
+                        + "(*.test.*, *Test.java) is not the screen itself unless the "
+                        + "request is about tests. When read_file refuses a file as too "
+                        + "large, do not give up on it: call read_file again with "
+                        + "startLine and endLine around the match's line number. Once "
+                        + "the files to change are in hand, stop "
                         + "exploring and edit with apply_patch, sending path, oldText and "
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
@@ -1479,8 +1495,17 @@ public final class CodingHandlerStageService {
      */
     private static String toolDescription(String name) {
         return switch (name) {
-            case "read_file" -> "Read one repository-relative text file.";
-            case "search_code" -> "Search the repository for a literal string.";
+            case "read_file" -> "Read one repository-relative text file. Optional "
+                    + "startLine and endLine (1-based, inclusive) return only that line "
+                    + "range. A file larger than "
+                    + CodingToolService.MAX_READ_FILE_CONTENT_CHARACTERS + " characters "
+                    + "is refused unless a range is given, and the refusal names the "
+                    + "file's line count; search_code matches carry the line number to "
+                    + "aim at. A ranged result starts with one bracketed note line that "
+                    + "is not part of the file - never copy it into oldText.";
+            case "search_code" -> "Search the repository for a literal string. Each "
+                    + "match reports path, line and column; pass that line to "
+                    + "read_file's startLine/endLine to read just the region you need.";
             case "read_diff" -> "Read the workspace diff as it stands now.";
             case "apply_patch" -> "Edit the workspace, in either of two ways. "
                     + AFTER_READ_DIFF
@@ -1515,7 +1540,13 @@ public final class CodingHandlerStageService {
         ObjectNode properties = schema.putObject("properties");
         ArrayNode required = schema.putArray("required");
         switch (name) {
-            case "read_file" -> stringProperty(properties, required, "path");
+            case "read_file" -> {
+                stringProperty(properties, required, "path");
+                // The gateway's schema subset only accepts a bare {"type":"integer"}, so
+                // the 1-based lower bound lives in CodingToolService's refusal message.
+                properties.putObject("startLine").put("type", "integer");
+                properties.putObject("endLine").put("type", "integer");
+            }
             case "search_code" -> {
                 stringProperty(properties, required, "query");
                 properties.putObject("scope").put("type", "string");

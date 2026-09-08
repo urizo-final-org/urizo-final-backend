@@ -28,5 +28,6 @@ public interface RagOperations {
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category);
+            List<String> category,
+            String previousQuery);
 }

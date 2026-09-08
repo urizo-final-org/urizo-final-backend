@@ -209,8 +209,9 @@ public class ProductStore {
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category) {
-        return rag.query(chatbotId, traceId, request, category);
+            List<String> category,
+            String previousQuery) {
+        return rag.query(chatbotId, traceId, request, category, previousQuery);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID jobId, UUID traceId) {

@@ -388,6 +388,11 @@ public class CodingConsoleService {
      * <p>The rows are found by the workspace they were queued with, which is this Job: a queue
      * has no job column. Read through the connection this service already uses - it is the one
      * that writes those rows, so no grant is involved.
+     *
+     * <p>Whether the checks passed is answered separately from whether there is a link. They
+     * were one answer before, so a Job whose TEST failed while its preview was up and working
+     * had the link taken away - hiding the only thing a general administrator can judge, while
+     * leaving the approval button open.
      */
     static CodingConsoleContract.PreviewLink previewLink(
             List<RunnerRow> rows, boolean stageRecorded) {
@@ -396,18 +401,34 @@ public class CodingConsoleService {
             // older Job has none, and no evidence is not evidence of failure: it keeps the
             // answer it has always given.
             return new CodingConsoleContract.PreviewLink(
-                    stageRecorded, stageRecorded ? PREVIEW_URL : null, null);
+                    stageRecorded, stageRecorded ? PREVIEW_URL : null, null, null);
         }
-        RunnerRow failed = rows.stream()
+        // A failed check is reported whether or not the preview came up, because it is a fact
+        // about the result rather than about the link. Withholding the link over it hid the
+        // one thing the person approving is able to judge.
+        String checkFailure = rows.stream()
                 .filter(row -> "FAILED".equals(row.status()))
+                .filter(row -> "BUILD".equals(row.kind()) || "TEST".equals(row.kind()))
                 .findFirst()
+                .map(row -> blockedReason(row.kind()))
                 .orElse(null);
-        if (failed != null) {
-            return new CodingConsoleContract.PreviewLink(false, null, blockedReason(failed.kind()));
-        }
+
         boolean up = rows.stream()
                 .anyMatch(row -> "PREVIEW_UP".equals(row.kind()) && "SUCCEEDED".equals(row.status()));
-        return new CodingConsoleContract.PreviewLink(up, up ? PREVIEW_URL : null, null);
+        if (up) {
+            return new CodingConsoleContract.PreviewLink(true, PREVIEW_URL, checkFailure, null);
+        }
+        // Not up. Say so only when something actually failed; otherwise it is still being
+        // raised, and "잠시 기다리세요" is the honest answer.
+        boolean anyFailed = rows.stream().anyMatch(row -> "FAILED".equals(row.status()));
+        String blocked = null;
+        if (anyFailed) {
+            blocked = rows.stream()
+                    .anyMatch(row -> "PREVIEW_UP".equals(row.kind()) && "FAILED".equals(row.status()))
+                    ? blockedReason("PREVIEW_UP")
+                    : "검사가 실패해 미리보기를 띄우지 않았습니다.";
+        }
+        return new CodingConsoleContract.PreviewLink(false, null, checkFailure, blocked);
     }
 
     /**

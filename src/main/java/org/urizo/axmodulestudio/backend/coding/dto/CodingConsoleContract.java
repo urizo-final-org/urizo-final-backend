@@ -241,11 +241,17 @@ public final class CodingConsoleContract {
      * <p>{@code blocked} is the reason there is nothing to open, in the requester's own words
      * and without a path or a symbol in it: this is the screen a general administrator reads.
      * Both null means the preview is still being raised.
+     *
+     * <p>{@code checkFailure} is a different fact and therefore its own field. A failed build
+     * or test does not always keep the preview down - a Job whose TEST failed had its preview
+     * raised and working - and hiding the link because of it takes away the one thing approval
+     * 2 exists to look at. The link and the warning are told separately so both can be true.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PreviewLink(
             boolean ready,
             String url,
+            String checkFailure,
             String blocked) { }
 
     /**

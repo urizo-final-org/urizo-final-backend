@@ -50,17 +50,28 @@ $sourceBindingRequested = @($requestedSourceRoots | Where-Object { $_ }).Count -
 
 $probeTimeoutSeconds = [Math]::Min(10, $WaitTimeoutSeconds)
 $probeFailure = ''
+$reuseHealthyContainers = $false
 try {
     $healthOutput = @(& $healthScript -Profile $Profile -Quick -WaitTimeoutSeconds $probeTimeoutSeconds)
     if ($LASTEXITCODE -eq 0 -and -not $Rebuild -and -not $sourceBindingRequested) {
-        $healthOutput | Write-Output
-        Write-Output "LOCAL START PASS: reused the already healthy $Profile containers."
-        Write-Output 'CMS URL: http://127.0.0.1:18080/'
-        return
+        $reuseHealthyContainers = $true
     }
 }
 catch {
     $probeFailure = $_.Exception.Message
+}
+
+if ($reuseHealthyContainers) {
+    $healthOutput | Write-Output
+    if ($Profile -eq 'full') {
+        if (-not $ApproveLocalMutation) {
+            throw 'Containers are healthy, but Runner startup requires -ApproveLocalMutation. No host process was changed.'
+        }
+        & (Join-Path $PSScriptRoot 'start-coding-runner.ps1')
+    }
+    Write-Output "LOCAL START PASS: reused the already healthy $Profile containers."
+    Write-Output 'CMS URL: http://127.0.0.1:18080/'
+    return
 }
 
 if (-not $ApproveLocalMutation) {

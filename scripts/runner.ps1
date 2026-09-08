@@ -45,7 +45,10 @@ param(
     # just produced rather than building one of its own.
     [string]$PreviewFrontendImage = 'axms/preview-frontend:latest',
 
-    [switch]$RunOnce
+    [switch]$RunOnce,
+
+    # Optional local startup acknowledgement. Contains only this process ID, never the token.
+    [string]$StartupSignalPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1331,6 +1334,9 @@ function Complete-RunnerTask {
             $summary = if ($result.ContainsKey('worktreePath')) {
                 $result.worktreePath + $(if ($result.reused) { ' (기존 폴더 재사용)' } else { '' })
             }
+            elseif ($result.ContainsKey('workspacePath')) {
+                $result.workspacePath + $(if ($result.reused) { ' (기존 폴더 재사용)' } else { '' })
+            }
             elseif ($result.ContainsKey('created')) {
                 if ($result.created) { "PR 생성 · $($result.url)" } else { "PR 불가 · $($result.reason)" }
             }
@@ -1362,6 +1368,23 @@ function Complete-RunnerTask {
     }
 }
 
+# Both manual and automatic starts share this guard before the first claim.
+$runnerHash = [Security.Cryptography.SHA256]::Create()
+try {
+    $runnerKey = [BitConverter]::ToString($runnerHash.ComputeHash(
+        [Text.Encoding]::UTF8.GetBytes($BaseUri.TrimEnd('/').ToLowerInvariant()))).Replace('-', '')
+}
+finally { $runnerHash.Dispose() }
+$runnerMutex = [Threading.Mutex]::new($false, "Local\AXMS-CodingRunner-$runnerKey")
+$runnerLockHeld = $false
+try {
+    try { $runnerLockHeld = $runnerMutex.WaitOne(0) }
+    catch [Threading.AbandonedMutexException] { $runnerLockHeld = $true }
+    if (-not $runnerLockHeld) {
+        Write-Output 'CODING RUNNER PRESERVED: another runner already owns this target; no task was claimed.'
+        return
+    }
+
 Write-Output "실행기 시작 · $runnerId"
 Write-Output "저장소  $repositoryRoot"
 Write-Output "작업폴더 $WorkRoot"
@@ -1376,6 +1399,12 @@ do {
             schemaVersion = '1.0'
             runnerId      = $runnerId
             traceId       = [guid]::NewGuid().ToString()
+        }
+        if ($StartupSignalPath) {
+            # A local acknowledgement failure must not strand a task already claimed.
+            try { Set-Content -LiteralPath $StartupSignalPath -Value ([string]$PID) -Encoding ASCII }
+            catch { Write-Warning 'Runner startup acknowledgement could not be written.' }
+            $StartupSignalPath = ''
         }
         if ($null -eq $task) {
             Write-Output "$stamp  할 일 없음"
@@ -1405,3 +1434,8 @@ do {
     Start-Sleep -Seconds $PollIntervalSeconds
 }
 while ($true)
+}
+finally {
+    if ($runnerLockHeld) { $runnerMutex.ReleaseMutex() }
+    $runnerMutex.Dispose()
+}

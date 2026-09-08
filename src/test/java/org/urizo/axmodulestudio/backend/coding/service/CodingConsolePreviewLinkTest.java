@@ -74,8 +74,11 @@ class CodingConsolePreviewLinkTest {
 
         assertThat(link.ready()).isFalse();
         assertThat(link.url()).isNull();
-        assertThat(link.checkFailure()).contains("미리보기를 준비하지 못했습니다");
-        assertThat(link.blocked()).isNotNull();
+        // Two facts, two sentences: what went wrong, and that there is nothing to open. The
+        // check message must not say "미리보기" or the screen shows the same news twice.
+        assertThat(link.checkFailure()).contains("검사를 통과하지 못했습니다");
+        assertThat(link.checkFailure()).doesNotContain("미리보기");
+        assertThat(link.blocked()).contains("미리보기를 띄우지 않았습니다");
     }
 
     @Test

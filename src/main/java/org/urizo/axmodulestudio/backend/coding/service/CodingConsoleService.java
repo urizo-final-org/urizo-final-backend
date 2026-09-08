@@ -410,7 +410,7 @@ public class CodingConsoleService {
                 .filter(row -> "FAILED".equals(row.status()))
                 .filter(row -> "BUILD".equals(row.kind()) || "TEST".equals(row.kind()))
                 .findFirst()
-                .map(row -> blockedReason(row.kind()))
+                .map(row -> checkFailureReason(row.kind()))
                 .orElse(null);
 
         boolean up = rows.stream()
@@ -429,6 +429,24 @@ public class CodingConsoleService {
                     : "검사가 실패해 미리보기를 띄우지 않았습니다.";
         }
         return new CodingConsoleContract.PreviewLink(false, null, checkFailure, blocked);
+    }
+
+    /**
+     * Which check failed, for the screen a general administrator reads.
+     *
+     * <p>Says nothing about the preview. That is {@code blockedReason}'s sentence, and when a
+     * build fails both are shown at once - two warnings that both said "미리보기" would read as
+     * the same news repeated rather than as two facts.
+     *
+     * <p>Deliberately without the runner's own words, for the same reason as below.
+     */
+    private static String checkFailureReason(String kind) {
+        return switch (kind) {
+            case "TEST" -> "AI 가 만든 화면이 검사를 통과하지 못했습니다. "
+                    + "최고관리자에게 확인을 요청해 주세요.";
+            default -> "AI 가 만든 결과가 검사를 통과하지 못했습니다. "
+                    + "최고관리자에게 확인을 요청해 주세요.";
+        };
     }
 
     /**

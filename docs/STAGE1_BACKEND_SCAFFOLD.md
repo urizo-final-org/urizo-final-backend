@@ -1,5 +1,7 @@
 # Stage 1 Backend Scaffold
 
+> Status: **HISTORICAL / NON-NORMATIVE** — current implementation and verification are owned by `README.md`, current source, and executable scripts.
+
 ## Purpose
 
 This stage creates the first executable Backend source without starting the database, running Flyway, configuring a model provider, or implementing broad product features.

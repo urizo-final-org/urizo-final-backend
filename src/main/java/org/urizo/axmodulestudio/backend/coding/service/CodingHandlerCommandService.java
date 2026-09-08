@@ -303,6 +303,19 @@ public final class CodingHandlerCommandService {
                     "APPROVAL_STAGE_NOT_READY",
                     "The requested Coding approval is out of order or bound to stale evidence.");
         }
+        // The other half of what approval 2 is for. The guardrail screen promises the
+        // administrator that build and test must pass and cannot be switched off, but until
+        // this gate existed nothing on the approval path read those rows - the sentence on
+        // that screen was simply not true. Measured on Job 9b55bb27: TEST failed and both
+        // approvals went through.
+        //
+        // Only APPROVED, and only CANDIDATE. Rejecting has to stay possible whatever the
+        // checks say - it is the way out when a check is wrong - and the gates after CANDIDATE
+        // cannot be reached without passing it.
+        if (request.decision() == CodingHandlerContract.Decision.APPROVED
+                && request.stage() == CodingHandlerContract.ApprovalStage.CANDIDATE) {
+            requireChecksPassed(jobId);
+        }
         Instant now = Instant.now(clock);
         Integer nextAttempt = null;
         CodingJobLifecycleContract.Status target = CodingJobLifecycleContract.Status.RUNNING;
@@ -577,6 +590,60 @@ public final class CodingHandlerCommandService {
                     "IDEMPOTENCY_KEY_INVALID",
                     "Idempotency-Key does not satisfy the Coding approval contract.",
                     HttpStatus.BAD_REQUEST);
+        }
+    }
+
+    /**
+     * Lets the preview approval through only once every check this Job queued has passed.
+     *
+     * <p>Passed, not merely "has not failed yet". The approval becomes available while the
+     * checks are still running - measured, the screen offered it with BUILD still RUNNING -
+     * so a gate that only looked for a failure let the approval through in the window before
+     * the answer existed. The screen says "아직 준비되지 않았습니다" there, and the server has
+     * to say the same thing rather than leave the button live behind it.
+     *
+     * <p>What it refuses as failed is a check that failed twice in a row, not one bad moment:
+     * the runner already reruns a failed check once and reports failure only when the second
+     * run fails too ({@code runner.ps1 Invoke-Tests}). A build is not rerun and does not need
+     * to be - a build failure is a compile error and reproduces every time.
+     *
+     * <p>Only the rows this Job actually queued are required to pass. A backend Job queues no
+     * TEST at all ({@code CodingHandlerStageService.preview}) because its build is the compile;
+     * demanding one would block every backend request forever.
+     *
+     * <p>No rows means no gate. Jobs queued before the queue carried a workspace id have none,
+     * and absence of evidence is not evidence of failure - the same rule the preview link
+     * follows. Read through the worker connection: {@code app.coding_runner_task} is granted
+     * to ai_workspace and the primary datasource cannot read it at all.
+     */
+    private void requireChecksPassed(UUID jobId) {
+        List<String> newest = workerReadJdbc.query("""
+                SELECT DISTINCT ON (kind) status
+                FROM app.coding_runner_task
+                WHERE payload ->> 'workspaceId' = ?
+                  AND kind IN ('BUILD', 'TEST')
+                ORDER BY kind, created_at DESC
+                """, (rs, row) -> rs.getString("status"), jobId.toString());
+        if (newest.isEmpty()) {
+            return;
+        }
+        // Both messages are read by someone who cannot read code, and they ask for opposite
+        // things - reject, or wait. Telling a person to reject a result whose checks simply
+        // had not finished would throw away a good candidate and cost another model run.
+        if (newest.contains("FAILED")) {
+            throw failure(
+                    "CODING_CHECK_NOT_PASSED",
+                    "AI 가 만든 결과가 검사를 통과하지 못해 승인할 수 없습니다. "
+                            + "반려하면 AI 가 다시 만듭니다.",
+                    HttpStatus.UNPROCESSABLE_ENTITY);
+        }
+        if (!newest.stream().allMatch("SUCCEEDED"::equals)) {
+            throw new CodingJobLifecycleException(
+                    "CODING_CHECK_NOT_FINISHED",
+                    "검사가 아직 끝나지 않았습니다. 잠시 뒤에 다시 확인해 주세요.",
+                    HttpStatus.CONFLICT,
+                    true,
+                    5_000L);
         }
     }
 

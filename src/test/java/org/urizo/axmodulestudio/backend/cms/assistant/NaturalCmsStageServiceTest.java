@@ -467,10 +467,12 @@ class NaturalCmsStageServiceTest {
      * 컨텐츠는 등록·삭제까지 열렸고, 본문이 편집기 문서다.
      *
      * <p>모델이 트리를 지어내지 않도록 현재 문서를 고쳐 쓰게 하고 쓸 수 있는 부품을 못박는다.
+     * 이미지는 본문에 이미 있는 것이나 화면이 요청에 실어 준 것만 쓴다 — 사람이 올린 사진을
+     * 넣는 것은 되고 모델이 어디선가 가져오는 것은 안 된다.
      * 게시판과 달리 삭제에 붙는 조건은 없다.
      */
     @Test
-    void contentCommandPromptNamesTheDocumentShapeAndKeepsImagesAsTheyAre() throws Exception {
+    void contentCommandPromptNamesTheDocumentShapeAndLimitsImageSources() throws Exception {
         NaturalCmsContract.ResourceRef content =
                 new NaturalCmsContract.ResourceRef("CONTENT", "7");
         ObjectNode state = new ObjectMapper().createObjectNode()
@@ -481,7 +483,9 @@ class NaturalCmsStageServiceTest {
                 .contains("Create one CONTENT command with operation CREATE, UPDATE or DELETE")
                 .contains("ProseMirror document serialised as a JSON string")
                 .contains("change only the parts the request asks for")
-                .contains("Never invent an image")
+                .contains("already appears in currentState.body")
+                .contains("lists as an attached image")
+                .contains("never invent one")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")
                 .doesNotContain("cannot be deleted");

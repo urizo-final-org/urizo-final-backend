@@ -402,8 +402,9 @@ public final class NaturalCmsStageService {
                     + " be paragraph, heading, bulletList, orderedList, listItem, text, image and"
                     + " hardBreak; a text node may carry bold, italic or link marks."
                     + " A heading uses attrs.level 2 or 3."
-                    + " Never invent an image: keep the image nodes that are already there with"
-                    + " their src unchanged, and never write a src of your own."
+                    + " An image node's src must be one that already appears in currentState.body"
+                    + " or that the request text lists as an attached image. Keep the src exactly"
+                    + " as written and never invent one."
                     + " CREATE sends title and body, and its body is a new document."
                     + emptyDelete;
         }
@@ -467,13 +468,14 @@ public final class NaturalCmsStageService {
             // 컨텐츠 삭제에는 조건이 없다. 삭제하면 그 컨텐츠를 연결한 메뉴가 `연결 없음`이 될 뿐이고
             // 그 정리는 기존 CMS가 한다. 조건이 없으니 판단할 참고 값도 주지 않는다.
             //
-            // 이미지는 사람이 올린다. 본문에 이미 있는 이미지를 옮기거나 빼는 것은 범위 안이고,
-            // 새 이미지를 만들거나 가져오는 것은 범위 밖이다.
+            // 이미지는 사람이 올린다. 화면이 먼저 올려 요청에 주소를 실어 주므로 그 사진을
+            // 넣는 것도 범위 안이다. 모델이 어디선가 가져오는 것만 범위 밖이다.
             scope = "static content pages only: creating a content page, changing the selected "
-                    + "page's title and body, and deleting the selected page. Moving or removing "
-                    + "an image that the body already contains is included";
-            excluded = "adding an image that is not already in the body, writing posts, boards, "
-                    + "menus, templates and members";
+                    + "page's title and body, and deleting the selected page. Placing, moving or "
+                    + "removing an image the body already contains or the request attaches is "
+                    + "included";
+            excluded = "finding an image that was neither attached nor already in the body, "
+                    + "writing posts, boards, menus, templates and members";
         }
         // 남은 기본값은 이제 템플릿 전용이다. 컨텐츠 분기를 새로 만들었으므로 여기는 건드리지 않는다.
         return "Decide whether this request can be done on this screen. Return only JSON with "

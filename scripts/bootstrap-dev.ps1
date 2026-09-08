@@ -83,25 +83,32 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Local secret initialization failed.'
 }
 
-$composeFiles = @($composeFile)
-if ($EnableHostBuildTrust) {
-    & (Join-Path $PSScriptRoot 'initialize-dev-build-trust.ps1')
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Opt-in local build trust initialization failed.'
+. (Join-Path $PSScriptRoot 'local-langfuse-environment.ps1')
+$langfuseEnvironment = Enter-AxmsLocalLangfuseEnvironment `
+    -Path (Join-Path $repositoryRoot '.local\secrets\langfuse.env')
+if ($langfuseEnvironment.Loaded) {
+    Write-Output 'LOCAL LANGFUSE CONFIG PASS: loaded required variable names from the ignored local secrets directory.'
+}
+try {
+    $composeFiles = @($composeFile)
+    if ($EnableHostBuildTrust) {
+        & (Join-Path $PSScriptRoot 'initialize-dev-build-trust.ps1')
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Opt-in local build trust initialization failed.'
+        }
+        $composeFiles += $buildTrustComposeFile
     }
-    $composeFiles += $buildTrustComposeFile
-}
 
-$compose = @('compose')
-foreach ($file in $composeFiles) {
-    $compose += @('-f', $file)
-}
-$compose += @('--profile', $Profile)
-$opsCompose = @('compose', '-f', $composeFile, '--profile', 'ops')
-& $docker @compose config --quiet
-if ($LASTEXITCODE -ne 0) {
-    throw 'Docker Compose configuration validation failed.'
-}
+    $compose = @('compose')
+    foreach ($file in $composeFiles) {
+        $compose += @('-f', $file)
+    }
+    $compose += @('--profile', $Profile)
+    $opsCompose = @('compose', '-f', $composeFile, '--profile', 'ops')
+    & $docker @compose config --quiet
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose configuration validation failed.'
+    }
 
 if (-not $SkipBuild) {
     & $docker @compose build --pull
@@ -213,5 +220,9 @@ if ($Profile -eq 'full') {
 
 $httpPort = if ($env:AXMS_HTTP_PORT) { $env:AXMS_HTTP_PORT } else { '18080' }
 $postgresPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '15432' }
-Write-Output "AX Module Studio $Profile local profile is healthy at http://127.0.0.1:$httpPort/."
-Write-Output "Read-only PostgreSQL gateway remains loopback-only at 127.0.0.1:$postgresPort."
+    Write-Output "AX Module Studio $Profile local profile is healthy at http://127.0.0.1:$httpPort/."
+    Write-Output "Read-only PostgreSQL gateway remains loopback-only at 127.0.0.1:$postgresPort."
+}
+finally {
+    Exit-AxmsLocalLangfuseEnvironment -State $langfuseEnvironment
+}

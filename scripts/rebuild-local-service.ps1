@@ -126,31 +126,38 @@ if ($LASTEXITCODE -ne 0) {
     throw 'Docker Engine is not available.'
 }
 
-$composeFiles = @($composeFile)
-if ($Service -in @('spring-app', 'frontend')) {
-    foreach ($requiredFile in @($buildTrustComposeFile, $buildTrustScript)) {
-        if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
-            throw "Required partial-rebuild trust file is missing: $requiredFile"
-        }
-    }
-    & $buildTrustScript
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Opt-in local build trust initialization failed.'
-    }
-    $composeFiles += $buildTrustComposeFile
+. (Join-Path $PSScriptRoot 'local-langfuse-environment.ps1')
+$langfuseEnvironment = Enter-AxmsLocalLangfuseEnvironment `
+    -Path (Join-Path $repositoryRoot '.local\secrets\langfuse.env')
+if ($langfuseEnvironment.Loaded) {
+    Write-Output 'LOCAL LANGFUSE CONFIG PASS: loaded required variable names from the ignored local secrets directory.'
 }
-
-$compose = @('compose')
-foreach ($file in $composeFiles) {
-    $compose += @('-f', $file)
-}
-$compose += @('--profile', $Profile)
-$sourceEnvironmentName = $sourceContract.EnvironmentName
-$previousSourceRoot = [Environment]::GetEnvironmentVariable($sourceEnvironmentName, 'Process')
 try {
-    $composeSourceRoot = $SourceRoot.Replace('\', '/')
-    [Environment]::SetEnvironmentVariable($sourceEnvironmentName, $composeSourceRoot, 'Process')
-    Write-Output "Build source: $sourceEnvironmentName=$composeSourceRoot"
+    $composeFiles = @($composeFile)
+    if ($Service -in @('spring-app', 'frontend')) {
+        foreach ($requiredFile in @($buildTrustComposeFile, $buildTrustScript)) {
+            if (-not (Test-Path -LiteralPath $requiredFile -PathType Leaf)) {
+                throw "Required partial-rebuild trust file is missing: $requiredFile"
+            }
+        }
+        & $buildTrustScript
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Opt-in local build trust initialization failed.'
+        }
+        $composeFiles += $buildTrustComposeFile
+    }
+
+    $compose = @('compose')
+    foreach ($file in $composeFiles) {
+        $compose += @('-f', $file)
+    }
+    $compose += @('--profile', $Profile)
+    $sourceEnvironmentName = $sourceContract.EnvironmentName
+    $previousSourceRoot = [Environment]::GetEnvironmentVariable($sourceEnvironmentName, 'Process')
+    try {
+        $composeSourceRoot = $SourceRoot.Replace('\', '/')
+        [Environment]::SetEnvironmentVariable($sourceEnvironmentName, $composeSourceRoot, 'Process')
+        Write-Output "Build source: $sourceEnvironmentName=$composeSourceRoot"
 
     & $docker @compose config --quiet
     if ($LASTEXITCODE -ne 0) {
@@ -174,6 +181,10 @@ try {
 
     Write-Output "LOCAL SERVICE REBUILD PASS: rebuilt '$Service' from '$composeSourceRoot', recreated its container, and passed $Profile health."
 }
+    finally {
+        [Environment]::SetEnvironmentVariable($sourceEnvironmentName, $previousSourceRoot, 'Process')
+    }
+}
 finally {
-    [Environment]::SetEnvironmentVariable($sourceEnvironmentName, $previousSourceRoot, 'Process')
+    Exit-AxmsLocalLangfuseEnvironment -State $langfuseEnvironment
 }

@@ -476,10 +476,14 @@ public final class NaturalCmsStageService {
             //
             // 이미지는 사람이 올린다. 화면이 먼저 올려 요청에 주소를 실어 주므로 그 사진을
             // 넣는 것도 범위 안이다. 모델이 어디선가 가져오는 것만 범위 밖이다.
+            //
+            // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 범위에 `놓기`만 있어 모델이 업로드를
+            // 화면 밖 일로 읽었다. 사람이 쓰는 말과 실제 하는 일을 이어 준다.
             scope = "static content pages only: creating a content page, changing the selected "
                     + "page's title and body, and deleting the selected page. Placing, moving or "
                     + "removing an image the body already contains or the request attaches is "
-                    + "included";
+                    + "included. An attached image has already been uploaded, so asking to "
+                    + "upload, put up or add it means placing it in the body and stays feasible";
             excluded = "finding an image that was neither attached nor already in the body, "
                     + "writing posts, boards, menus, templates and members";
         }

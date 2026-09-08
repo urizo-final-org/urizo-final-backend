@@ -950,7 +950,19 @@ function Invoke-CreatePullRequest {
 
         $body = Get-PayloadValue -Payload $Payload -Name 'body'
         if (-not $body) { $body = $title }
-        $created = & gh pr create --repo $slug --base dev --head $branch --title $title --body $body 2>&1
+        # The body is the multi-line Korean summary the control plane builds from the recorded
+        # request, plan, diff and approvals. Windows PowerShell rewrites quoting and encoding when
+        # it hands an argument to a native command - the same trap that mangled Korean elsewhere
+        # in this workspace - so it is written as a BOM-less UTF-8 file and handed over by path.
+        $bodyFile = Join-Path $env:TEMP "axms-pr-body-$([IO.Path]::GetRandomFileName()).md"
+        [IO.File]::WriteAllText($bodyFile, $body, [Text.UTF8Encoding]::new($false))
+        try {
+            $created = & gh pr create --repo $slug --base dev --head $branch `
+                --title $title --body-file $bodyFile 2>&1
+        }
+        finally {
+            Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
+        }
         if ($LASTEXITCODE -ne 0) {
             Throw-GitHubFailure -Output $created -Operation 'PR 생성'
         }

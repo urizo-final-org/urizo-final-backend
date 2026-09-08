@@ -61,6 +61,16 @@ public final class CodingHandlerStageService {
      */
     private static final int MAX_MODEL_TURNS = 24;
     /**
+     * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
+     * of it, so a request of ten thousand characters or a change touching a thousand files is
+     * summarised rather than pasted whole. What was cut is always stated.
+     */
+    private static final int MAX_BODY_CHARACTERS = 8_000;
+    private static final int MAX_BODY_FIELD_CHARACTERS = 600;
+    private static final int MAX_BODY_LIST_ENTRIES = 20;
+    /** Printed where a prior stage recorded nothing, so an absence never reads as a blank. */
+    private static final String MISSING_RECORD = "기록 없음";
+    /**
      * The digest of an empty diff - SHA-256 over zero bytes. Every apply_patch of Job
      * 7e600583 was refused, yet read_diff, the package check and the guardrail scan all
      * reported success because each of them examined that empty diff, and the Job reached
@@ -560,6 +570,9 @@ public final class CodingHandlerStageService {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "READY");
         payload.set("changedPaths", diff.path("changedPaths").deepCopy());
+        // The line count is already computed here for the third guardrail layer. Recording it
+        // costs one field and saves the pull request body from re-reading the diff later.
+        payload.put("changedLines", changedLines(diff));
         payload.put("checkProfile", check.path("profile").asText());
         return response(resultId, request.handlerKey(), "ready",
                 aggregate.workspaceId() == null ? jobId : aggregate.workspaceId(),
@@ -741,9 +754,16 @@ public final class CodingHandlerStageService {
             throw conflict("The pull request has no approved Diff digest.");
         }
         CodingHandlerResultService.JobRequestIdentity identity = results.jobRequestIdentity(jobId);
+        // Which repository this Job works in is recorded on the Job itself, and the build,
+        // check and preview stages already queue against it. This stage used to name backend
+        // outright, which was true only while every Job was a backend Job: a frontend Job then
+        // asked the runner to publish a checkout the runner knows belongs elsewhere, and the
+        // workspace marker refused it. Read once, so the command, the receipt check and the
+        // recorded result cannot disagree about where the pull request went.
+        String repository = results.jobRepository(jobId);
         String branch = "system/" + identity.workSlug().substring("system-".length());
         ObjectNode command = objectMapper.createObjectNode();
-        command.put("repo", "backend");
+        command.put("repo", repository);
         command.put("branch", branch);
         command.put("candidateSha", requested.candidateSha());
         command.put("diffDigest", requested.diffDigest());
@@ -753,8 +773,7 @@ public final class CodingHandlerStageService {
         }
         command.put("workspaceId", aggregate.workspaceId().toString());
         command.put("title", identity.systemWorkId() + " automated coding change");
-        command.put("body", "Automated Coding Job " + identity.systemWorkId()
-                + ". Candidate and validation evidence are recorded by the control plane.");
+        command.put("body", pullRequestBody(aggregate, identity, repository, requested));
         runner.enqueue(resultId, "CREATE_PR", command);
         CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CREATE_PR");
         if (runnerPending(outcome)) {
@@ -768,7 +787,7 @@ public final class CodingHandlerStageService {
         }
         JsonNode receipt = outcome.result();
         if (receipt == null
-                || !"backend".equals(receipt.path("repository").asText())
+                || !repository.equals(receipt.path("repository").asText())
                 || !"dev".equals(receipt.path("base").asText())
                 || !branch.equals(receipt.path("head").asText())
                 || !requested.candidateSha().equals(receipt.path("candidateSha").asText())
@@ -779,7 +798,7 @@ public final class CodingHandlerStageService {
             throw contract("The pull request runner receipt is invalid.");
         }
         ObjectNode payload = objectMapper.createObjectNode();
-        payload.put("repository", "backend");
+        payload.put("repository", repository);
         payload.put("base", "dev");
         payload.put("head", branch);
         payload.put("candidateSha", requested.candidateSha());
@@ -1652,6 +1671,126 @@ public final class CodingHandlerStageService {
         }
         return new ModelOutcome(
                 value.path("port").asText(), value.path("payload").deepCopy());
+    }
+
+    /**
+     * The pull request body, written from what the pipeline already recorded.
+     *
+     * <p>No model writes this. A reviewer has to find the same item in the same place on every
+     * pull request, and a sentence rewritten on every run is a sentence that gets skimmed. Every
+     * value here is one the control plane already stores, so nothing in it has to be believed.
+     *
+     * <p>Sections follow the repository pull request template so an automated pull request reads
+     * like the ones people open. A missing prior result is reported as missing rather than
+     * omitted: a body that silently drops the plan looks the same as a Job that never planned.
+     */
+    private String pullRequestBody(
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            CodingHandlerResultService.JobRequestIdentity identity,
+            String repository,
+            CodingHandlerContract.HandlerResultResponse requested) {
+        CodingHandlerContract.HandlerResultResponse analyze =
+                latestResultOrNull(aggregate, "coding.analyze", "feasible");
+        CodingHandlerContract.HandlerResultResponse review =
+                latestResultOrNull(aggregate, "coding.review", "passed");
+        CodingHandlerContract.HandlerResultResponse preview =
+                latestResultOrNull(aggregate, "coding.preview", "ready");
+
+        StringBuilder body = new StringBuilder();
+        body.append("## 결과\n\n");
+        body.append("- 요청: ")
+                .append(oneLine(aggregate.requestText(), MAX_BODY_FIELD_CHARACTERS)).append('\n');
+        body.append("- 계획: ")
+                .append(analyze == null ? MISSING_RECORD
+                        : oneLine(analyze.payload().path("planSummary").asText(),
+                                MAX_BODY_FIELD_CHARACTERS))
+                .append('\n');
+
+        body.append("\n## 변경\n\n");
+        body.append("- 저장소: ").append(repository).append('\n');
+        if (preview == null) {
+            body.append("- 바뀐 파일: ").append(MISSING_RECORD).append('\n');
+        } else {
+            List<String> changed = new ArrayList<>();
+            for (JsonNode path : preview.payload().path("changedPaths")) {
+                if (path.isTextual()) {
+                    changed.add(path.textValue());
+                }
+            }
+            body.append("- 바뀐 파일: ").append(changed.size()).append("개");
+            int lines = preview.payload().path("changedLines").asInt(-1);
+            if (lines >= 0) {
+                body.append(" · ").append(lines).append("줄");
+            }
+            body.append('\n');
+            body.append(bulletList(changed));
+        }
+
+        body.append("\n## 검증\n\n");
+        body.append("- 검사 프로필: ")
+                .append(preview == null ? MISSING_RECORD
+                        : oneLine(preview.payload().path("checkProfile").asText(), 120))
+                .append('\n');
+        List<String> verdicts = new ArrayList<>();
+        if (review != null) {
+            for (JsonNode criterion : review.payload().path("criteriaResults")) {
+                verdicts.add((criterion.path("met").asBoolean() ? "충족 · " : "미충족 · ")
+                        + oneLine(criterion.path("criterion").asText(), 200));
+            }
+        }
+        body.append(verdicts.isEmpty()
+                ? "- 검토 판정: " + MISSING_RECORD + "\n" : bulletList(verdicts));
+
+        body.append("\n## 연결·영향\n\n");
+        body.append("- Coding Job: ").append(identity.systemWorkId()).append('\n');
+        body.append("- Candidate SHA: ").append(requested.candidateSha()).append('\n');
+        body.append("- Diff digest: ").append(requested.diffDigest()).append('\n');
+        body.append("- 재시도: ").append(aggregate.pipelineAttempt()).append("번째 시도\n");
+
+        body.append("\n## 확인\n\n");
+        List<String> decisions = new ArrayList<>();
+        for (CodingHandlerContract.ApprovalDecisionSummary decision : aggregate.decisions()) {
+            decisions.add(decision.stage() + " · "
+                    + (decision.decision() == CodingHandlerContract.Decision.APPROVED
+                            ? "승인" : "반려")
+                    + " · " + decision.actorRole() + " · " + decision.decidedAt());
+        }
+        body.append(decisions.isEmpty()
+                ? "- 승인 이력: " + MISSING_RECORD + "\n" : bulletList(decisions));
+
+        String text = body.toString();
+        return text.length() <= MAX_BODY_CHARACTERS
+                ? text
+                : text.substring(0, MAX_BODY_CHARACTERS) + "\n\n…(본문이 길어 줄였습니다)\n";
+    }
+
+    /**
+     * Renders one bullet per entry, capped so a thousand changed files cannot produce a body
+     * nobody reads. What was dropped is stated rather than left silent.
+     */
+    private static String bulletList(List<String> entries) {
+        StringBuilder rendered = new StringBuilder();
+        int shown = Math.min(entries.size(), MAX_BODY_LIST_ENTRIES);
+        for (int index = 0; index < shown; index++) {
+            rendered.append("- ").append(entries.get(index)).append('\n');
+        }
+        if (entries.size() > shown) {
+            rendered.append("- 그 외 ").append(entries.size() - shown).append("개\n");
+        }
+        return rendered.toString();
+    }
+
+    /**
+     * Collapses recorded free text into one bounded line. Newlines inside a model answer would
+     * otherwise break the surrounding list and read as body sections of their own.
+     */
+    private static String oneLine(String text, int maxCharacters) {
+        if (text == null || text.isBlank()) {
+            return MISSING_RECORD;
+        }
+        String collapsed = text.replaceAll("\\s+", " ").strip();
+        return collapsed.length() <= maxCharacters
+                ? collapsed : collapsed.substring(0, maxCharacters) + "…(줄임)";
     }
 
     private static CodingHandlerContract.HandlerResultResponse latestResult(

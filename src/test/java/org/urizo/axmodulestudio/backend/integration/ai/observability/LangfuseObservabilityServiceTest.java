@@ -126,6 +126,278 @@ class LangfuseObservabilityServiceTest {
     }
 
     @Test
+    void selectedReadUsesOneExactBoundedFilterRechecksIdentityAndCachesThePage()
+            throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        String jobId = "11111111-1111-4111-8111-111111111111";
+        String traceId = "33333333-3333-4333-8333-333333333333";
+        String profileVersionId = "22222222-2222-4222-8222-222222222222";
+        String observationTraceId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {
+            int call = calls.incrementAndGet();
+            assertSafeRequest(endpoint, headers);
+            String query = URLDecoder.decode(
+                    endpoint.getRawQuery(), StandardCharsets.UTF_8);
+            assertThat(query)
+                    .contains("\"type\":\"string\",\"column\":\"traceId\"")
+                    .contains("\"value\":\"" + observationTraceId + "\"")
+                    .contains("\"type\":\"string\",\"column\":\"environment\"")
+                    .contains("\"type\":\"datetime\",\"column\":\"startTime\"")
+                    .contains("\"operator\":\">=\",\"value\":\"2026-09-01T00:59:00Z\"")
+                    .contains("\"operator\":\"<\",\"value\":\"2026-09-01T01:03:00Z\"")
+                    .doesNotContain("fields=io", "prompt", "cursor=");
+            if (call == 1) {
+                assertThat(query)
+                        .contains("limit=2")
+                        .contains("\"column\":\"name\",\"operator\":\"=\",\"value\":\"axms.node\"")
+                        .contains("\"key\":\"jobId\",\"operator\":\"=\",\"value\":\""
+                                + jobId + "\"")
+                        .contains("\"key\":\"profileVersionId\",\"operator\":\"=\",\"value\":\""
+                                + profileVersionId + "\"")
+                        .contains("\"key\":\"nodeId\",\"operator\":\"=\",\"value\":\"analyze\"")
+                        .contains("\"key\":\"pipelineAttempt\",\"operator\":\"=\",\"value\":\"2\"")
+                        .contains("\"key\":\"executionAttempt\",\"operator\":\"=\",\"value\":\"3\"")
+                        .contains("\"key\":\"nodeSequence\",\"operator\":\"=\",\"value\":\"7\"")
+                        .doesNotContain("parentObservationId");
+                return new LangfuseHttpTransport.Response(200, """
+                    {"data":[
+                      {
+                        "id":"node-span-7",
+                        "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "parentObservationId":"job-root",
+                        "type":"SPAN",
+                        "name":"axms.node",
+                        "level":"DEFAULT",
+                        "environment":"local",
+                        "startTime":"2026-09-01T01:00:00Z",
+                        "endTime":"2026-09-01T01:00:01Z",
+                        "latency":1.0,
+                        "metadata":{
+                          "jobId":"11111111-1111-4111-8111-111111111111",
+                          "traceId":"33333333-3333-4333-8333-333333333333",
+                          "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                          "nodeId":"analyze",
+                          "pipelineAttempt":"2",
+                          "executionAttempt":"3",
+                          "nodeSequence":"7",
+                          "secret":"must-not-escape"
+                        }
+                      }
+                    ],"meta":{"cursor":null}}
+                    """);
+            }
+            assertThat(call).isEqualTo(2);
+            assertThat(query)
+                    .contains("limit=50")
+                    .contains("\"column\":\"parentObservationId\",\"operator\":\"=\",\"value\":\"node-span-7\"")
+                    .doesNotContain(
+                            "stringObject", "pipelineAttempt", "executionAttempt",
+                            "nodeSequence", "\"column\":\"name\"");
+            return new LangfuseHttpTransport.Response(200, """
+                    {"data":[
+                      {
+                        "id":"provider-model-7",
+                        "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "parentObservationId":"node-span-7",
+                        "type":"GENERATION",
+                        "name":"axms.model",
+                        "level":"DEFAULT",
+                        "environment":"local",
+                        "startTime":"2026-09-01T01:00:02Z",
+                        "endTime":"2026-09-01T01:00:03Z",
+                        "latency":1.0,
+                        "metadata":{
+                          "jobId":"11111111-1111-4111-8111-111111111111",
+                          "traceId":"33333333-3333-4333-8333-333333333333",
+                          "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                          "nodeId":"analyze"
+                        }
+                      },
+                      {
+                        "id":"unparented-model",
+                        "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "parentObservationId":"other-node",
+                        "type":"GENERATION",
+                        "name":"axms.model",
+                        "level":"DEFAULT",
+                        "environment":"local",
+                        "startTime":"2026-09-01T01:00:04Z",
+                        "endTime":"2026-09-01T01:00:05Z",
+                        "latency":1.0,
+                        "metadata":{
+                          "jobId":"11111111-1111-4111-8111-111111111111",
+                          "traceId":"33333333-3333-4333-8333-333333333333",
+                          "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                          "nodeId":"analyze"
+                        }
+                      }
+                    ],"meta":{"cursor":"next-page-must-not-be-followed"}}
+                    """);
+        };
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        LangfuseObservabilityService service = new LangfuseObservabilityService(
+                configured(), transport, mapper, CLOCK);
+
+        LangfuseObservabilityService.SelectedObservationsResponse first =
+                service.selectedObservations(
+                        jobId, traceId, profileVersionId, 2, 3, "analyze", 7,
+                        observationTraceId,
+                        Instant.parse("2026-09-01T01:00:00Z"),
+                        Instant.parse("2026-09-01T01:02:00Z"));
+        LangfuseObservabilityService.SelectedObservationsResponse second =
+                service.selectedObservations(
+                        jobId, traceId, profileVersionId, 2, 3, "analyze", 7,
+                        observationTraceId,
+                        Instant.parse("2026-09-01T01:00:00Z"),
+                        Instant.parse("2026-09-01T01:02:00Z"));
+
+        assertThat(first.status()).isEqualTo(
+                LangfuseObservabilityService.Availability.AVAILABLE);
+        assertThat(first.observations()).hasSize(2);
+        assertThat(first.observations().get(0)).satisfies(row -> {
+            assertThat(row.id()).isEqualTo("node-span-7");
+            assertThat(row.metadata().pipelineAttempt()).isEqualTo(2);
+            assertThat(row.metadata().executionAttempt()).isEqualTo(3);
+            assertThat(row.metadata().nodeSequence()).isEqualTo(7);
+        });
+        assertThat(first.observations().get(1)).satisfies(row -> {
+            assertThat(row.id()).isEqualTo("provider-model-7");
+            assertThat(row.name()).isEqualTo("axms.model");
+            assertThat(row.parentObservationId()).isEqualTo("node-span-7");
+            assertThat(row.metadata().pipelineAttempt()).isNull();
+            assertThat(row.metadata().executionAttempt()).isNull();
+            assertThat(row.metadata().nodeSequence()).isNull();
+        });
+        assertThat(first.truncated()).isTrue();
+        assertThat(mapper.valueToTree(first).toString())
+                .doesNotContain("must-not-escape", "next-page-must-not-be-followed");
+        assertThat(second).isSameAs(first);
+        assertThat(calls).hasValue(2);
+    }
+
+    @Test
+    void selectedReadIsUnconnectedWithoutNativeTraceAndRejectsLooseIdentityText() {
+        AtomicInteger calls = new AtomicInteger();
+        LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {
+            calls.incrementAndGet();
+            return new LangfuseHttpTransport.Response(200, """
+                    {"data":[{
+                      "id":"obs-invalid",
+                      "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                      "parentObservationId":null,
+                      "type":"SPAN",
+                      "name":"axms.node",
+                      "level":"DEFAULT",
+                      "environment":"local",
+                      "startTime":"2026-09-01T01:00:00Z",
+                      "endTime":"2026-09-01T01:00:01Z",
+                      "latency":1.0,
+                      "metadata":{
+                        "jobId":"11111111-1111-4111-8111-111111111111",
+                        "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                        "nodeId":"analyze",
+                        "pipelineAttempt":"02",
+                        "executionAttempt":"3",
+                        "nodeSequence":"7"
+                      }
+                    }]}
+                    """);
+        };
+        LangfuseObservabilityService service = service(configured(), transport);
+
+        LangfuseObservabilityService.SelectedObservationsResponse unconnected =
+                service.selectedObservations(
+                        "11111111-1111-4111-8111-111111111111",
+                        "33333333-3333-4333-8333-333333333333",
+                        "22222222-2222-4222-8222-222222222222",
+                        2, 3, "analyze", 7, null,
+                        Instant.parse("2026-09-01T01:00:00Z"),
+                        Instant.parse("2026-09-01T01:02:00Z"));
+        LangfuseObservabilityService.SelectedObservationsResponse invalid =
+                service.selectedObservations(
+                        "11111111-1111-4111-8111-111111111111",
+                        "33333333-3333-4333-8333-333333333333",
+                        "22222222-2222-4222-8222-222222222222",
+                        2, 3, "analyze", 7,
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        Instant.parse("2026-09-01T01:00:00Z"),
+                        Instant.parse("2026-09-01T01:02:00Z"));
+
+        assertThat(unconnected.status()).isEqualTo(
+                LangfuseObservabilityService.Availability.UNCONNECTED);
+        assertThat(invalid.status()).isEqualTo(
+                LangfuseObservabilityService.Availability.UNAVAILABLE);
+        assertThat(calls).hasValue(1);
+    }
+
+    @Test
+    void selectedReadDoesNotChooseAnAmbiguousAnchorOrQueryItsChildren() {
+        AtomicInteger calls = new AtomicInteger();
+        LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {
+            calls.incrementAndGet();
+            return new LangfuseHttpTransport.Response(200, """
+                    {"data":[
+                      {
+                        "id":"node-span-a",
+                        "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "parentObservationId":"job-root",
+                        "type":"SPAN",
+                        "name":"axms.node",
+                        "level":"DEFAULT",
+                        "environment":"local",
+                        "startTime":"2026-09-01T01:00:00Z",
+                        "endTime":"2026-09-01T01:00:01Z",
+                        "metadata":{
+                          "jobId":"11111111-1111-4111-8111-111111111111",
+                          "traceId":"33333333-3333-4333-8333-333333333333",
+                          "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                          "nodeId":"analyze",
+                          "pipelineAttempt":"2",
+                          "executionAttempt":"3",
+                          "nodeSequence":"7"
+                        }
+                      },
+                      {
+                        "id":"node-span-b",
+                        "traceId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        "parentObservationId":"job-root",
+                        "type":"SPAN",
+                        "name":"axms.node",
+                        "level":"DEFAULT",
+                        "environment":"local",
+                        "startTime":"2026-09-01T01:00:02Z",
+                        "endTime":"2026-09-01T01:00:03Z",
+                        "metadata":{
+                          "jobId":"11111111-1111-4111-8111-111111111111",
+                          "traceId":"33333333-3333-4333-8333-333333333333",
+                          "profileVersionId":"22222222-2222-4222-8222-222222222222",
+                          "nodeId":"analyze",
+                          "pipelineAttempt":"2",
+                          "executionAttempt":"3",
+                          "nodeSequence":"7"
+                        }
+                      }
+                    ],"meta":{"cursor":null}}
+                    """);
+        };
+
+        LangfuseObservabilityService.SelectedObservationsResponse response =
+                service(configured(), transport).selectedObservations(
+                        "11111111-1111-4111-8111-111111111111",
+                        "33333333-3333-4333-8333-333333333333",
+                        "22222222-2222-4222-8222-222222222222",
+                        2, 3, "analyze", 7,
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        Instant.parse("2026-09-01T01:00:00Z"),
+                        Instant.parse("2026-09-01T01:02:00Z"));
+
+        assertThat(response.status()).isEqualTo(
+                LangfuseObservabilityService.Availability.UNCONNECTED);
+        assertThat(response.observations()).isEmpty();
+        assertThat(calls).hasValue(1);
+    }
+
+    @Test
     void scoreReadReturnsOnlyApprovedCoreTypedValuesWithoutRecalculation() {
         LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {
             assertSafeRequest(endpoint, headers);

@@ -207,6 +207,10 @@ if ($LASTEXITCODE -ne 0) {
     throw "$Profile local health verification failed."
 }
 
+if ($Profile -eq 'full') {
+    & (Join-Path $PSScriptRoot 'start-coding-runner.ps1')
+}
+
 $httpPort = if ($env:AXMS_HTTP_PORT) { $env:AXMS_HTTP_PORT } else { '18080' }
 $postgresPort = if ($env:POSTGRES_HOST_PORT) { $env:POSTGRES_HOST_PORT } else { '15432' }
 Write-Output "AX Module Studio $Profile local profile is healthy at http://127.0.0.1:$httpPort/."

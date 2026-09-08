@@ -1,5 +1,6 @@
 # AX Module Studio 무료 Toy License·Compatibility 심층 점검 v0.2
 
+> 상태: **HISTORICAL / NON-NORMATIVE** — 2026-08-10 조사 시점의 기록이며 현행 법률·비용 판정이 아니다.
 > 조사 기준일: 2026-08-10  
 > 범위: 개인·팀의 비상업 Local Toy Project  
 > 판정: **조건부 적합**  

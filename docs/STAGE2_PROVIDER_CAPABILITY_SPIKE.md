@@ -1,5 +1,7 @@
 # Stage 2 Provider Capability Spike
 
+> Status: **HISTORICAL / NON-NORMATIVE** — current implementation and verification are owned by `README.md`, current source, and executable scripts.
+
 ## Scope completed without secret disclosure
 
 - Product Lane resolves Spring AI 1.1.8 provider modules for OpenAI, Anthropic, Google GenAI chat, and Google GenAI embedding.

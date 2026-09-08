@@ -192,6 +192,19 @@ public class ProductStore {
         return knowledge.rollbackKnowledgeVersion(knowledgeBaseId, targetId, traceId);
     }
 
+    public ProductApiContract.ActivationRequestResponse createActivationRequest(
+            UUID knowledgeBaseId,
+            UUID traceId,
+            org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor actor,
+            ProductApiContract.CreateActivationRequestRequest request) {
+        return knowledge.createActivationRequest(knowledgeBaseId, traceId, actor, request);
+    }
+
+    public List<ProductApiContract.ActivationRequestResponse> listOpenActivationRequests(
+            UUID knowledgeBaseId, UUID traceId) {
+        return knowledge.listOpenActivationRequests(knowledgeBaseId, traceId);
+    }
+
     public ProductApiContract.ChatbotResponse createChatbot(
             UUID projectId, UUID traceId, ProductApiContract.CreateChatbotRequest request) {
         return rag.createChatbot(projectId, traceId, request);
@@ -209,8 +222,9 @@ public class ProductStore {
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category) {
-        return rag.query(chatbotId, traceId, request, category);
+            List<String> category,
+            String previousQuery) {
+        return rag.query(chatbotId, traceId, request, category, previousQuery);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID jobId, UUID traceId) {

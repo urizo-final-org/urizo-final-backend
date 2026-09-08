@@ -47,12 +47,15 @@ class PublicChatResponseBoundaryTest {
                 .containsExactly("title", "excerpt", "sourceUrl", "categoryLabel");
     }
 
+    /** 첫 턴은 category도 previousQuery도 없이 온다 — 둘 다 생략 가능해야 한다. */
     @Test
-    void categoryIsOptionalOnThePublicRequest() {
+    void categoryAndPreviousQueryAreOptionalOnThePublicRequest() {
         assertThat(componentNames(PublicChatContract.PublicChatQueryRequest.class))
-                .containsExactly("query", "conversationId", "category");
-        assertThat(new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null)
-                .category()).isNull();
+                .containsExactly("query", "conversationId", "category", "previousQuery");
+        PublicChatContract.PublicChatQueryRequest firstTurn =
+                new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null, null);
+        assertThat(firstTurn.category()).isNull();
+        assertThat(firstTurn.previousQuery()).isNull();
     }
 
     @Test

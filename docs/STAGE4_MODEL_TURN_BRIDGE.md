@@ -1,5 +1,6 @@
 # Stage 4 Coding Runtime Bridge
 
+> Status: **HISTORICAL / NON-NORMATIVE** — current implementation and verification are owned by `README.md`, current source, contracts, and executable scripts.
 > Updated: 2026-08-11 (Asia/Seoul)
 > Status: local-full claim/model/tool/checkpoint interrupt-resume PASS; production activation remains out of scope
 

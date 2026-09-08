@@ -8,6 +8,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -17,6 +18,9 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor;
+import org.urizo.axmodulestudio.backend.auth.service.AuthService;
+import org.urizo.axmodulestudio.backend.auth.service.AuthenticationFailedException;
 import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.service.ConnectorOperations;
@@ -38,18 +42,25 @@ public class ProductApiController {
     private final KnowledgeOperations knowledge;
     private final RagOperations rag;
     private final ProductJobOperations jobs;
+    /**
+     * 도메인 경계가 아니라 신원 확인용이다. 요청자를 본문으로 받으면 아무 이름이나 넣을 수
+     * 있으므로 서버가 세션에서 읽는다 — `NaturalCmsCommandController`와 같은 방식이다.
+     */
+    private final AuthService auth;
 
     ProductApiController(
             ProjectOperations projects,
             ConnectorOperations connectors,
             KnowledgeOperations knowledge,
             RagOperations rag,
-            ProductJobOperations jobs) {
+            ProductJobOperations jobs,
+            AuthService auth) {
         this.projects = projects;
         this.connectors = connectors;
         this.knowledge = knowledge;
         this.rag = rag;
         this.jobs = jobs;
+        this.auth = auth;
     }
 
     @PostMapping("/projects")
@@ -201,6 +212,29 @@ public class ProductApiController {
         return knowledge.rollbackKnowledgeVersion(knowledgeBaseId, trace(request), key, body);
     }
 
+    /**
+     * 자료 갱신 요청. 두 관리자 역할 모두 남길 수 있다 — 발견은 일반 관리자도 하고,
+     * 못 하는 것은 처리뿐이다. 쓰기 4종과 달리 SUPER_ADMIN 제한을 두지 않는다.
+     *
+     * <p>멱등 Key를 요구하지 않는다. 저장소가 "같은 사람 · 같은 대상 · 열린 요청"을 하나로
+     * 유지하므로 브라우저가 두 번 보내도 행이 하나다.
+     */
+    @PostMapping("/knowledge-bases/{knowledgeBaseId}/activation-requests")
+    ResponseEntity<ProductApiContract.ActivationRequestResponse> createActivationRequest(
+            @PathVariable UUID knowledgeBaseId,
+            @Valid @RequestBody ProductApiContract.CreateActivationRequestRequest body,
+            Authentication authentication,
+            HttpServletRequest request) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(knowledge.createActivationRequest(
+                knowledgeBaseId, trace(request), actor(authentication), body));
+    }
+
+    @GetMapping("/knowledge-bases/{knowledgeBaseId}/activation-requests")
+    ProductApiContract.ActivationRequestListResponse listOpenActivationRequests(
+            @PathVariable UUID knowledgeBaseId, HttpServletRequest request) {
+        return knowledge.listOpenActivationRequests(knowledgeBaseId, trace(request));
+    }
+
     @PostMapping("/projects/{projectId}/chatbots")
     ResponseEntity<ProductApiContract.ChatbotResponse> createChatbot(
             @PathVariable UUID projectId,
@@ -263,6 +297,19 @@ public class ProductApiController {
             @Valid @RequestBody ProductApiContract.StateMutationRequest body,
             HttpServletRequest request) {
         return jobs.retryJob(jobId, trace(request), key, body);
+    }
+
+    /** 요청자는 서버가 세션에서 읽는다. 본문으로 받으면 아무 이름이나 넣을 수 있다. */
+    private AuthenticatedActor actor(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            throw new AuthenticationFailedException("A valid administrator session is required.");
+        }
+        try {
+            return auth.loadActor(UUID.fromString(authentication.getName()));
+        }
+        catch (IllegalArgumentException failure) {
+            throw new AuthenticationFailedException("A valid administrator session is required.");
+        }
     }
 
     private static UUID trace(HttpServletRequest request) {

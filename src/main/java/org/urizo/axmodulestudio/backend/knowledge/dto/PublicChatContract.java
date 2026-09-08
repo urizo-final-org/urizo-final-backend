@@ -30,11 +30,18 @@ public final class PublicChatContract {
      * 둘(체험·레저 = LS + EX, 관광지 잔여 = NA + HS + VE)이 접두 여러 개라 단일 값으로는
      * 표현되지 않는다. 생략·null·빈 목록은 "전체" 탭이며 필터를 걸지 않는다.
      * contenttypeid는 받지 않는다(함정 23).
+     *
+     * <p>previousQuery는 같은 대화의 직전 사용자 질문이다. 서버가 대화 이력을 보관하지
+     * 않으므로 호출자가 들고 온다 — 저장이 없으니 만료·정리·세션 격리 문제도 없다.
+     * 검색 임베딩에만 얹고 근거 필터·문장 추출에는 쓰지 않는다({@code RagStore.searchText}).
+     * 이력 전체가 아니라 직전 한 건만 받는다: 대명사를 푸는 데 필요한 것은 직전 턴이고,
+     * 목록으로 열어 두면 익명 호출자가 임베딩 입력 길이를 마음대로 늘릴 수 있다.
      */
     public record PublicChatQueryRequest(
             @NotBlank @Size(max = 4000) String query,
             UUID conversationId,
-            @Size(max = 8) List<@Size(max = 40) String> category) {
+            @Size(max = 8) List<@Size(max = 40) String> category,
+            @Size(max = 4000) String previousQuery) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

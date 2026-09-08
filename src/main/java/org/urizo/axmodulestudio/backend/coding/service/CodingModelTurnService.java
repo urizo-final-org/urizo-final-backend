@@ -47,7 +47,7 @@ public class CodingModelTurnService {
     private static final String LOCAL_TOOL_NAME = "read_file";
     private static final String LOCAL_TOOL_PATH = "README.md";
     private static final String LOCAL_TOOL_SCHEMA_DIGEST =
-            "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194";
+            "sha256:ff74f7ba13c98d248beb8a48fb465e440247e87e2c5ad095464a02bc1a70678f";
     /** Mirrors the ProviderChatRequest budget so an oversized context fails as a gateway error. */
     private static final int MAX_REQUEST_CHARACTERS = 65_536;
     // A JSON object because a native tool response body must parse as JSON.
@@ -300,9 +300,13 @@ public class CodingModelTurnService {
                 && !input.path("additionalProperties").booleanValue()
                 && required.isArray() && required.size() == 1
                 && "path".equals(required.get(0).textValue())
-                && properties.isObject() && properties.size() == 1
+                && properties.isObject() && properties.size() == 3
                 && path.isObject() && path.size() == 1
-                && "string".equals(path.path("type").textValue());
+                && "string".equals(path.path("type").textValue())
+                && "integer".equals(
+                        properties.path("startLine").path("type").textValue())
+                && "integer".equals(
+                        properties.path("endLine").path("type").textValue());
     }
 
     private static boolean validApprovedToolSchemas(

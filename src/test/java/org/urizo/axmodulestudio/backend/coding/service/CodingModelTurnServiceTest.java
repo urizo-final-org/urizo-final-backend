@@ -209,7 +209,7 @@ class CodingModelTurnServiceTest {
         assertThat(routed.getValue().tools()).singleElement().satisfies(tool -> {
             assertThat(tool.name()).isEqualTo("read_file");
             assertThat(tool.schemaDigest()).isEqualTo(
-                    "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194");
+                    "sha256:ff74f7ba13c98d248beb8a48fb465e440247e87e2c5ad095464a02bc1a70678f");
         });
     }
 
@@ -671,13 +671,18 @@ class CodingModelTurnServiceTest {
                 .put("description",
                         "Read one approved relative file." + " ".repeat(descriptionPadding))
                 .put("schemaDigest",
-                        "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194");
+                        "sha256:ff74f7ba13c98d248beb8a48fb465e440247e87e2c5ad095464a02bc1a70678f");
         var inputSchema = JsonNodeFactory.instance.objectNode()
                 .put("type", "object")
                 .put("additionalProperties", false);
         inputSchema.set("required", JsonNodeFactory.instance.arrayNode().add("path"));
-        inputSchema.set("properties", JsonNodeFactory.instance.objectNode()
-                .set("path", JsonNodeFactory.instance.objectNode().put("type", "string")));
+        var properties = JsonNodeFactory.instance.objectNode();
+        properties.set("path", JsonNodeFactory.instance.objectNode().put("type", "string"));
+        properties.set(
+                "startLine", JsonNodeFactory.instance.objectNode().put("type", "integer"));
+        properties.set(
+                "endLine", JsonNodeFactory.instance.objectNode().put("type", "integer"));
+        inputSchema.set("properties", properties);
         toolSchema.set("inputSchema", inputSchema);
         return toolSchema;
     }

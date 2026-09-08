@@ -43,7 +43,7 @@ public final class CodingToolService {
             org.slf4j.LoggerFactory.getLogger(CodingToolService.class);
 
     static final Map<String, String> CODING_TOOL_SCHEMA_DIGESTS = Map.of(
-            "read_file", "sha256:39b714704935190561ed407980480b9a4a0b346b97346e0bff71fb9ace820194",
+            "read_file", "sha256:ff74f7ba13c98d248beb8a48fb465e440247e87e2c5ad095464a02bc1a70678f",
             "search_code", "sha256:4ef58a30900281deda5141481d8ec042c002273f1aac8f7851a6020b8f4d1fd5",
             "read_diff", "sha256:99334726611ccf58a148b0814696bfa6fe08c1b2d027e946beccf5a74331c9aa",
             "apply_patch", "sha256:f80e35f798eb3962fb3c65da2b8e9c0583d3d177b5e0435c273a296ff88f2411",
@@ -299,7 +299,8 @@ public final class CodingToolService {
             if (!"read_file".equals(request.toolName())) {
                 throw unavailable();
             }
-            return new ToolOutput("text/plain", fixtureContent);
+            return new ToolOutput("text/plain",
+                    readFileView(request.arguments(), fixtureContent));
         }
         ObjectNode arguments = objectMapper.createObjectNode();
         arguments.put("workspace", binding.workspaceId().toString());
@@ -368,7 +369,8 @@ public final class CodingToolService {
         }
         validateMcpResult(request, structured);
         if ("read_file".equals(request.toolName())) {
-            return new ToolOutput("text/plain", structured.path("content").asText());
+            return new ToolOutput("text/plain",
+                    readFileView(request.arguments(), structured.path("content").asText()));
         }
         try {
             return new ToolOutput("application/json", objectMapper.writeValueAsString(structured));
@@ -678,8 +680,19 @@ public final class CodingToolService {
     static void validateToolArguments(String toolName, JsonNode arguments) {
         switch (toolName) {
             case "read_file" -> {
-                requireObjectFields(arguments, Set.of("path"), "tool arguments");
+                Set<String> actual = objectFields(arguments, "tool arguments");
+                if (!actual.contains("path")
+                        || !Set.of("path", "startLine", "endLine").containsAll(actual)) {
+                    throw validation("read_file arguments are invalid.");
+                }
                 relativePath(text(arguments, "path"), "path");
+                int start = arguments.has("startLine") ? integer(arguments, "startLine") : 1;
+                if (start < 1) {
+                    throw validation("startLine must be 1 or greater.");
+                }
+                if (arguments.has("endLine") && integer(arguments, "endLine") < start) {
+                    throw validation("endLine must not be before startLine.");
+                }
             }
             case "search_code" -> {
                 Set<String> actual = objectFields(arguments, "tool arguments");
@@ -1143,6 +1156,51 @@ public final class CodingToolService {
     }
 
     private static String version() { return CodingToolContract.SCHEMA_VERSION; }
+    /**
+     * Bounds what one read_file feeds the conversation. Every read is replayed with
+     * every later answer, and Jobs 06b2b251 and bcb6806b both died right after a
+     * 42,695-character file entered the context. A whole-file read larger than this is
+     * refused with the numbers the model needs to ask again with startLine/endLine, and
+     * a ranged read must fit the same bound. 24,000 keeps the largest file that ever
+     * succeeded whole (PublicSite.tsx, 21,663 characters) readable in one call.
+     */
+    static final int MAX_READ_FILE_CONTENT_CHARACTERS = 24_000;
+
+    /**
+     * The model names the range it wants; slicing is arithmetic over the file, so the
+     * server does it. Lines are split on bare newline so CRLF content round-trips byte
+     * for byte - oldText copied out of a slice still matches the real file.
+     */
+    static String readFileView(JsonNode arguments, String content) {
+        boolean ranged = arguments.has("startLine") || arguments.has("endLine");
+        if (!ranged && content.length() <= MAX_READ_FILE_CONTENT_CHARACTERS) {
+            return content;
+        }
+        String[] lines = content.split("\n", -1);
+        if (!ranged) {
+            throw validation("The file is " + content.length() + " characters over "
+                    + lines.length + " lines - too large to read whole. Call read_file "
+                    + "again with startLine and endLine (1-based, inclusive) around the "
+                    + "region you need; search_code matches carry the line numbers.");
+        }
+        int start = arguments.has("startLine") ? arguments.path("startLine").asInt() : 1;
+        int end = arguments.has("endLine")
+                ? Math.min(arguments.path("endLine").asInt(), lines.length)
+                : lines.length;
+        if (start > lines.length) {
+            throw validation("startLine " + start + " is past the end of the file - it "
+                    + "has only " + lines.length + " lines.");
+        }
+        String slice = String.join("\n",
+                java.util.Arrays.asList(lines).subList(start - 1, end));
+        if (slice.length() > MAX_READ_FILE_CONTENT_CHARACTERS) {
+            throw validation("Lines " + start + "-" + end + " hold " + slice.length()
+                    + " characters - still too large to return. Narrow the range.");
+        }
+        return "[read_file: lines " + start + "-" + end + " of " + lines.length
+                + "; this note line is not part of the file]\n" + slice;
+    }
+
     private static CodingToolException validation(String message) {
         return new CodingToolException("TOOL_ARGUMENTS_INVALID", message, HttpStatus.BAD_REQUEST);
     }

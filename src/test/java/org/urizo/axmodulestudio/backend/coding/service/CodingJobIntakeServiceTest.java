@@ -144,7 +144,10 @@ class CodingJobIntakeServiceTest {
         assertThat(built.allowedNodes())
                 .containsExactly("start", "guardrail", "analyze", "code", "end");
         assertThat(built.requestText()).isEqualTo("회원 목록에 가입일도 보이게 해줘");
-        assertThat(built.expiresAt()).isEqualTo(NOW.plus(Duration.ofHours(1)));
+        // A day, not an hour: this clock runs while the Job waits for a person,
+        // and a worker refuses an expired Job outright. An approver who read the
+        // request the next morning used to press approve and get nothing back.
+        assertThat(built.expiresAt()).isEqualTo(NOW.plus(Duration.ofHours(24)));
     }
 
     @Test

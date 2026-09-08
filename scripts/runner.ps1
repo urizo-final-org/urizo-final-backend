@@ -138,6 +138,47 @@ function Get-RepositorySourcePath {
     return (Join-Path $workspaceRoot $known[$Repository])
 }
 
+function Set-PublishRemote {
+    # The Coding workspace is cloned inside the container from a read-only mount, so its origin
+    # is that mount path and it cannot reach GitHub at all. That is deliberate and stays that
+    # way: the container the model works in has no network and no secrets. Publishing happens
+    # here on the host instead, so the copy exported for the pull request is pointed at the
+    # canonical repository's own origin - the same URL and the same stored credential a person
+    # would push with. Nothing is granted to the model's room.
+    #
+    # The URL is read from the canonical checkout rather than taken from the payload: a queued
+    # command must never be able to name where a pull request is published.
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$Worktree
+    )
+
+    $source = Get-RepositorySourcePath -Repository $Repository
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "RUNNER_PR_BLOCKED|canonical 저장소를 찾을 수 없습니다: $source"
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $url = "$(@(& git -C $source remote get-url origin 2>&1)[0])".Trim()
+        $readExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($readExit -ne 0 -or $url -notmatch '^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?(\.git)?$') {
+        throw 'RUNNER_PR_BLOCKED|canonical origin 주소를 해석하지 못했습니다.'
+    }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $applied = & git -C $Worktree remote set-url origin $url 2>&1
+        $applyExit = $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $previous }
+    if ($applyExit -ne 0) {
+        throw "RUNNER_PR_FAILED|작업 폴더 origin 설정 실패: $(($applied | Select-Object -Last 2) -join ' ')"
+    }
+}
+
 function Invoke-CreateMcpWorkspace {
     param(
         [Parameter(Mandatory = $true)][string]$Repository,
@@ -880,6 +921,7 @@ function Invoke-CreatePullRequest {
 
     $worktree = Export-McpWorkspaceToHost `
         -Repository $repository -WorkspaceId $workspaceId
+    Set-PublishRemote -Repository $repository -Worktree $worktree
     $slug = Get-RemoteSlug -Worktree $worktree
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'

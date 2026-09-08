@@ -10,6 +10,7 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -214,7 +215,8 @@ final class ProductBatchService {
         for (int start = 0; start < chunks.size(); start += batchSize) {
             List<ChunkRow> slice = chunks.subList(start, Math.min(start + batchSize, chunks.size()));
             List<EmbeddingClient.Item> items = slice.stream()
-                    .map(chunk -> new EmbeddingClient.Item(chunk.chunkId().toString(), chunk.content()))
+                    .map(chunk -> new EmbeddingClient.Item(
+                            chunk.chunkId().toString(), embeddingInput(chunk.content())))
                     .toList();
 
             // 차원·건수 검증은 클라이언트가 수행한다. 어긋나면 여기에 도달하지 않는다.
@@ -288,6 +290,23 @@ final class ProductBatchService {
             throw new IllegalStateException("Knowledge build job has no immutable target version.");
         }
         return values.get(0);
+    }
+
+    /**
+     * 임베딩 입력에서 뺄 줄의 라벨. 주소·전화·URL·날짜 나열은 의미 벡터에 노이즈만 더한다.
+     * [이름]·[분류]·[유형]은 남긴다 — 질의에 고유명사가 들어온다.
+     * document_chunk.content와 content_digest는 그대로다. 달라지는 것은 벡터뿐이다.
+     */
+    private static final List<String> EMBED_EXCLUDED_LABELS =
+            List.of("[주소]", "[행사기간]", "[전화]", "[홈페이지]");
+
+    static String embeddingInput(String content) {
+        return content.lines()
+                .filter(line -> {
+                    String stripped = line.stripLeading();
+                    return EMBED_EXCLUDED_LABELS.stream().noneMatch(stripped::startsWith);
+                })
+                .collect(Collectors.joining("\n"));
     }
 
     private static UUID stableId(String value) {

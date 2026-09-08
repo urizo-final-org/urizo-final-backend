@@ -268,6 +268,37 @@ class CodingHandlerResultServiceTest {
     }
 
     @Test
+    void pullRequestPersistenceRequiresTheJobsExactRepositoryAndApprovalSubject() {
+        ObjectMapper mapper = new ObjectMapper();
+        UUID traceId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+        String candidate = "sha1:1111111111111111111111111111111111111111";
+        String validation =
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        ObjectNode payload = mapper.createObjectNode()
+                .put("repository", "frontend")
+                .put("base", "dev")
+                .put("candidateSha", candidate)
+                .put("validationHash", validation);
+        CodingHandlerContract.PutResultRequest request =
+                new CodingHandlerContract.PutResultRequest(
+                        "1.0", traceId, 4, "coding.pr_complete",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "completed",
+                        UUID.randomUUID(), candidate, validation, validation, payload);
+
+        CodingHandlerResultService.requirePullRequestRepository("frontend", request);
+
+        assertThatThrownBy(() -> CodingHandlerResultService.requirePullRequestRepository(
+                "backend", request))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("latest authorized candidate");
+        payload.put("validationHash",
+                "sha256:3333333333333333333333333333333333333333333333333333333333333333");
+        assertThatThrownBy(() -> CodingHandlerResultService.requirePullRequestRepository(
+                "frontend", request))
+                .isInstanceOf(CodingWorkerException.class);
+    }
+
+    @Test
     void reviewAndPreviewRejectCandidateDrift() {
         String codeCandidate = "sha1:1111111111111111111111111111111111111111";
         String driftedCandidate = "sha1:3333333333333333333333333333333333333333";

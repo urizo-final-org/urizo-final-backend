@@ -110,8 +110,13 @@ public final class NaturalCmsResourceService {
     public JsonNode validateCommand(
             NaturalCmsContract.ResourceRef resource, JsonNode command) {
         ResourceHandler<?> handler = handler(resource);
-        validated(handler, resource.id(), parse(resource.type(), handler, command, null));
-        return command.deepCopy();
+        // 다듬은 뒤 검사한다. 검사한 것과 기록에 남는 것이 같아야 승인한 것이 반영된다.
+        JsonNode recorded = command.deepCopy();
+        if (recorded.path("fields") instanceof ObjectNode fields) {
+            handler.normalize(fields);
+        }
+        validated(handler, resource.id(), parse(resource.type(), handler, recorded, null));
+        return recorded;
     }
 
     /**
@@ -314,6 +319,15 @@ public final class NaturalCmsResourceService {
         /** 모델에게 줄 참고 목록. 없으면 {@code null}. */
         default ObjectNode promptContext(String id) {
             return null;
+        }
+
+        /**
+         * 기록에 남길 명령을 다듬는다. 손댈 것이 없는 리소스가 기본값이다.
+         *
+         * <p>이 결과가 미리보기에 그대로 보이고 승인 뒤 반영된다. 모델이 보낸 모양과 실제
+         * 저장되는 모양이 다르면 사람은 승인할 것을 못 보고 승인하게 된다.
+         */
+        default void normalize(ObjectNode fields) {
         }
     }
 
@@ -833,6 +847,20 @@ public final class NaturalCmsResourceService {
             state.put("body", view.body());
             state.put("updatedAt", view.updatedAt().toString());
             return state;
+        }
+
+        /**
+         * 모델이 문서를 한 번 더 escape 해 보내면 되돌린 뒤 기록한다.
+         *
+         * <p>되돌리기 전 값은 문서가 아니라 긴 글자라, 미리보기가 부품 이름이 늘어선 원문을
+         * 그대로 보여 준다. 반영되는 것과 같은 모양을 보고 승인해야 한다.
+         */
+        @Override
+        public void normalize(ObjectNode fields) {
+            JsonNode body = fields.get("body");
+            if (body != null && body.isTextual()) {
+                fields.put("body", ContentBody.normalize(body.textValue()));
+            }
         }
 
         @Override

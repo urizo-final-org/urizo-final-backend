@@ -55,7 +55,8 @@ class CodingApprovalCheckGateTest {
 
     @Test
     void refusesTheApprovalWhileACheckOfThisJobIsRecordedFailed() {
-        assertThatThrownBy(() -> decide(1, CodingHandlerContract.Decision.APPROVED))
+        assertThatThrownBy(() -> decide(
+                List.of("SUCCEEDED", "FAILED"), CodingHandlerContract.Decision.APPROVED))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("검사를 통과하지 못해")
                 // The reader cannot act on "테스트 실패" alone, so the message says what they can do.
@@ -63,8 +64,33 @@ class CodingApprovalCheckGateTest {
     }
 
     @Test
+    void refusesTheApprovalWhileTheChecksAreStillRunning() {
+        // Measured: the approval becomes available while BUILD is still RUNNING. A gate that
+        // only looked for a failure left the button live in exactly that window - the screen
+        // said "아직 준비되지 않았습니다" and the server disagreed with it.
+        assertThatThrownBy(() -> decide(
+                List.of("SUCCEEDED", "RUNNING"), CodingHandlerContract.Decision.APPROVED))
+                .isInstanceOf(CodingJobLifecycleException.class)
+                // Not the rejection message: waiting and rejecting are opposite instructions,
+                // and rejecting a result whose checks had not finished throws away a good
+                // candidate and costs another model run.
+                .hasMessageContaining("아직 끝나지 않았습니다")
+                .hasMessageNotContaining("반려하면");
+    }
+
+    @Test
     void letsTheApprovalThroughWhenEveryCheckPassed() {
-        assertThatCode(() -> decide(0, CodingHandlerContract.Decision.APPROVED))
+        assertThatCode(() -> decide(
+                List.of("SUCCEEDED", "SUCCEEDED"), CodingHandlerContract.Decision.APPROVED))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void requiresOnlyTheChecksThisJobActuallyQueued() {
+        // A backend Job queues BUILD and no TEST, because its build is the compile. Demanding a
+        // TEST row that is never written would block every backend request forever.
+        assertThatCode(() -> decide(
+                List.of("SUCCEEDED"), CodingHandlerContract.Decision.APPROVED))
                 .doesNotThrowAnyException();
     }
 
@@ -73,7 +99,7 @@ class CodingApprovalCheckGateTest {
         // Queued rows carry the workspace id only for Jobs the current intake created. Refusing
         // an older Job would turn "we have no record" into "it failed", which is not the same
         // thing - and is the rule the preview link already follows.
-        assertThatCode(() -> decide(null, CodingHandlerContract.Decision.APPROVED))
+        assertThatCode(() -> decide(List.of(), CodingHandlerContract.Decision.APPROVED))
                 .doesNotThrowAnyException();
     }
 
@@ -81,17 +107,19 @@ class CodingApprovalCheckGateTest {
     void neverBlocksARejection() {
         // Calling a result off has to stay possible whatever the checks say. It is also the way
         // out when a check is wrong: rejecting a preview opens the next attempt.
-        assertThatCode(() -> decide(1, CodingHandlerContract.Decision.REJECTED))
+        assertThatCode(() -> decide(
+                List.of("SUCCEEDED", "FAILED"), CodingHandlerContract.Decision.REJECTED))
                 .doesNotThrowAnyException();
     }
 
     /**
      * One CANDIDATE decision through the real path.
      *
-     * @param failedChecks what the runner-task count returns, or null for a Job with no rows
+     * @param checkStatuses the newest BUILD/TEST rows this Job queued; empty for an older Job
      */
     @SuppressWarnings("unchecked")
-    private static void decide(Integer failedChecks, CodingHandlerContract.Decision decision)
+    private static void decide(
+            List<String> checkStatuses, CodingHandlerContract.Decision decision)
             throws Exception {
         Instant now = Instant.parse("2026-09-08T12:00:00Z");
         UUID approvalId = CodingApprovalId.forStage(
@@ -121,11 +149,6 @@ class CodingApprovalCheckGateTest {
                 return 1;
             }
             if ("queryForObject".equals(method) && arguments[0] instanceof String sql) {
-                // Checked first: this one also counts, and would otherwise be answered by the
-                // idempotency branch below.
-                if (sql.contains("app.coding_runner_task")) {
-                    return failedChecks;
-                }
                 if (sql.contains("SELECT status FROM app.coding_job")) {
                     return "WAITING_APPROVAL";
                 }
@@ -141,6 +164,17 @@ class CodingApprovalCheckGateTest {
                     && arguments[0] instanceof String sql
                     && arguments[1] instanceof RowMapper<?> rowMapper) {
                 ResultSet row = mock(ResultSet.class);
+                // Checked before the others: this query selects a bare status column and would
+                // otherwise fall through to a branch that maps a different shape.
+                if (sql.contains("app.coding_runner_task")) {
+                    List<Object> rows = new java.util.ArrayList<>();
+                    for (String status : checkStatuses) {
+                        ResultSet check = mock(ResultSet.class);
+                        when(check.getString("status")).thenReturn(status);
+                        rows.add(rowMapper.mapRow(check, rows.size()));
+                    }
+                    return rows;
+                }
                 if (sql.contains("FROM app.coding_worker_command")) {
                     when(row.getString("response_json")).thenReturn(outcome.toString());
                     when(row.getString(2)).thenReturn(outcome.toString());

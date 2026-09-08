@@ -689,7 +689,13 @@ function Invoke-PreviewUp {
     # Same split as BUILD: the Compose files are Backend files, so the project directory is a
     # Backend checkout even when the Job worked in the frontend.
     if ($repository -eq 'frontend') {
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The canonical checkout rather than an AI work folder. Nothing changed in the Backend
+        # for a frontend Job, so any Backend checkout would do - but <WorkRoot>i-backend is
+        # only ever made by the old CREATE_WORKTREE command, which no product flow runs any
+        # more. It survives here as a stale August copy and is absent under any other WorkRoot,
+        # so a runner started with the team lead's default WorkRoot fails the frontend Job at
+        # BUILD. The canonical path is derived from the same WorkRoot and is always there.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         $frontendSource = $exported
     }
     else {
@@ -767,8 +773,11 @@ function Invoke-ComposeBuild {
     if ($repository -eq 'frontend') {
         # The Compose files live in the Backend repository, so the project directory stays a
         # Backend checkout no matter which repository is being built. A frontend workspace holds
-        # no compose.dev.yaml and naming it here fails before the build starts.
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # no compose.dev.yaml and naming it here fails before the build starts. The canonical
+        # checkout is used rather than <WorkRoot>i-backend: see PREVIEW_UP above for why that
+        # folder cannot be relied on. Nothing in the Backend changed for a frontend Job, so the
+        # canonical copy is also the correct one to compose from.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         # The image is built from the model's own work when there is any. Falling back to the
         # shared checkout would build a screen nobody changed and call it the candidate.
         $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }

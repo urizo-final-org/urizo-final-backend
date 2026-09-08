@@ -14,6 +14,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
@@ -35,6 +37,8 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
 @ConditionalOnProperty(
         prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class NaturalCmsStageService {
+
+    private static final Logger log = LoggerFactory.getLogger(NaturalCmsStageService.class);
 
     private static final Set<String> ANALYZE_PORTS = Set.of("feasible", "infeasible");
     private static final Set<String> RESOURCE_METADATA_FIELDS =
@@ -163,8 +167,8 @@ public final class NaturalCmsStageService {
                 || !"validate_cms_command".equals(response.toolCalls().get(0).name())) {
             throw contract("Natural CMS Model must return one validate_cms_command Tool Call.");
         }
-        JsonNode command = resources.validateCommand(
-                job.resource(), response.toolCalls().get(0).arguments().path("command"));
+        JsonNode command = validatedCommand(
+                job, response.toolCalls().get(0).arguments().path("command"));
 
         ObjectNode targetArguments = baseArguments(job.resource(), currentState);
         callTool("resolve_cms_target", targetArguments, allowedTools);
@@ -481,6 +485,29 @@ public final class NaturalCmsStageService {
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation."
                 + note;
+    }
+
+    /**
+     * 거부된 명령을 로그에 남기고 그대로 다시 던진다.
+     *
+     * <p>명령 단계 예외는 Handler 결과로 기록되지 않아 Job이 {@code ACTIVE}로 남고 화면은
+     * `미리보기를 받지 못했습니다`로 끝난다. 무엇이 왜 거부됐는지 남는 곳이 없으면 원인을 찾을
+     * 방법이 없다. 명령서에는 관리자가 쓴 CMS 내용만 들어 있고 Secret은 없다.
+     */
+    private JsonNode validatedCommand(
+            NaturalCmsContract.JobResponse job, JsonNode proposal) {
+        try {
+            return resources.validateCommand(job.resource(), proposal);
+        }
+        catch (NaturalCmsException failure) {
+            String command = encode(proposal);
+            log.warn("Natural CMS rejected a model command: jobId={} resource={}:{} code={} "
+                            + "reason={} command={}",
+                    job.jobId(), job.resource().type(), job.resource().id(),
+                    failure.code(), failure.getMessage(),
+                    command.length() > 2000 ? command.substring(0, 2000) + "…" : command);
+            throw failure;
+        }
     }
 
     private JsonNode callTool(

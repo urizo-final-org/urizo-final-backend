@@ -111,6 +111,38 @@ class ContentBodyTest {
         assertThat(ContentBody.problem(document)).contains("서식");
     }
 
+    /**
+     * 모델이 문서를 한 번 더 escape 해 보내는 일이 있다.
+     *
+     * <p>같은 요청인데 어떤 때는 제대로, 어떤 때는 이렇게 온다. 지시문으로 없앨 수 있는 종류가
+     * 아니라 서버가 되돌린다. 되돌린 값이 그대로 저장되어야 DB에 깨진 본문이 남지 않는다.
+     */
+    @Test
+    void unescapesADocumentTheModelEscapedTwice() {
+        String twice = "{\\\"type\\\":\\\"doc\\\",\\\"content\\\":[{\\\"type\\\":\\\"paragraph\\\","
+                + "\\\"content\\\":[{\\\"type\\\":\\\"text\\\",\\\"text\\\":\\\"안내\\\"}]}]}";
+
+        assertThat(ContentBody.problem(twice)).isNull();
+        assertThat(ContentBody.normalize(twice))
+                .startsWith("{\"type\":\"doc\"")
+                .contains("\"text\":\"안내\"")
+                .doesNotContain("\\\"");
+    }
+
+    /** 되돌린 뒤에도 허용 부품 검사는 그대로 탄다. escape 한 겹이 가드레일을 통과시키면 안 된다. */
+    @Test
+    void stillRefusesAForbiddenNodeInsideATwiceEscapedDocument() {
+        String twice = "{\\\"type\\\":\\\"doc\\\",\\\"content\\\":"
+                + "[{\\\"type\\\":\\\"table\\\",\\\"content\\\":[]}]}";
+
+        assertThat(ContentBody.problem(twice)).contains("쓸 수 없는");
+    }
+
+    @Test
+    void leavesSomethingThatIsNotADocumentAloneWhenNormalising() {
+        assertThat(ContentBody.normalize("## 제목")).isEqualTo("## 제목");
+    }
+
     /** 변환한 문서는 그대로 저장 검사를 통과해야 한다. 옛 본문이 열자마자 막히면 안 된다. */
     @Test
     void keepsConvertedMarkdownAcceptableToTheSaveCheck() {

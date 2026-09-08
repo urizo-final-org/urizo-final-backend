@@ -57,10 +57,23 @@ public final class ContentBody {
         if (body == null || body.isBlank()) {
             return body;
         }
-        if (isDocument(body)) {
-            return body;
+        JsonNode document = parse(body);
+        if (document != null) {
+            return document.toString();
         }
         return MAPPER.valueToTree(fromMarkdown(body)).toString();
+    }
+
+    /**
+     * 저장할 본문을 표준 형태로 되돌린다. 문서가 아니면 받은 값을 그대로 준다.
+     *
+     * <p>모델이 문서를 <b>한 번 더 escape</b> 해서 보내는 일이 있다. 같은 요청인데 어떤 때는
+     * 제대로, 어떤 때는 {@code {\"type\":\"doc\"...}} 처럼 보낸다. 지시문으로 없앨 수 있는
+     * 종류가 아니라 여기서 되돌린다. 되돌린 뒤에도 허용 부품 검사는 그대로 탄다.
+     */
+    public static String normalize(String body) {
+        JsonNode document = parse(body);
+        return document == null ? body : document.toString();
     }
 
     /**
@@ -73,14 +86,8 @@ public final class ContentBody {
         if (body == null || body.isBlank()) {
             return "본문이 비어 있습니다.";
         }
-        JsonNode document;
-        try {
-            document = MAPPER.readTree(body);
-        }
-        catch (JsonProcessingException failure) {
-            return "본문은 편집기가 만든 문서 형식이어야 합니다.";
-        }
-        if (!document.isObject() || !"doc".equals(document.path("type").asText())) {
+        JsonNode document = parse(body);
+        if (document == null) {
             return "본문은 편집기가 만든 문서 형식이어야 합니다.";
         }
         if (!document.path("content").isArray() || document.path("content").isEmpty()) {
@@ -89,16 +96,39 @@ public final class ContentBody {
         return walk(document);
     }
 
-    private static boolean isDocument(String body) {
-        String trimmed = body.stripLeading();
-        if (!trimmed.startsWith("{")) {
-            return false;
+    /**
+     * 본문을 문서로 읽는다. 문서가 아니면 {@code null}이다.
+     *
+     * <p>한 번 더 escape 된 값도 받아준다. 그 경우 문자열 리터럴로 한 번 풀면 원래 문서가 된다.
+     */
+    private static JsonNode parse(String body) {
+        if (body == null || body.isBlank() || !body.stripLeading().startsWith("{")) {
+            return null;
+        }
+        JsonNode document = readDocument(body);
+        return document != null ? document : readDocument(unescapeOnce(body));
+    }
+
+    private static JsonNode readDocument(String body) {
+        if (body == null) {
+            return null;
         }
         try {
-            return "doc".equals(MAPPER.readTree(body).path("type").asText());
+            JsonNode node = MAPPER.readTree(body);
+            return node.isObject() && "doc".equals(node.path("type").asText()) ? node : null;
         }
         catch (JsonProcessingException failure) {
-            return false;
+            return null;
+        }
+    }
+
+    /** 통째로 따옴표에 넣어 문자열 리터럴로 읽는다. 그러면 escape가 한 겹 풀린다. */
+    private static String unescapeOnce(String body) {
+        try {
+            return MAPPER.readValue("\"" + body + "\"", String.class);
+        }
+        catch (JsonProcessingException failure) {
+            return null;
         }
     }
 

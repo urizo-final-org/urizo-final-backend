@@ -873,7 +873,8 @@ public final class NaturalCmsResourceService {
          */
         private CmsRequests.ArticleRequest article(
                 JsonNode fields, String currentTitle, String currentBody) {
-            String body = text(fields, "body", currentBody);
+            // 모델이 문서를 한 번 더 escape 해 보내는 일이 있어 되돌린 뒤 검사한다.
+            String body = ContentBody.normalize(text(fields, "body", currentBody));
             String problem = ContentBody.problem(body);
             if (problem != null) {
                 throw invalidCommand(problem);

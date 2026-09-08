@@ -106,15 +106,17 @@ public class CmsService {
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView createContent(UUID authorId, String title, String body) {
         validateArticle(title, body);
-        validateContentBody(body);
-        return content(repository.insertContent(authorId, title.trim(), body));
+        String document = ContentBody.normalize(body);
+        validateContentBody(document);
+        return content(repository.insertContent(authorId, title.trim(), document));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public ContentView updateContent(long id, String title, String body) {
         validateArticle(title, body);
-        validateContentBody(body);
-        if (repository.updateContent(id, title.trim(), body) == 0) {
+        String document = ContentBody.normalize(body);
+        validateContentBody(document);
+        if (repository.updateContent(id, title.trim(), document) == 0) {
             throw notFound("콘텐츠를 찾을 수 없습니다.");
         }
         return content(id);

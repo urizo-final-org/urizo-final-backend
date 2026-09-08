@@ -813,20 +813,11 @@ function Invoke-FrontendChecks {
     return @{ repo = 'frontend'; summary = "$summary · 타입 검사와 빌드 통과" }
 }
 
-function Invoke-Tests {
-    param($Payload)
-
-    $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
-    if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
-
+function Invoke-BackendTests {
     # The runtime image has no Maven and no test dependencies: the Dockerfile
     # builds with -DskipTests on purpose. Tests therefore run in the build stage,
     # and the dependency cache is a named volume so only the first run downloads.
-    if ($repository -eq 'frontend') { return Invoke-FrontendChecks }
-    if ($repository -ne 'backend') {
-        throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository"
-    }
-
+    $repository = 'backend'
     $worktree = Get-AiWorktreePath -Repository $repository
     $stageImage = "axms/preview-$repository-test:latest"
 
@@ -851,6 +842,88 @@ function Invoke-Tests {
         throw "RUNNER_TEST_FAILED|$summary"
     }
     return @{ repo = $repository; summary = $summary }
+}
+
+function Invoke-CheckAttempt {
+    param([string]$Repository)
+
+    if ($Repository -eq 'frontend') { return Invoke-FrontendChecks }
+    return Invoke-BackendTests
+}
+
+<#
+    The check's own words when it failed, or nothing when it failed for another reason.
+
+    Only RUNNER_TEST_FAILED is worth a second run. A missing workspace or an unreadable
+    payload will fail the same way however many times it is asked.
+#>
+function Get-CheckFailureDetail {
+    param($Failure)
+
+    $message = "$($Failure.Exception.Message)"
+    $prefix = 'RUNNER_TEST_FAILED|'
+    if (-not $message.StartsWith($prefix)) { return $null }
+    return $message.Substring($prefix.Length)
+}
+
+<#
+    Runs the checks, and runs them a second time if the first attempt failed.
+
+    A check that fails because it ran out of patience is not a finding. Job 9b55bb27 was
+    told "AI 가 만든 화면이 검사를 통과하지 못했습니다" about AppShell.session-race.test.tsx,
+    which the change never touched: the suite runs 27 files at once, and under that
+    contention one assertion crossed the one second findBy waits. The same commit passed on
+    another day. The wait itself is now four seconds (frontend src/test/setup.ts), which
+    covers that run twice over - but no fixed number can promise it never happens again, and
+    a machine under more load than usual will cross any line eventually.
+
+    A second run answers that without guessing. Genuinely broken code fails both times. A
+    single bad moment has to happen twice in a row to be believed, which is far rarer than
+    once.
+
+    The first failure is not thrown away. It is carried into the summary a super
+    administrator reads, so a test that keeps needing its second chance is visible rather
+    than quietly absorbed - "실패는 조용하지 않게". A general administrator is not shown the
+    retry: there is nothing for them to do about it, and the only difference they can see is
+    that a failing check takes about twice as long.
+
+    Twice, not three times. Each extra attempt costs another full check - about a minute for
+    the frontend, several for the backend - and buys less than the one before it.
+#>
+function Invoke-Tests {
+    param($Payload)
+
+    $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
+    if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
+    if ($repository -ne 'frontend' -and $repository -ne 'backend') {
+        throw "RUNNER_PAYLOAD_INVALID|알 수 없는 저장소입니다: $repository"
+    }
+
+    $firstDetail = $null
+    try {
+        return Invoke-CheckAttempt -Repository $repository
+    }
+    catch {
+        $firstDetail = Get-CheckFailureDetail -Failure $_
+        if ($null -eq $firstDetail) { throw }
+    }
+
+    # Nothing is written to the pipeline here. This function's value is its result
+    # hashtable, and a stray Write-Output would be returned alongside it - the caller
+    # then holds an array and $result.ContainsKey(...) fails on it. The retry is not
+    # hidden by leaving it out: it is carried in the summary the caller prints and
+    # stores.
+    try {
+        $result = Invoke-CheckAttempt -Repository $repository
+    }
+    catch {
+        $secondDetail = Get-CheckFailureDetail -Failure $_
+        if ($null -eq $secondDetail) { throw }
+        throw "RUNNER_TEST_FAILED|두 번 다 실패 · 1차 $firstDetail · 2차 $secondDetail"
+    }
+
+    $result.summary = "1차 실패 후 재검사 통과 · 1차 $firstDetail · 2차 $($result.summary)"
+    return $result
 }
 
 function Invoke-CreatePullRequest {

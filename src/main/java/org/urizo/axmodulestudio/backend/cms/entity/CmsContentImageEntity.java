@@ -9,7 +9,6 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
-import jakarta.persistence.Lob;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
 import org.urizo.axmodulestudio.backend.auth.entity.AdminAccountEntity;
@@ -40,7 +39,10 @@ public class CmsContentImageEntity {
     @Column(name = "byte_size", nullable = false, updatable = false)
     private int byteSize;
 
-    @Lob
+    /**
+     * {@code @Lob}을 붙이지 않는다. 붙이면 Hibernate가 Postgres large object({@code oid})를
+     * 기대해 {@code bytea} 컬럼과 어긋나고 스키마 검증이 기동을 막는다.
+     */
     @Column(name = "bytes", nullable = false, updatable = false)
     private byte[] bytes;
 

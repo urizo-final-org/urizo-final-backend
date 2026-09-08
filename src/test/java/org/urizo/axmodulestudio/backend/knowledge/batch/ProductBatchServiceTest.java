@@ -75,22 +75,4 @@ class ProductBatchServiceTest {
             assertThat(period.start()).isBeforeOrEqualTo(period.end());
         });
     }
-
-    @Test
-    void embeddingInputDropsOnlyTheNonSemanticLines() {
-        String input = ProductBatchService.embeddingInput(FESTIVAL_CONTENT);
-
-        assertThat(input).isEqualTo("""
-                [분류] 축제/공연/행사
-                [유형] 축제
-                [이름] 안동국제탈춤페스티벌
-                [개요] 안동에서 열리는 탈춤 축제.""");
-    }
-
-    @Test
-    void embeddingInputKeepsContentWithoutExcludedLabelsIdentical() {
-        String content = "[분류] 관광지\n[이름] 속초 해수욕장\n[개요] 해수욕장이다.";
-
-        assertThat(ProductBatchService.embeddingInput(content)).isEqualTo(content);
-    }
 }

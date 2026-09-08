@@ -844,10 +844,15 @@ public final class CodingHandlerStageService {
                 || !"dev".equals(receipt.path("base").asText())
                 || !branch.equals(receipt.path("head").asText())
                 || !requested.candidateSha().equals(receipt.path("candidateSha").asText())
+                || !requested.validationHash().equals(receipt.path("validationHash").asText())
                 || !receipt.path("headSha").asText().matches("^sha1:[0-9a-f]{40}$")
                 || !receipt.path("prNumber").canConvertToInt()
                 || receipt.path("prNumber").intValue() < 1
-                || !receipt.path("prUrl").isTextual()) {
+                || !receipt.path("prUrl").isTextual()
+                || !Set.of("OPEN", "MERGED").contains(receipt.path("state").asText())
+                || !receipt.path("authorLogin").asText()
+                        .matches("^[a-z0-9][a-z0-9-]*\\[bot\\]$")
+                || !receipt.path("reused").isBoolean()) {
             throw contract("The pull request runner receipt is invalid.");
         }
         ObjectNode payload = objectMapper.createObjectNode();
@@ -856,9 +861,12 @@ public final class CodingHandlerStageService {
         payload.put("head", branch);
         payload.put("candidateSha", requested.candidateSha());
         payload.put("headSha", receipt.path("headSha").asText());
+        payload.put("validationHash", requested.validationHash());
         payload.put("prNumber", receipt.path("prNumber").intValue());
         payload.put("prUrl", receipt.path("prUrl").asText());
-        payload.put("state", receipt.path("state").asText("OPEN"));
+        payload.put("state", receipt.path("state").asText());
+        payload.put("authorLogin", receipt.path("authorLogin").asText());
+        payload.put("reused", receipt.path("reused").asBoolean());
         return response(resultId, request.handlerKey(), "completed", aggregate.workspaceId(),
                 requested.candidateSha(), requested.diffDigest(), requested.validationHash(), payload);
     }
@@ -938,6 +946,7 @@ public final class CodingHandlerStageService {
             return sideEffect(resultId, request, aggregate,
                     "recorded", "DEPLOY_REQUEST_RECORDED");
         }
+        requireBackendPullRequest(pullRequest);
         ObjectNode subject = objectMapper.createObjectNode();
         subject.put("jobId", jobId.toString());
         subject.put("pipelineAttempt", aggregate.pipelineAttempt());
@@ -1080,6 +1089,7 @@ public final class CodingHandlerStageService {
     private static void requireV4DeploymentIdentity(
             CodingHandlerContract.HandlerResultResponse pullRequest,
             CodingHandlerContract.HandlerResultResponse deployRequest) {
+        requireBackendPullRequest(pullRequest);
         if (!deployRequest.payload().hasNonNull("deploymentRequestId")
                 || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
                 || !Objects.equals(pullRequest.payload().path("repository").asText(),
@@ -1087,6 +1097,14 @@ public final class CodingHandlerStageService {
                 || pullRequest.payload().path("prNumber").asInt(-1)
                         != deployRequest.payload().path("prNumber").asInt(-2)) {
             throw conflict("The deployment request is not bound to the completed pull request.");
+        }
+    }
+
+    private static void requireBackendPullRequest(
+            CodingHandlerContract.HandlerResultResponse pullRequest) {
+        if (!CodingRepositories.BACKEND.equals(
+                pullRequest.payload().path("repository").asText())) {
+            throw conflict("Deployment stages are available only for Backend Coding Jobs.");
         }
     }
 

@@ -29,6 +29,27 @@ class CodingHandlerMigrationTest {
     }
 
     @Test
+    void allowsFrontendOnlyForPrCompletionAndKeepsDeploymentBackendOnly()
+            throws Exception {
+        String sql = new ClassPathResource(
+                "db/migration/V20260908161528042__allow_system_pr_repositories.sql")
+                .getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(sql)
+                .contains("DROP CONSTRAINT ck_coding_handler_result_ai04_009_payload")
+                .contains("ADD CONSTRAINT ck_coding_handler_result_ai04_016_payload")
+                .contains("payload ->> 'repository' IN ('backend', 'frontend')")
+                .contains("handler_key <> 'coding.dev_merge_check'")
+                .contains("handler_key <> 'coding.deploy_request'")
+                .contains("payload ->> 'repository' = 'backend'")
+                .doesNotContain("payload ->> 'validationHash'")
+                .doesNotContain("payload ->> 'authorLogin'")
+                .doesNotContain("payload -> 'reused'")
+                .doesNotContain("CREATE TABLE")
+                .doesNotContain("DROP TABLE");
+    }
+
+    @Test
     void exposesSnapshotSelectedApprovalNodesAndRoundsWithoutAStageMap()
             throws Exception {
         String sql = new ClassPathResource(

@@ -334,6 +334,7 @@ public final class CodingHandlerResultService {
             if (!matches(request, requested)) {
                 throw subjectConflict();
             }
+            requirePullRequestRepository(jobRepository(jobId), request);
             return;
         }
         if (request.resultType() == CodingHandlerContract.ResultType.DEV_MERGE) {
@@ -526,6 +527,21 @@ public final class CodingHandlerResultService {
 
     static void requireApprovedSubject(ResultSubject subject, ApprovalSubject approval) {
         if (!approved(subject, approval)) {
+            throw subjectConflict();
+        }
+    }
+
+    static void requirePullRequestRepository(
+            String jobRepository,
+            CodingHandlerContract.PutResultRequest request) {
+        JsonNode payload = request.payload();
+        if (!CodingRepositories.isKnown(jobRepository)
+                || !Objects.equals(jobRepository, payload.path("repository").asText())
+                || !"dev".equals(payload.path("base").asText())
+                || !Objects.equals(request.candidateSha(),
+                        payload.path("candidateSha").asText())
+                || !Objects.equals(request.validationHash(),
+                        payload.path("validationHash").asText())) {
             throw subjectConflict();
         }
     }

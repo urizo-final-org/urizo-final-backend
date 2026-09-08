@@ -158,6 +158,24 @@ public final class ProductService implements
                         knowledgeBaseId, request.targetKnowledgeVersionId(), traceId));
     }
 
+    /**
+     * 요청 생성은 멱등 Key로 감싸지 않는다. 저장소가 "같은 사람 · 같은 대상 · 열린 요청"을
+     * 하나로 유지하므로 중복 호출이 행을 늘리지 않는다 — 멱등 장치가 이미 데이터에 있다.
+     */
+    public ProductApiContract.ActivationRequestResponse createActivationRequest(
+            UUID knowledgeBaseId,
+            UUID traceId,
+            org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor actor,
+            ProductApiContract.CreateActivationRequestRequest request) {
+        return store.createActivationRequest(knowledgeBaseId, traceId, actor, request);
+    }
+
+    public ProductApiContract.ActivationRequestListResponse listOpenActivationRequests(
+            UUID knowledgeBaseId, UUID traceId) {
+        return new ProductApiContract.ActivationRequestListResponse(
+                version(), traceId, store.listOpenActivationRequests(knowledgeBaseId, traceId));
+    }
+
     public ProductApiContract.ChatbotResponse createChatbot(
             UUID projectId,
             UUID traceId,
@@ -186,7 +204,7 @@ public final class ProductService implements
         return store.idempotent("QUERY_CHATBOT", key,
                 new ScopedRequest(chatbotId, request), 200,
                 ProductApiContract.RagQueryResponse.class,
-                () -> store.query(chatbotId, traceId, request, null));
+                () -> store.query(chatbotId, traceId, request, null, null));
     }
 
     /**
@@ -198,11 +216,17 @@ public final class ProductService implements
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category) {
+            List<String> category,
+            String previousQuery) {
         // 검색·인용·거절은 store가 확정한 그대로 두고 answer 문장만 다시 쓴다.
         // 플래그가 꺼져 있거나 LLM이 실패하면 추출식 응답이 그대로 나간다.
+        //
+        // rewrite에는 직전 질문을 넘기지 않는다. LLM은 이미 이번 검색이 고른 근거만 보고,
+        // 그 근거가 대명사의 지시 대상을 확정한다. 프롬프트를 늘리면 단일 턴 측정치와
+        // 비교가 끊긴다 — 켠 뒤 대명사 질문이 실제로 흔들리면 그때 넣는다.
         return answers.rewrite(
-                request.query(), store.query(chatbotId, traceId, request, category));
+                request.query(),
+                store.query(chatbotId, traceId, request, category, previousQuery));
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

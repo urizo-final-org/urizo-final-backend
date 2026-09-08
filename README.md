@@ -43,10 +43,11 @@ Stage 4 local Coding Runtime integration is also implemented:
 - Spring/Core DB retain Provider, job and tool authority; Python has no Provider
   key/selection, Core DB access, or direct tool-execution authority
 
-Ten forward-only migrations are current at `20260811220000`. The Maven Wrapper
-is pinned to Maven 3.9.9 with its distribution checksum. Docker builds are
-locked and the Backend-owned Compose profile runs the seven required services,
-the auxiliary loopback database gateway and Flyway as an Exited-0 one-shot.
+Forward-only Core migrations live under `src/main/resources/db/migration`; the
+applied state is determined by Flyway rather than a count recorded here. The
+Maven Wrapper is pinned to Maven 3.9.9 with its distribution checksum. Docker
+builds are locked, and `compose.dev.yaml` owns the integrated services,
+including MCP Server, plus Flyway as an Exited-0 one-shot.
 
 See `docs/STAGE1_BACKEND_SCAFFOLD.md` for the original scaffold,
 `docs/STAGE2_PROVIDER_CAPABILITY_SPIKE.md` for Provider capability work, and
@@ -95,7 +96,7 @@ must be reflected in Docker images, add `-Rebuild -ApproveNetwork`. The script
 uses the versioned bootstrap, local build-trust path, Flyway gate and CMS health
 check; do not replace it with ad-hoc Docker commands.
 
-The verified local acceptance covers Project replay, deterministic Connector
+The full-profile verification commands cover Project replay, deterministic Connector
 preview/sync, Batch Knowledge build/approval/activation, RAG citation/refusal,
 Coding Job claim/Model Turn/Tool/checkpoint interrupt-resume, restart
 idempotency and bounded Valkey/Checkpoint/Spring failure recovery.

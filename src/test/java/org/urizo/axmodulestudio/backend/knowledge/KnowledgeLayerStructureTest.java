@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.knowledge.controller.ProductApiController;
 import org.urizo.axmodulestudio.backend.knowledge.repository.ConnectorStore;
 import org.urizo.axmodulestudio.backend.knowledge.repository.KnowledgeStore;
@@ -32,7 +33,10 @@ class KnowledgeLayerStructureTest {
                         ConnectorOperations.class,
                         KnowledgeOperations.class,
                         RagOperations.class,
-                        ProductJobOperations.class);
+                        ProductJobOperations.class,
+                        // 도메인 경계가 아니라 신원 확인이다. 요청자를 본문으로 받으면
+                        // 아무 이름이나 넣을 수 있어 서버가 세션에서 읽어야 한다.
+                        AuthService.class);
     }
 
     @Test

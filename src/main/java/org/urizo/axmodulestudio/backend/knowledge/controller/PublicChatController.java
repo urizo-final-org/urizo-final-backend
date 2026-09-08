@@ -71,7 +71,8 @@ public class PublicChatController {
                         body.query(),
                         body.conversationId(),
                         null),
-                body.category()));
+                body.category(),
+                body.previousQuery()));
     }
 
     /** 관리자 전용 값(queryId, knowledgeVersionId, documentId, score)을 떨어뜨린다. */

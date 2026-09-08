@@ -100,7 +100,8 @@ public class RagStore {
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
-            List<String> category) {
+            List<String> category,
+            String previousQuery) {
         ActiveKnowledge active = one(jdbc.query(
                 "SELECT kb.active_version_id FROM app.chatbot_config cb "
                         + "JOIN app.knowledge_base kb ON kb.knowledge_base_id = cb.knowledge_base_id "
@@ -115,7 +116,7 @@ public class RagStore {
         // 접미절단 필터(W3) 전제. 요청이 topK를 명시하면 그 값을 그대로 쓴다(@Max 20).
         int topK = request.topK() == null ? 10 : request.topK();
         // 질의 임베딩은 HTTP 호출이므로 한 번만 계산해 정렬과 점수 계산에 함께 쓴다.
-        String queryVector = embeddings.queryVector(request.query());
+        String queryVector = embeddings.queryVector(searchText(previousQuery, request.query()));
         // 탭 필터(F6)는 WHERE에 건다. ORDER BY·LIMIT보다 먼저 평가되므로 "필터 후 상위 K건"이
         // 성립한다. 조회 뒤 자바에서 거르면 K건이 탭 밖 문서로 채워져 결과가 비게 된다.
         List<String> prefixes = categoryPrefixes(category);
@@ -247,6 +248,19 @@ public class RagStore {
         return new ProductApiContract.ChatbotResponse(
                 version(), traceId, rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
                 rs.getObject(3, UUID.class), rs.getString(4), rs.getString(5), instant(rs, 6));
+    }
+
+    /**
+     * 검색 임베딩에 쓸 텍스트. 직전 질문이 있으면 앞에 붙인다 — "거기 주차 되나요?"처럼
+     * 대명사만 남은 후속 질문은 그 자체로는 어떤 문서와도 가깝지 않다.
+     *
+     * <p>이 결합은 <b>임베딩에만</b> 쓴다. 근거 필터({@code hasGroundingOverlap})와 문장
+     * 추출({@code composeAnswer})은 계속 현재 질문만 본다. 직전 질문의 토큰까지 통과시키면
+     * 이번 질문과 무관한 문서가 근거로 올라오고 답변 문장도 이전 주제에서 뽑힌다.
+     */
+    static String searchText(String previousQuery, String query) {
+        return previousQuery == null || previousQuery.isBlank()
+                ? query : previousQuery + " " + query;
     }
 
     private static String excerpt(String content) {

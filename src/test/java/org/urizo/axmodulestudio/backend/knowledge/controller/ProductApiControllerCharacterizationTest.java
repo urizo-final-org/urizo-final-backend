@@ -20,6 +20,7 @@ import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.urizo.axmodulestudio.backend.core.web.TraceIdFilter;
+import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.service.ProductService;
 
@@ -52,6 +53,9 @@ class ProductApiControllerCharacterizationTest {
                 "GET /api/knowledge-bases/{knowledgeBaseId}/versions",
                 "GET /api/knowledge-versions/{knowledgeVersionId}",
                 "POST /api/knowledge-versions/{knowledgeVersionId}/activate",
+                // 두 관리자 역할 모두 남길 수 있다 — 쓰기 4종과 달리 SUPER_ADMIN 전용이 아니다.
+                "GET /api/knowledge-bases/{knowledgeBaseId}/activation-requests",
+                "POST /api/knowledge-bases/{knowledgeBaseId}/activation-requests",
                 "POST /api/knowledge-bases/{knowledgeBaseId}/rollback",
                 "POST /api/projects/{projectId}/chatbots",
                 "GET /api/projects/{projectId}/chatbots",
@@ -67,7 +71,7 @@ class ProductApiControllerCharacterizationTest {
     void preservesCreatedAndAcceptedResponseMetadataAcrossDomains() {
         ProductService service = mock(ProductService.class);
         ProductApiController controller = new ProductApiController(
-                service, service, service, service, service);
+                service, service, service, service, service, mock(AuthService.class));
         MockHttpServletRequest servletRequest = tracedRequest();
         String key = "characterization.key.0001";
 

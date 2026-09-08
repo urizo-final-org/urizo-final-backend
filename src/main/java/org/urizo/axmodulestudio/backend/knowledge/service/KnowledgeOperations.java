@@ -38,4 +38,17 @@ public interface KnowledgeOperations {
             UUID traceId,
             String key,
             ProductApiContract.RollbackKnowledgeRequest request);
+
+    /**
+     * 권한 없는 관리자가 남기는 자료 갱신 요청. 활성화·롤백이 일어나면 자동으로 닫히므로
+     * 처리 엔드포인트가 따로 없다.
+     */
+    ProductApiContract.ActivationRequestResponse createActivationRequest(
+            UUID knowledgeBaseId,
+            UUID traceId,
+            org.urizo.axmodulestudio.backend.auth.security.AuthenticatedActor actor,
+            ProductApiContract.CreateActivationRequestRequest request);
+
+    ProductApiContract.ActivationRequestListResponse listOpenActivationRequests(
+            UUID knowledgeBaseId, UUID traceId);
 }

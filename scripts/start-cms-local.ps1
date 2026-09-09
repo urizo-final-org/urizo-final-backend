@@ -17,6 +17,8 @@ param(
 
     [switch]$Rebuild,
 
+    [switch]$RefreshLocalObservability,
+
     [ValidateRange(30, 1800)]
     [int]$WaitTimeoutSeconds = 180
 )
@@ -39,6 +41,13 @@ foreach ($requiredFile in @($composeFile, $healthScript, $bootstrapScript)) {
 if ($Profile -eq 'spring-core' -and ($OrchestratorSourceRoot -or $McpSourceRoot)) {
     throw 'OrchestratorSourceRoot and McpSourceRoot are valid only with -Profile full.'
 }
+if ($RefreshLocalObservability -and $Profile -ne 'full') {
+    throw 'RefreshLocalObservability requires -Profile full so Spring and Coding Runtime are refreshed together.'
+}
+if ($RefreshLocalObservability -and
+        -not (Test-Path -LiteralPath (Join-Path $repositoryRoot '.local\secrets\langfuse.env') -PathType Leaf)) {
+    throw 'RefreshLocalObservability requires a complete Langfuse configuration in the ignored local secrets directory.'
+}
 
 $requestedSourceRoots = @(
     $BackendSourceRoot,
@@ -53,7 +62,8 @@ $probeFailure = ''
 $reuseHealthyContainers = $false
 try {
     $healthOutput = @(& $healthScript -Profile $Profile -Quick -WaitTimeoutSeconds $probeTimeoutSeconds)
-    if ($LASTEXITCODE -eq 0 -and -not $Rebuild -and -not $sourceBindingRequested) {
+    if ($LASTEXITCODE -eq 0 -and -not $Rebuild -and -not $sourceBindingRequested -and
+            -not $RefreshLocalObservability) {
         $reuseHealthyContainers = $true
     }
 }
@@ -101,6 +111,38 @@ else {
 & $docker info --format '{{.ServerVersion}}' | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Docker Engine is not available.'
+}
+
+if ($RefreshLocalObservability) {
+    . (Join-Path $PSScriptRoot 'local-langfuse-environment.ps1')
+    $langfuseEnvironment = Enter-AxmsLocalLangfuseEnvironment `
+        -Path (Join-Path $repositoryRoot '.local\secrets\langfuse.env') -Required
+    try {
+        $compose = @('compose', '-f', $composeFile, '--profile', 'full')
+        & $docker @compose config --quiet
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Docker Compose configuration validation failed.'
+        }
+        & $docker @compose up -d --no-deps --force-recreate --wait `
+            --wait-timeout $WaitTimeoutSeconds spring-app coding-runtime
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Spring and Coding Runtime could not be refreshed with local observability configuration.'
+        }
+    }
+    finally {
+        Exit-AxmsLocalLangfuseEnvironment -State $langfuseEnvironment
+    }
+
+    # This operation does not build Source or run Flyway. Keep its final gate scoped to
+    # the active services so a Feature Worktree cannot compare unrelated migrations
+    # against a preserved runtime database.
+    & $healthScript -Profile full -Quick -WaitTimeoutSeconds $WaitTimeoutSeconds
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Active service health verification failed after refreshing local observability.'
+    }
+    Write-Output 'LOCAL OBSERVABILITY REFRESH PASS: recreated Spring and Coding Runtime; preserved databases, queues, and host Runner.'
+    Write-Output 'CMS URL: http://127.0.0.1:18080/'
+    return
 }
 
 $requiredImages = @(

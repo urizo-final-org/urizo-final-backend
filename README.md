@@ -118,6 +118,13 @@ LangGraph Coding/Natural CMS worker는 기존 `coding-runtime` 컨테이너 안�
 .\urizo-final-master\scripts\start-local-cms.ps1 -Profile full -ApproveLocalMutation
 ```
 
+로컬 Langfuse 연결은 Git에서 제외된 Backend `.local/secrets/langfuse.env`의
+`LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`만 읽는다.
+값은 출력하지 않고 Compose 실행 범위에만 주입한 뒤 원래 프로세스 환경을 복원한다.
+기존 컨테이너가 이미 healthy인 상태에서 이 파일을 처음 추가하거나 갱신한 경우에는 한 번만
+`-RefreshLocalObservability`를 함께 지정해 Spring과 Coding Runtime을 재생성한다.
+이후 공식 bootstrap과 단일 Service 재빌드는 같은 ignored 파일을 자동으로 사용한다.
+
 - 컨테이너가 이미 healthy여도 실행기가 없으면 시작한다. 동일 스크립트·대상 주소·작업폴더·
   자격증명 경로로 시작된 기존 프로세스는 재사용한다. 다른 경로나 수동 실행 등으로 바인딩을
   확인할 수 없는 Runner는 종료하지 않고 새 실행을 차단한다. 동시 시작 호출도 직렬화한다.

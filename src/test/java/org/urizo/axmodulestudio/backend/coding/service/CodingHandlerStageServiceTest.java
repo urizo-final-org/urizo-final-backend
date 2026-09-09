@@ -2030,9 +2030,12 @@ class CodingHandlerStageServiceTest {
                                 .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                                 .put("candidateSha", BASE_SHA)
                                 .put("headSha", headSha)
+                                .put("validationHash", DIFF_DIGEST)
                                 .put("prNumber", 42)
                                 .put("prUrl", "https://github.example/pr/42")
-                                .put("state", "OPEN")));
+                                .put("state", "OPEN")
+                                .put("authorLogin", "axms-coding[bot]")
+                                .put("reused", false)));
 
         CodingHandlerContract.StageExecutionResponse response = service.execute(
                 "Bearer worker", JOB, 1, RESULT,
@@ -2048,6 +2051,11 @@ class CodingHandlerStageServiceTest {
         assertThat(command.getValue().path("repo").asText()).isEqualTo("backend");
         assertThat(response.payload().path("repository").asText()).isEqualTo("backend");
         assertThat(response.payload().path("headSha").asText()).isEqualTo(headSha);
+        assertThat(response.payload().path("validationHash").asText())
+                .isEqualTo(DIFF_DIGEST);
+        assertThat(response.payload().path("authorLogin").asText())
+                .isEqualTo("axms-coding[bot]");
+        assertThat(response.payload().path("reused").asBoolean()).isFalse();
         assertThat(response.payload().path("prNumber").asInt()).isEqualTo(42);
     }
 
@@ -2076,6 +2084,60 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT)))
                 .isInstanceOf(CodingWorkerException.class)
                 .hasMessageContaining("receipt");
+    }
+
+    @Test
+    void frontendPullRequestCannotCreateABackendDeploymentRequest() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), mock(CodingRunnerService.class), deployment,
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        CodingHandlerContract.HandlerResultResponse pullRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_complete",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                        mapper.createObjectNode()
+                                .put("repository", "frontend")
+                                .put("base", "dev")
+                                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("candidateSha", BASE_SHA)
+                                .put("validationHash", DIFF_DIGEST)
+                                .put("headSha",
+                                        "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("prNumber", 42),
+                        NOW);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "deploy frontend",
+                        List.of(pullRequest), List.of(), List.of(), NOW, null));
+
+        assertThatThrownBy(() -> service.execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy_request",
+                        "coding.deploy_request", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .hasMessageContaining("only for Backend");
+
+        verify(deployment, never()).deploy(any(), any());
     }
 
     @Test
@@ -2172,9 +2234,12 @@ class CodingHandlerStageServiceTest {
                                 .put("candidateSha", BASE_SHA)
                                 .put("headSha",
                                         "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("validationHash", DIFF_DIGEST)
                                 .put("prNumber", 45)
                                 .put("prUrl", "https://github.example/pr/45")
-                                .put("state", "OPEN")));
+                                .put("state", "OPEN")
+                                .put("authorLogin", "axms-coding[bot]")
+                                .put("reused", true)));
 
         CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
                 "Bearer worker", JOB, 1, RESULT,
@@ -2311,9 +2376,12 @@ class CodingHandlerStageServiceTest {
                                 .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
                                 .put("candidateSha", BASE_SHA)
                                 .put("headSha", "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("validationHash", DIFF_DIGEST)
                                 .put("prNumber", 42)
                                 .put("prUrl", "https://github.example/pr/42")
-                                .put("state", "OPEN")));
+                                .put("state", "OPEN")
+                                .put("authorLogin", "axms-coding[bot]")
+                                .put("reused", false)));
         return new PullRequestFixture(
                 service, runner, resultService, requested, githubApproval);
     }

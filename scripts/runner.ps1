@@ -993,55 +993,42 @@ function Invoke-Tests {
 function Invoke-CreatePullRequest {
     param($Payload)
 
+    . (Join-Path $PSScriptRoot 'github-app-pr.ps1')
+
     $repository = Get-PayloadValue -Payload $Payload -Name 'repo'
     $branch = Get-PayloadValue -Payload $Payload -Name 'branch'
     $title = Get-PayloadValue -Payload $Payload -Name 'title'
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
     $expectedDiffDigest = Get-PayloadValue -Payload $Payload -Name 'diffDigest'
+    $validationHash = Get-PayloadValue -Payload $Payload -Name 'validationHash'
     $workspaceId = Get-PayloadValue -Payload $Payload -Name 'workspaceId'
-    if (-not $repository) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 repo 가 없습니다.' }
-    if (-not $branch) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 branch 가 없습니다.' }
     if (-not $title) { throw 'RUNNER_PAYLOAD_INVALID|payload 에 title 이 없습니다.' }
-    if ($workspaceId -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') {
-        throw 'RUNNER_PAYLOAD_INVALID|payload 의 workspaceId 형식이 올바르지 않습니다.'
-    }
-    if ($candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
-        throw 'RUNNER_PAYLOAD_INVALID|payload 의 candidateSha 형식이 올바르지 않습니다.'
-    }
-    if ($expectedDiffDigest -notmatch '^sha256:[0-9a-f]{64}$') {
-        throw 'RUNNER_PAYLOAD_INVALID|payload 의 diffDigest 형식이 올바르지 않습니다.'
-    }
-
-    # Branch names are issued by Spring. Refusing anything else keeps a generated
-    # payload from pushing to a name that looks like a person's work.
-    if ($branch -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$') {
-        throw "RUNNER_PAYLOAD_INVALID|허용되지 않은 브랜치 이름입니다: $branch"
-    }
+    Assert-AxmsGitHubPrInput -Repository $repository -Branch $branch `
+        -WorkspaceId $workspaceId -CandidateSha $candidateSha `
+        -DiffDigest $expectedDiffDigest -ValidationHash $validationHash
 
     $worktree = Export-McpWorkspaceToHost `
         -Repository $repository -WorkspaceId $workspaceId
-    Set-PublishRemote -Repository $repository -Worktree $worktree
-    $slug = Get-RemoteSlug -Worktree $worktree
+    $workspaceMarker = "$(@(& git -C $worktree config --local --get axms.repository 2>&1) |
+        Select-Object -Last 1)".Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|꺼낸 Workspace marker를 확인하지 못했습니다.'
+    }
+    $canonicalSource = Get-RepositorySourcePath -Repository $repository
+    if (-not (Test-Path -LiteralPath $canonicalSource -PathType Container)) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|선택 저장소의 canonical Source가 없습니다.'
+    }
+    $originUrl = "$(@(& git -C $canonicalSource remote get-url origin 2>&1) |
+        Select-Object -First 1)".Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'RUNNER_PR_SUBJECT_BLOCKED|선택 저장소의 canonical origin을 확인하지 못했습니다.'
+    }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    $appSession = $null
+    $previousAppEnvironment = $null
     try {
-        & gh --version 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw 'RUNNER_PR_BLOCKED|gh 가 없어 PR 을 만들 수 없습니다.'
-        }
         $baseHead = "$(@(& git -C $worktree rev-parse HEAD 2>&1)[0])".Trim()
-        if ("sha1:$baseHead" -ne $candidateSha) {
-            throw 'RUNNER_PR_SUBJECT_BLOCKED|작업 폴더 HEAD 가 승인된 candidateSha 와 다릅니다.'
-        }
-
-        $current = "$(@(& git -C $worktree rev-parse --abbrev-ref HEAD 2>&1)[0])".Trim()
-        if ($current -ne $branch) {
-            $switched = & git -C $worktree switch -c $branch 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw "RUNNER_PR_FAILED|브랜치 생성 실패: $(($switched | Select-Object -Last 2) -join ' ')"
-            }
-        }
-
         & git -C $worktree diff --cached --quiet --exit-code 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             throw 'RUNNER_PR_SUBJECT_BLOCKED|승인된 staged 변경이 없어 PR 을 만들 수 없습니다.'
@@ -1050,15 +1037,31 @@ function Invoke-CreatePullRequest {
             throw 'RUNNER_PR_FAILED|승인된 staged 변경을 확인하지 못했습니다.'
         }
         $actualDiffDigest = Get-StagedDiffDigest -Worktree $worktree
-        if ($actualDiffDigest -ne $expectedDiffDigest) {
-            throw 'RUNNER_PR_SUBJECT_BLOCKED|staged Diff가 승인된 diffDigest와 다릅니다.'
+        $slug = Assert-AxmsGitHubPrWorkspaceBinding -Repository $repository `
+            -WorkspaceMarker $workspaceMarker -OriginUrl $originUrl `
+            -CandidateSha $candidateSha -ActualHeadSha "sha1:$baseHead" `
+            -ExpectedDiffDigest $expectedDiffDigest -ActualDiffDigest $actualDiffDigest
+
+        # This is the first GitHub network boundary. Every repository, workspace,
+        # origin and approved-subject check above has already passed.
+        $appSession = New-AxmsGitHubAppSession -SecretsRoot $SecretsRoot `
+            -Repository $repository -RepositorySlug $slug
+        $previousAppEnvironment = Enter-AxmsGitHubAppEnvironment `
+            -Token $appSession.Token
+
+        $current = "$(@(& git -C $worktree rev-parse --abbrev-ref HEAD 2>&1)[0])".Trim()
+        if ($current -ne $branch) {
+            $switched = & git -C $worktree switch -c $branch 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "RUNNER_PR_FAILED|브랜치 생성 실패: $(($switched | Select-Object -Last 2) -join ' ')"
+            }
         }
         $env:GIT_AUTHOR_DATE = '2000-01-01T00:00:00Z'
         $env:GIT_COMMITTER_DATE = '2000-01-01T00:00:00Z'
         try {
             $committed = & git -C $worktree `
-                -c "user.name=AX Module Studio" `
-                -c "user.email=axms-system@localhost.invalid" `
+                -c "user.name=$($appSession.BotLogin)" `
+                -c "user.email=$($appSession.BotId)+$($appSession.BotLogin)@users.noreply.github.com" `
                 commit --no-gpg-sign --no-verify -m $title 2>&1
             $commitExit = $LASTEXITCODE
         }
@@ -1075,12 +1078,26 @@ function Invoke-CreatePullRequest {
             throw 'RUNNER_PR_SUBJECT_BLOCKED|생성된 PR head가 승인 Candidate에 직접 연결되지 않았습니다.'
         }
 
+        $body = Get-PayloadValue -Payload $Payload -Name 'body'
+        if (-not $body) { $body = $title }
+        $boundBody = New-AxmsPullRequestBody -Body $body `
+            -CandidateSha $candidateSha -HeadSha "sha1:$headSha" `
+            -ValidationHash $validationHash
+
         $existing = Get-ExactPullRequest -Slug $slug -Branch $branch `
             -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
-            -Repository $repository
+            -ValidationHash $validationHash -Repository $repository `
+            -BotLogin $appSession.BotLogin -Title $title -Body $boundBody
         if ($null -ne $existing) { return $existing }
 
-        $pushed = & git -C $worktree push -u origin $branch 2>&1
+        $pushUrl = "https://github.com/$slug.git"
+        $pushed = & git -C $worktree `
+            -c credential.helper= `
+            -c "credential.helper=!gh auth git-credential" `
+            -c http.extraHeader= `
+            -c "http.https://github.com/.extraHeader=" `
+            -c "http.$pushUrl.extraHeader=" `
+            push $pushUrl "HEAD`:refs/heads/$branch" 2>&1
         if ($LASTEXITCODE -ne 0) {
             $detail = "$(($pushed | Select-Object -Last 3) -join ' ')"
             if (Test-NetworkFailure -Detail $detail) {
@@ -1089,16 +1106,14 @@ function Invoke-CreatePullRequest {
             throw "RUNNER_PR_BLOCKED|push 차단: $detail"
         }
 
-        $body = Get-PayloadValue -Payload $Payload -Name 'body'
-        if (-not $body) { $body = $title }
         # The body is the multi-line Korean summary the control plane builds from the recorded
         # request, plan, diff and approvals. Windows PowerShell rewrites quoting and encoding when
         # it hands an argument to a native command - the same trap that mangled Korean elsewhere
         # in this workspace - so it is written as a BOM-less UTF-8 file and handed over by path.
         $bodyFile = Join-Path $env:TEMP "axms-pr-body-$([IO.Path]::GetRandomFileName()).md"
-        [IO.File]::WriteAllText($bodyFile, $body, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($bodyFile, $boundBody, [Text.UTF8Encoding]::new($false))
         try {
-            $created = & gh pr create --repo $slug --base dev --head $branch `
+            $created = & gh pr create --repo "github.com/$slug" --base dev --head $branch `
                 --title $title --body-file $bodyFile 2>&1
         }
         finally {
@@ -1109,12 +1124,18 @@ function Invoke-CreatePullRequest {
         }
         $receipt = Get-ExactPullRequest -Slug $slug -Branch $branch `
             -CandidateSha $candidateSha -ExpectedHeadSha "sha1:$headSha" `
-            -Repository $repository
+            -ValidationHash $validationHash -Repository $repository `
+            -BotLogin $appSession.BotLogin -Title $title -Body $boundBody
         if ($null -eq $receipt) {
             throw 'RUNNER_PR_BLOCKED|생성된 PR 을 정확히 다시 조회하지 못했습니다.'
         }
+        $receipt.reused = $false
     }
     finally {
+        if ($appSession) { $appSession.Token = $null }
+        if ($previousAppEnvironment) {
+            Exit-AxmsGitHubAppEnvironment -Previous $previousAppEnvironment
+        }
         $ErrorActionPreference = $previous
     }
     return $receipt
@@ -1171,42 +1192,6 @@ function Test-NetworkFailure {
     param([string]$Detail)
 
     return $Detail -match '(?i)(rate limit|timed? out|timeout|temporar|HTTP 5\d\d|502|503|504|could not resolve host|connection (reset|refused|closed)|failed to connect|network is unreachable|TLS handshake)'
-}
-
-function Get-ExactPullRequest {
-    param(
-        [Parameter(Mandatory = $true)][string]$Slug,
-        [Parameter(Mandatory = $true)][string]$Branch,
-        [Parameter(Mandatory = $true)][string]$CandidateSha,
-        [Parameter(Mandatory = $true)][string]$ExpectedHeadSha,
-        [Parameter(Mandatory = $true)][string]$Repository
-    )
-
-    $raw = & gh pr list --repo $Slug --base dev --head $Branch --state all `
-        --json number,url,state,baseRefName,headRefName,headRefOid 2>&1
-    if ($LASTEXITCODE -ne 0) { Throw-GitHubFailure -Output $raw -Operation 'PR 조회' }
-    $items = @(("$($raw -join '')" | ConvertFrom-Json))
-    if ($items.Count -eq 0) { return $null }
-    if ($items.Count -ne 1) {
-        throw 'RUNNER_PR_SUBJECT_BLOCKED|같은 base/head 조합의 PR 이 둘 이상입니다.'
-    }
-    $item = $items[0]
-    if ($item.baseRefName -ne 'dev' -or $item.headRefName -ne $Branch `
-            -or "sha1:$($item.headRefOid)" -ne $ExpectedHeadSha `
-            -or $item.state -notin @('OPEN', 'MERGED')) {
-        throw 'RUNNER_PR_SUBJECT_BLOCKED|기존 PR 이 승인된 repository/base/head/candidate 와 다릅니다.'
-    }
-    return @{
-        repository = $Repository
-        base = 'dev'
-        head = $Branch
-        candidateSha = $CandidateSha
-        headSha = $ExpectedHeadSha
-        prNumber = [int]$item.number
-        prUrl = "$($item.url)"
-        state = "$($item.state)"
-        reused = $true
-    }
 }
 
 function Invoke-CheckDevMerge {

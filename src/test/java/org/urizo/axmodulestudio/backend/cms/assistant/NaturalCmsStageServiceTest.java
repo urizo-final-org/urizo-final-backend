@@ -397,6 +397,9 @@ class NaturalCmsStageServiceTest {
                 // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 사람이 쓰는 말을 범위에 넣어 둔다.
                 .contains("already been uploaded")
                 .contains("upload, put up or add it")
+                // `밑줄 적용해서 작성해줘`도 반려됐다. 본문에 쓸 수 있는 것을 범위에 적어 둔다.
+                .contains("bold, italic, strike, underline")
+                .contains("part of this screen")
                 .contains("Anything else is infeasible")
                 .contains("payload.reason");
     }

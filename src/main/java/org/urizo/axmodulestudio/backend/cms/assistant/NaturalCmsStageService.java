@@ -480,8 +480,15 @@ public final class NaturalCmsStageService {
             //
             // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 범위에 `놓기`만 있어 모델이 업로드를
             // 화면 밖 일로 읽었다. 사람이 쓰는 말과 실제 하는 일을 이어 준다.
+            //
+            // `밑줄 적용해서 작성해줘`도 같은 이유로 반려됐다. 범위에 `제목과 본문을 바꾼다`까지만
+            // 있고 본문에 무엇을 쓸 수 있는지가 없어, 서식을 지정한 요청을 화면 밖으로 읽었다.
+            // 36초 뒤 같은 일을 `밑줄 적용해줘`로 짧게 쓰니 통과했다. 쓸 수 있는 것을 적어 둔다.
             scope = "static content pages only: creating a content page, changing the selected "
-                    + "page's title and body, and deleting the selected page. Placing, moving or "
+                    + "page's title and body, and deleting the selected page. A body may use"
+                    + " headings, bullet and numbered lists, bold, italic, strike, underline,"
+                    + " links and images, so asking for any of those while writing or editing"
+                    + " the body is part of this screen. Placing, moving or "
                     + "removing an image the body already contains or the request attaches is "
                     + "included. An attached image has already been uploaded, so asking to "
                     + "upload, put up or add it means placing it in the body and stays feasible";

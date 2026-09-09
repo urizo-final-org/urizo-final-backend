@@ -397,6 +397,10 @@ class NaturalCmsStageServiceTest {
                 // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 사람이 쓰는 말을 범위에 넣어 둔다.
                 .contains("already been uploaded")
                 .contains("upload, put up or add it")
+                // `밑줄 적용해서 작성해줘`도 반려됐다. 본문에 쓸 수 있는 것을 범위에 적어 둔다.
+                .contains("bold, italic,")
+                .contains("strike, underline, text colour, a marker pen")
+                .contains("part of this screen")
                 .contains("Anything else is infeasible")
                 .contains("payload.reason");
     }
@@ -490,7 +494,11 @@ class NaturalCmsStageServiceTest {
                 .contains("already appears in currentState.body")
                 .contains("lists as an attached image")
                 .contains("Never invent a src")
-                .contains("bold, italic, strike, underline or link marks")
+                // `AI05-017` 2차에서 색과 형광펜이 들어와 계약이 넓어졌다.
+                .contains("bold, italic, strike, underline, textStyle, highlight or link marks")
+                .contains("blockquote and horizontalRule")
+                .contains("Only these colours exist")
+                .contains("Never invent another colour")
                 .contains("never use the mark name as the key")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")

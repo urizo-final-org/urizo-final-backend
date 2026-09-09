@@ -122,6 +122,46 @@ class ContentBodyTest {
         assertThat(ContentBody.problem(document)).isNull();
     }
 
+    /** 인용문과 구분선. 속성이 없어 이름만 확인한다. */
+    @Test
+    void acceptsQuoteAndDivider() {
+        String document = "{\"type\":\"doc\",\"content\":["
+                + "{\"type\":\"blockquote\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"인용\"}]}]},"
+                + "{\"type\":\"horizontalRule\"}]}";
+
+        assertThat(ContentBody.problem(document)).isNull();
+    }
+
+    /** 팔레트에 있는 색만 통과한다. 자유 입력을 열면 임의의 CSS가 본문에 들어온다. */
+    @Test
+    void acceptsPaletteColours() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"본문\",\"marks\":["
+                + "{\"type\":\"textStyle\",\"attrs\":{\"color\":\"#c0392b\"}},"
+                + "{\"type\":\"highlight\",\"attrs\":{\"color\":\"#fff3a3\"}}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).isNull();
+    }
+
+    @Test
+    void refusesAColourOutsideThePalette() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"본문\",\"marks\":["
+                + "{\"type\":\"textStyle\",\"attrs\":{\"color\":\"red\"}}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("글자색");
+    }
+
+    /** 형광펜은 색이 있어야 한다. 색 없는 형광은 화면에 아무것도 남기지 않는다. */
+    @Test
+    void refusesAHighlightWithoutAColour() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"본문\",\"marks\":[{\"type\":\"highlight\"}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("형광펜");
+    }
+
     /** 인라인 코드는 열지 않았다. 이 사이트 컨텐츠에 쓸 일이 없어 빼기로 했다. */
     @Test
     void refusesInlineCode() {

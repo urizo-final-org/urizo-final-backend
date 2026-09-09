@@ -138,8 +138,15 @@ class PublicAnswerComposer {
             String excerpt = citation.excerpt() == null ? "" : citation.excerpt();
             grounding.append(index + 1).append(". ").append(citation.title()).append('\n')
                     .append(excerpt.length() <= MAX_EXCERPT
-                            ? excerpt : excerpt.substring(0, MAX_EXCERPT))
-                    .append("\n\n");
+                            ? excerpt : excerpt.substring(0, MAX_EXCERPT));
+            // 종료된 행사는 근거에 명시한다. 규칙 1(근거만 사용) 아래에서 이 줄이 없으면
+            // LLM이 종료 사실을 말할 수 없다. 2026-09-09 이후 형식 — 이전 faithfulness
+            // 측정치(0.9633)는 이 줄이 없던 형식의 값이다(prereg 문서 정정 참조).
+            if ("ENDED".equals(citation.eventStatus()) && citation.eventEndDate() != null) {
+                grounding.append('\n').append("[상태] 종료된 행사 (")
+                        .append(citation.eventEndDate()).append(" 종료)");
+            }
+            grounding.append("\n\n");
         }
         return USER_TEMPLATE.formatted(grounding.toString().stripTrailing(), query);
     }

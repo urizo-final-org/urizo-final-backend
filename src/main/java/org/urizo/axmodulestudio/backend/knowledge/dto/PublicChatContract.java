@@ -71,8 +71,12 @@ public final class PublicChatContract {
      * <p>sourceUrl은 스킴이 https이나 현재 코퍼스 값은 로더가 만든 합성 주소
      * ({@code https://api-test.local/documents/{id}})라 브라우저에서 열리지 않는다.
      * 실제 원문 주소를 채우는 것은 수집 단계의 일이며 이 계약의 범위가 아니다.
+     *
+     * <p>eventStatus는 행사 종료일({@code source_document.event_end_date})이 서버 기준
+     * 오늘보다 과거면 "ENDED", 그 외에는 null이다. 값은 이 둘뿐이다.
      */
     public record PublicCitation(
-            String title, String excerpt, URI sourceUrl, String categoryLabel) {
+            String title, String excerpt, URI sourceUrl, String categoryLabel,
+            String eventStatus) {
     }
 }

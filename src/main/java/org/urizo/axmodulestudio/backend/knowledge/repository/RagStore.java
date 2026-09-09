@@ -6,6 +6,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -129,7 +130,7 @@ public class RagStore {
         List<GroundingRow> rows = jdbc.query(
                 "SELECT sd.external_document_id, sd.title, sd.source_url, dc.content, "
                         + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score, "
-                        + "sd.category "
+                        + "sd.category, sd.event_end_date "
                         + "FROM app.document_chunk dc JOIN app.source_document sd "
                         + "ON sd.source_document_id = dc.source_document_id "
                         + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL"
@@ -137,7 +138,8 @@ public class RagStore {
                         + " ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
                 (rs, row) -> new GroundingRow(
                         rs.getString(1), rs.getString(2), URI.create(rs.getString(3)),
-                        rs.getString(4), rs.getDouble(5), rs.getString(6)),
+                        rs.getString(4), rs.getDouble(5), rs.getString(6),
+                        rs.getObject(7, LocalDate.class)),
                 arguments.toArray());
         List<GroundingRow> grounded = rows.stream()
                 .filter(row -> DeterministicConnectorFixture.hasGroundingOverlap(
@@ -163,10 +165,12 @@ public class RagStore {
         if (displayed.isEmpty()) {
             return refused(traceId, conversationId, active.versionId(), now);
         }
+        LocalDate today = LocalDate.now(clock);
         List<ProductApiContract.Citation> citations = displayed.stream()
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
-                        excerpt(row.content()), row.score(), categoryLabel(row.category())))
+                        excerpt(row.content()), row.score(), categoryLabel(row.category()),
+                        eventStatus(row.eventEndDate(), today), row.eventEndDate()))
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
@@ -322,11 +326,19 @@ public class RagStore {
         return separator < 0 ? category : category.substring(separator + 1);
     }
 
+    /**
+     * 종료일이 있고 오늘(서버 기준)보다 과거면 "ENDED", 그 외에는 null. 값은 이 둘뿐이다.
+     * 오늘이 종료일이면 아직 진행 중이므로 ENDED가 아니다.
+     */
+    static String eventStatus(LocalDate eventEndDate, LocalDate today) {
+        return eventEndDate != null && eventEndDate.isBefore(today) ? "ENDED" : null;
+    }
+
     private record ActiveKnowledge(UUID versionId) {
     }
 
     private record GroundingRow(
             String documentId, String title, URI sourceUrl, String content, double score,
-            String category) {
+            String category, LocalDate eventEndDate) {
     }
 }

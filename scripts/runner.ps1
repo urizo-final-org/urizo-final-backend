@@ -592,12 +592,25 @@ function Set-PreviewEnvironment {
     # whole point of the preview is the screen the model just changed, and the shared
     # checkout is not that. A backend Job did not change the screen, so it uses the canonical
     # frontend checkout next to the Backend repository.
-    param([string]$FrontendSource)
+    #
+    # BackendSource is the same idea for the Backend half. compose.dev.yaml builds spring-app,
+    # flyway and database from ${AXMS_BACKEND_SOURCE_ROOT:-.}, and the default is the project
+    # directory, which is already right. But this runner is started by bootstrap-dev.ps1 from
+    # inside start-cms-local.ps1's rebuild, which has that variable set to whichever checkout
+    # was rebuilt - and Start-Process hands the whole environment down. Left inherited, a
+    # backend Job's preview would build the main stack's code and offer it as the candidate
+    # nobody wrote. Set here so the preview builds what this command was given, not what the
+    # shell that happened to start the runner was doing.
+    param([string]$FrontendSource, [string]$BackendSource)
 
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
+    # Set even when empty. Leaving an inherited value in place for a caller that passed nothing
+    # is the exact failure this guards against; empty makes Compose fall back to the project
+    # directory, which is the right answer for a caller that named no source.
+    $env:AXMS_BACKEND_SOURCE_ROOT = $BackendSource
     $frontend = if ($FrontendSource) { $FrontendSource } else { Get-RepositorySourcePath -Repository 'frontend' }
     if (-not (Test-Path -LiteralPath $frontend -PathType Container)) {
         throw "RUNNER_REPOSITORY_MISSING|Frontend 미리보기 Source가 없습니다: $frontend"
@@ -607,7 +620,8 @@ function Set-PreviewEnvironment {
 
 function Clear-PreviewEnvironment {
     foreach ($name in 'AXMS_PREVIEW_NAME', 'AXMS_PREVIEW_HTTP_PORT', 'AXMS_PREVIEW_DB_PORT',
-        'AXMS_PREVIEW_SECRETS_ROOT', 'AXMS_PREVIEW_FRONTEND_SOURCE') {
+        'AXMS_PREVIEW_SECRETS_ROOT', 'AXMS_PREVIEW_FRONTEND_SOURCE',
+        'AXMS_BACKEND_SOURCE_ROOT') {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
 }
@@ -689,7 +703,13 @@ function Invoke-PreviewUp {
     # Same split as BUILD: the Compose files are Backend files, so the project directory is a
     # Backend checkout even when the Job worked in the frontend.
     if ($repository -eq 'frontend') {
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The canonical checkout rather than an AI work folder. Nothing changed in the Backend
+        # for a frontend Job, so any Backend checkout would do - but <WorkRoot>\ai-backend is
+        # only ever made by the old CREATE_WORKTREE command, which no product flow runs any
+        # more. It survives here as a stale August copy and is absent under any other WorkRoot,
+        # so a runner started with the team lead's default WorkRoot fails the frontend Job at
+        # BUILD. The canonical path is derived from the same WorkRoot and is always there.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         $frontendSource = $exported
     }
     else {
@@ -704,7 +724,7 @@ function Invoke-PreviewUp {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        Set-PreviewEnvironment -FrontendSource $frontendSource
+        Set-PreviewEnvironment -FrontendSource $frontendSource -BackendSource $backendWorktree
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
 
@@ -767,8 +787,11 @@ function Invoke-ComposeBuild {
     if ($repository -eq 'frontend') {
         # The Compose files live in the Backend repository, so the project directory stays a
         # Backend checkout no matter which repository is being built. A frontend workspace holds
-        # no compose.dev.yaml and naming it here fails before the build starts.
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # no compose.dev.yaml and naming it here fails before the build starts. The canonical
+        # checkout is used rather than <WorkRoot>\ai-backend: see PREVIEW_UP above for why that
+        # folder cannot be relied on. Nothing in the Backend changed for a frontend Job, so the
+        # canonical copy is also the correct one to compose from.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         # The image is built from the model's own work when there is any. Falling back to the
         # shared checkout would build a screen nobody changed and call it the candidate.
         $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }
@@ -792,7 +815,7 @@ function Invoke-ComposeBuild {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        Set-PreviewEnvironment -FrontendSource $frontendWorktree
+        Set-PreviewEnvironment -FrontendSource $frontendWorktree -BackendSource $backendWorktree
         $output = & docker @arguments 2>&1
     }
     finally {

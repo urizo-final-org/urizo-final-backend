@@ -588,6 +588,17 @@ public final class CodingHandlerStageService {
         if (workspaceId != null) {
             runnerPayload.put("workspaceId", workspaceId);
         }
+        // A previous Job's preview is six containers that keep running until something takes
+        // them down, and the only place that did so far is past the GITHUB approval. So the
+        // build and the test below competed with them for the same CPU: the same candidate
+        // failed its check twice with a preview up and passed 311/311 with it down. Taken down
+        // here rather than on reject or cancel, because a Job that is merely waiting for
+        // approval leaves its preview up too, and the next Job would lose the same race.
+        runner.enqueue(
+                UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down-before-check:" + resultId)
+                                .getBytes(StandardCharsets.UTF_8)),
+                "PREVIEW_DOWN", objectMapper.createObjectNode());
         runner.enqueue("BUILD", runnerPayload);
         // The frontend runtime image installs and serves; it never compiles or tests what it
         // serves, so a broken screen would reach the person asked to approve it. The backend

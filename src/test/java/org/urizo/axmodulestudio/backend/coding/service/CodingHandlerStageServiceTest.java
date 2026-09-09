@@ -1638,6 +1638,56 @@ class CodingHandlerStageServiceTest {
 
         // No BUILD and no PREVIEW_UP. A refused candidate must not reach Docker at all.
         verify(runner, never()).enqueue(any(), any());
+        // Nor PREVIEW_DOWN. It is queued under a derived id, which is a different overload,
+        // so the check above would not see it and someone else's preview would go down for a
+        // candidate that never got as far as being built.
+        verify(runner, never()).enqueue(any(UUID.class), any(), any());
+    }
+
+    /**
+     * A preview left up by an earlier Job is six containers still running, and the only place
+     * that took one down was past the GITHUB approval. The build and test queued below competed
+     * with them for the same CPU: the same candidate failed its check twice with a preview up
+     * and passed with it down. The runner claims one pending row at a time in created order, so
+     * being queued first is what makes it happen first.
+     */
+    @Test
+    void previewTakesAnEarlierPreviewDownBeforeTheCandidateIsBuiltAndChecked() {
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+
+        runPreview(runner, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class),
+                List.of(ALLOWED_MEMBER_FILE), null, "frontend");
+
+        InOrder order = inOrder(runner);
+        order.verify(runner).enqueue(any(UUID.class), eq("PREVIEW_DOWN"), any());
+        order.verify(runner).enqueue(eq("BUILD"), any());
+        order.verify(runner).enqueue(eq("TEST"), any());
+        order.verify(runner).enqueue(eq("PREVIEW_UP"), any());
+    }
+
+    /**
+     * The same stage runs again on a retry. A derived id rather than a random one is what keeps
+     * the retry from queueing a second teardown row.
+     */
+    @Test
+    void previewDerivesTheTeardownTaskIdSoARetryDoesNotQueueASecondOne() {
+        CodingRunnerService first = mock(CodingRunnerService.class);
+        CodingRunnerService second = mock(CodingRunnerService.class);
+
+        runPreview(first, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), List.of(ALLOWED_MEMBER_FILE), null, "backend");
+        runPreview(second, mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), List.of(ALLOWED_MEMBER_FILE), null, "backend");
+
+        assertThat(teardownTaskId(first)).isEqualTo(teardownTaskId(second));
+    }
+
+    /** The task id one run queued its preview teardown under. */
+    private static UUID teardownTaskId(CodingRunnerService runner) {
+        ArgumentCaptor<UUID> taskId = ArgumentCaptor.forClass(UUID.class);
+        verify(runner).enqueue(taskId.capture(), eq("PREVIEW_DOWN"), any());
+        return taskId.getValue();
     }
 
     @Test
@@ -1722,6 +1772,7 @@ class CodingHandlerStageServiceTest {
                 .hasMessageContaining("outside the selected folders");
 
         verify(runner, never()).enqueue(any(), any());
+        verify(runner, never()).enqueue(any(UUID.class), any(), any());
     }
 
     /** The third layer is asked for too, using the rules copied for this job. */
@@ -1739,6 +1790,7 @@ class CodingHandlerStageServiceTest {
                 .hasMessageContaining("adding a library is not allowed");
 
         verify(runner, never()).enqueue(any(), any());
+        verify(runner, never()).enqueue(any(UUID.class), any(), any());
     }
 
     @Test

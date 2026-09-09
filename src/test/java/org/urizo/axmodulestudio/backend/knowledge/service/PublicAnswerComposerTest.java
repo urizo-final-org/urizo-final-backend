@@ -7,6 +7,7 @@ import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
@@ -205,6 +206,40 @@ class PublicAnswerComposerTest {
     private static ProductApiContract.Citation citation(String title, String excerpt) {
         return new ProductApiContract.Citation(
                 "506926", title, URI.create("https://api-test.local/documents/506926"),
-                excerpt, 0.71, "축제");
+                excerpt, 0.71, "축제", null, null);
+    }
+
+    /** ENDED 근거 블록에는 [상태] 줄이 붙는다 — 규칙 1 아래에서 이 줄이 종료 사실의 유일한 근거다. */
+    @Test
+    void endedEventCarriesAStatusLineInItsGroundingBlock() {
+        AtomicReference<ProviderChatRequest> captured = new AtomicReference<>();
+        PublicAnswerComposer composer = composer(true, Duration.ofSeconds(20), request -> {
+            captured.set(request);
+            return reply("답변");
+        });
+        ProductApiContract.Citation ended = new ProductApiContract.Citation(
+                "506926", "안동국제탈춤페스티벌",
+                URI.create("https://api-test.local/documents/506926"),
+                "[행사기간] 20261003 ~ 20261018\n[개요] 탈춤 공연.", 0.71, "축제",
+                "ENDED", LocalDate.of(2026, 10, 18));
+
+        composer.rewrite("탈춤 축제 언제야?", answered(ended));
+
+        assertThat(captured.get().messages().get(1).content())
+                .contains("[상태] 종료된 행사 (2026-10-18 종료)");
+    }
+
+    /** 종료되지 않은 문서의 블록에는 [상태] 줄이 없다 — 기존 근거 형식이 그대로다. */
+    @Test
+    void nonEndedGroundingBlockStaysUnchanged() {
+        AtomicReference<ProviderChatRequest> captured = new AtomicReference<>();
+        PublicAnswerComposer composer = composer(true, Duration.ofSeconds(20), request -> {
+            captured.set(request);
+            return reply("답변");
+        });
+
+        composer.rewrite("진주남강유등축제 언제 열려?", answered());
+
+        assertThat(captured.get().messages().get(1).content()).doesNotContain("[상태]");
     }
 }

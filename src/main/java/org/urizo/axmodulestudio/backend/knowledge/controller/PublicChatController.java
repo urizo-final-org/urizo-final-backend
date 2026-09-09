@@ -87,7 +87,8 @@ public class PublicChatController {
                 answer.citations().stream()
                         .map(citation -> new PublicChatContract.PublicCitation(
                                 citation.title(), citation.excerpt(),
-                                citation.sourceUrl(), citation.categoryLabel()))
+                                citation.sourceUrl(), citation.categoryLabel(),
+                                citation.eventStatus()))
                         .toList(),
                 answer.generatedAt());
     }

@@ -6,10 +6,15 @@ import java.security.NoSuchAlgorithmException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -161,17 +166,22 @@ final class ProductBatchService {
             for (ProductApiContract.PreviewDocument document
                     : TourismSampleDocumentLoader.documents()) {
                 UUID documentId = stableId(versionId + ":document:" + document.documentId());
+                EventPeriod period = eventPeriod(document.content());
                 jdbc.update("INSERT INTO app.source_document "
                                 + "(source_document_id, knowledge_version_id, external_document_id, title, "
-                                + "content, category, source_url, source_updated_at, content_digest, created_at) "
-                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                + "content, category, source_url, source_updated_at, content_digest, created_at, "
+                                + "event_start_date, event_end_date) "
+                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                                 + "ON CONFLICT (knowledge_version_id, external_document_id) DO UPDATE SET "
                                 + "title = EXCLUDED.title, content = EXCLUDED.content, category = EXCLUDED.category, "
                                 + "source_url = EXCLUDED.source_url, source_updated_at = EXCLUDED.source_updated_at, "
-                                + "content_digest = EXCLUDED.content_digest",
+                                + "content_digest = EXCLUDED.content_digest, "
+                                + "event_start_date = EXCLUDED.event_start_date, "
+                                + "event_end_date = EXCLUDED.event_end_date",
                         documentId, versionId, document.documentId(), document.title(), document.content(),
                         String.join(",", document.category()), document.sourceUrl().toString(),
-                        Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now));
+                        Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now),
+                        period.start(), period.end());
             }
             updateProgress(jobId, "COLLECT", 15, TourismSampleDocumentLoader.totalCount(),
                     TourismSampleDocumentLoader.totalCount());
@@ -288,6 +298,29 @@ final class ProductBatchService {
             throw new IllegalStateException("Knowledge build job has no immutable target version.");
         }
         return values.get(0);
+    }
+
+    private static final Pattern EVENT_PERIOD =
+            Pattern.compile("^\\[행사기간\\]\\s*(\\d{8})\\s*~\\s*(\\d{8})\\s*$", Pattern.MULTILINE);
+
+    /** 본문의 "[행사기간] YYYYMMDD ~ YYYYMMDD" 줄. 없거나 형식·날짜가 어긋나면 NONE — 예외를 던지지 않는다. */
+    static EventPeriod eventPeriod(String content) {
+        Matcher matcher = EVENT_PERIOD.matcher(content);
+        if (!matcher.find()) {
+            return EventPeriod.NONE;
+        }
+        try {
+            return new EventPeriod(
+                    LocalDate.parse(matcher.group(1), DateTimeFormatter.BASIC_ISO_DATE),
+                    LocalDate.parse(matcher.group(2), DateTimeFormatter.BASIC_ISO_DATE));
+        }
+        catch (DateTimeParseException invalid) {
+            return EventPeriod.NONE;
+        }
+    }
+
+    record EventPeriod(LocalDate start, LocalDate end) {
+        static final EventPeriod NONE = new EventPeriod(null, null);
     }
 
     private static UUID stableId(String value) {

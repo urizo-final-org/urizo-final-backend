@@ -494,6 +494,7 @@ class NaturalCmsStageServiceTest {
                 .contains("already appears in currentState.body")
                 .contains("lists as an attached image")
                 .contains("Never invent a src")
+                .contains("bold, italic, strike, underline or link marks")
                 .contains("never use the mark name as the key")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")

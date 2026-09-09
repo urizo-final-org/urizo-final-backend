@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.knowledge.dto;
 
 import java.net.URI;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
@@ -341,6 +342,11 @@ public final class ProductApiContract {
         public RagQueryResponse { citations = List.copyOf(citations); }
     }
 
+    /**
+     * eventStatus는 {@code source_document.event_end_date}가 조회 시점(서버 기준 오늘)보다
+     * 과거면 "ENDED", 그 외에는 null — 값은 이 둘뿐이다. eventEndDate는 종료 안내 문구를
+     * 만들 때 쓰는 원본 날짜다(행사 문서가 아니면 null).
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Citation(
             String documentId,
@@ -348,7 +354,9 @@ public final class ProductApiContract {
             URI sourceUrl,
             String excerpt,
             double score,
-            String categoryLabel) {
+            String categoryLabel,
+            String eventStatus,
+            LocalDate eventEndDate) {
     }
 
     public record ProductSessionResponse(

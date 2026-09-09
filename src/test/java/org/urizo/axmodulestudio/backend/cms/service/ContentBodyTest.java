@@ -112,14 +112,23 @@ class ContentBodyTest {
         assertThat(ContentBody.problem(document)).contains("서식");
     }
 
-    /** `AI05-017`에서 연 세 서식. 편집기·서버·렌더러가 같은 목록을 봐야 한다. */
+    /** `AI05-017`에서 연 두 서식. 편집기·서버·렌더러가 같은 목록을 봐야 한다. */
     @Test
-    void acceptsCodeStrikeAndUnderline() {
+    void acceptsStrikeAndUnderline() {
         String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
-                + "[{\"type\":\"text\",\"text\":\"본문\",\"marks\":[{\"type\":\"code\"},"
-                + "{\"type\":\"strike\"},{\"type\":\"underline\"}]}]}]}";
+                + "[{\"type\":\"text\",\"text\":\"본문\","
+                + "\"marks\":[{\"type\":\"strike\"},{\"type\":\"underline\"}]}]}]}";
 
         assertThat(ContentBody.problem(document)).isNull();
+    }
+
+    /** 인라인 코드는 열지 않았다. 이 사이트 컨텐츠에 쓸 일이 없어 빼기로 했다. */
+    @Test
+    void refusesInlineCode() {
+        String document = "{\"type\":\"doc\",\"content\":[{\"type\":\"paragraph\",\"content\":"
+                + "[{\"type\":\"text\",\"text\":\"본문\",\"marks\":[{\"type\":\"code\"}]}]}]}";
+
+        assertThat(ContentBody.problem(document)).contains("서식");
     }
 
     /**

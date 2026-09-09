@@ -31,7 +31,14 @@ public final class ContentBody {
             "doc", "paragraph", "heading", "bulletList", "orderedList", "listItem",
             "text", "image", "hardBreak");
 
-    private static final Set<String> MARKS = Set.of("bold", "italic", "link");
+    /**
+     * 글자에 붙는 서식. 속성이 없어 이름만 확인하면 된다.
+     *
+     * <p>{@code code} {@code strike} {@code underline}은 편집기 도입 때 함께 껐다가 열었다.
+     * 보통 편집기에 있는 서식인데 허용 목록에 없어 쓸 수 없었다.
+     */
+    private static final Set<String> MARKS = Set.of(
+            "bold", "italic", "link", "code", "strike", "underline");
 
     /** 사이트 본문이 그리는 제목 단계. 문서 제목은 별도 필드라 1단계는 쓰지 않는다. */
     private static final Set<Integer> HEADING_LEVELS = Set.of(2, 3);

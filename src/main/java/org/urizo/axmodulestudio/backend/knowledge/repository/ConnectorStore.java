@@ -24,6 +24,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.exception.ProductApiException;
+import org.urizo.axmodulestudio.backend.knowledge.integration.ConnectorDocumentClient;
+import org.urizo.axmodulestudio.backend.knowledge.integration.ConnectorSecretResolver;
+import org.urizo.axmodulestudio.backend.knowledge.integration.ConnectorSourcePolicy;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
 
 @Repository
@@ -34,16 +37,25 @@ public class ConnectorStore {
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final ProjectStore projects;
+    private final ConnectorSourcePolicy sources;
+    private final ConnectorDocumentClient documents;
+    private final ConnectorSecretResolver secrets;
 
     ConnectorStore(
             JdbcTemplate productJdbcTemplate,
             ObjectMapper objectMapper,
             Clock clock,
-            ProjectStore projects) {
+            ProjectStore projects,
+            ConnectorSourcePolicy sources,
+            ConnectorDocumentClient documents,
+            ConnectorSecretResolver secrets) {
         this.jdbc = productJdbcTemplate;
         this.objectMapper = objectMapper;
         this.clock = clock;
         this.projects = projects;
+        this.sources = sources;
+        this.documents = documents;
+        this.secrets = secrets;
     }
 
     public ProductApiContract.ConnectorResponse createConnector(
@@ -116,17 +128,34 @@ public class ConnectorStore {
             UUID traceId,
             ProductApiContract.ConnectorPreviewRequest request) {
         ConnectorConfig config = connectorConfig(connectorId);
-        requireFixture(config.config().path("baseUrl").asText());
-        List<ProductApiContract.PreviewDocument> documents =
-                DeterministicConnectorFixture.documents(request.maxItems());
+        String baseUrl = config.config().path("baseUrl").asText();
+        sources.require(baseUrl);
+
+        List<ProductApiContract.PreviewDocument> preview;
+        int totalCount;
+        boolean truncated;
+        if (sources.isFixture(baseUrl)) {
+            preview = DeterministicConnectorFixture.documents(request.maxItems());
+            totalCount = DeterministicConnectorFixture.totalCount();
+            truncated = preview.size() < totalCount;
+        }
+        else {
+            String key = secrets.resolve(
+                    config.config().path("authentication").path("secretRef").asText());
+            preview = documents.fetch(config.config(), key, request.maxItems());
+            // 원천 전체 건수를 확인하려면 페이지를 끝까지 돌아야 한다. 미리보기가 할 일이
+            // 아니므로 받아온 만큼만 보고하고, 요청 수를 채웠으면 더 있다고 표시한다.
+            totalCount = preview.size();
+            truncated = preview.size() >= request.maxItems();
+        }
+
         Instant now = Instant.now(clock);
         jdbc.update("UPDATE app.connector_version SET previewed_at = ? "
                         + "WHERE connector_version_id = ?",
                 Timestamp.from(now), config.connectorVersionId());
         return new ProductApiContract.ConnectorPreviewResponse(
-                version(), traceId, connectorId, documents.size(),
-                DeterministicConnectorFixture.totalCount(), documents,
-                documents.size() < DeterministicConnectorFixture.totalCount(), now);
+                version(), traceId, connectorId, preview.size(),
+                totalCount, preview, truncated, now);
     }
 
     public ProductApiContract.ConnectorResponse activateConnectorVersion(
@@ -164,13 +193,9 @@ public class ConnectorStore {
                 row.name(), "ACTIVE", row.configDigest(), row.createdAt());
     }
 
-    public void requireFixture(String baseUrl) {
-        if (!DeterministicConnectorFixture.supports(baseUrl)) {
-            throw new ProductApiException(
-                    "CONNECTOR_FIXTURE_REQUIRED",
-                    "Only the deterministic local connector adapter is enabled.",
-                    HttpStatus.UNPROCESSABLE_ENTITY);
-        }
+    /** Job 생성 시점에도 원천 경계를 다시 확인한다. 등록 이후 허용 목록이 좁아졌을 수 있다. */
+    public void requireSupportedSource(String baseUrl) {
+        sources.require(baseUrl);
     }
 
     private ProductApiContract.ConnectorResponse connector(ResultSet rs, UUID traceId)
@@ -189,7 +214,7 @@ public class ConnectorStore {
                 + "WHERE cv2.connector_id = c.connector_id ORDER BY cv2.version_number DESC LIMIT 1))";
     }
 
-    private static void validateConnector(ProductApiContract.CreateConnectorRequest request) {
+    private void validateConnector(ProductApiContract.CreateConnectorRequest request) {
         if (!"GET".equals(request.method())) {
             throw validation("Only deterministic GET connectors are supported in the local profile.");
         }
@@ -199,8 +224,8 @@ public class ConnectorStore {
                 || base.toString().length() > 500) {
             throw validation("Connector baseUrl is not a canonical HTTPS origin or base path.");
         }
-        if (!DeterministicConnectorFixture.supports(base.toString())) {
-            throw validation("The local profile accepts only HTTPS fixture.invalid connector origins.");
+        if (!sources.allows(base.toString())) {
+            throw validation("The connector source host is not on the allowed list.");
         }
         if (request.endpoint().contains("..") || request.endpoint().startsWith("//")) {
             throw validation("Connector endpoint is not an origin-relative safe path.");
@@ -210,9 +235,28 @@ public class ConnectorStore {
         validateResponseMapping(request.response());
         validatePagination(request.pagination());
         validateDocumentMapping(request.documentMapping());
-        JsonNode secretRef = request.authentication().path("secretRef");
-        if (!secretRef.isTextual() || !secretRef.asText().startsWith("fixture://")) {
-            throw validation("The local fixture connector requires a non-secret fixture:// reference.");
+        validateSecretRef(request.authentication().path("secretRef"), base.toString());
+    }
+
+    /**
+     * 원천 종류와 인증 참조 방식을 묶는다.
+     *
+     * <p>픽스처 커넥터는 호출이 없으므로 값이 필요 없고, 실제 원천은 파일 Secret이 있어야 한다.
+     * 짝이 어긋나면 등록은 되고 수집에서 실패하므로 여기서 막는다.
+     */
+    private void validateSecretRef(JsonNode secretRef, String baseUrl) {
+        if (!secretRef.isTextual()) {
+            throw validation("Connector authentication secretRef is invalid.");
+        }
+        String value = secretRef.asText();
+        if (sources.isFixture(baseUrl)) {
+            if (!value.startsWith("fixture://")) {
+                throw validation("The local fixture connector requires a fixture:// reference.");
+            }
+            return;
+        }
+        if (!value.startsWith("cms-secret://")) {
+            throw validation("A live connector source requires a cms-secret:// reference.");
         }
     }
 

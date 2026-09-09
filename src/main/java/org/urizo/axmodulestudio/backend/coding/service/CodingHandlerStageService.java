@@ -588,6 +588,17 @@ public final class CodingHandlerStageService {
         if (workspaceId != null) {
             runnerPayload.put("workspaceId", workspaceId);
         }
+        // A previous Job's preview is six containers that keep running until something takes
+        // them down, and the only place that did so far is past the GITHUB approval. So the
+        // build and the test below competed with them for the same CPU: the same candidate
+        // failed its check twice with a preview up and passed 311/311 with it down. Taken down
+        // here rather than on reject or cancel, because a Job that is merely waiting for
+        // approval leaves its preview up too, and the next Job would lose the same race.
+        runner.enqueue(
+                UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down-before-check:" + resultId)
+                                .getBytes(StandardCharsets.UTF_8)),
+                "PREVIEW_DOWN", objectMapper.createObjectNode());
         runner.enqueue("BUILD", runnerPayload);
         // The frontend runtime image installs and serves; it never compiles or tests what it
         // serves, so a broken screen would reach the person asked to approve it. The backend
@@ -1365,7 +1376,18 @@ public final class CodingHandlerStageService {
         // the fence: the job's own snapshot, so a mid-run settings change cannot move the
         // rules under it. An empty snapshot means an open system, and injecting a fabricated
         // restriction into an open system would refuse work the post-check would have passed.
-        if ("coding.analyze".equals(handlerKey)) {
+        //
+        // The reviewer is shown the same fence for a different reason. The analyst judges the
+        // request, which can be entirely inside the fence while the only way to finish it is
+        // not: measured on Jobs a4dd06bf and c26fd4aa, a request to edit one screen string was
+        // correctly accepted, and the reviewer then asked for the test asserting that string -
+        // a file outside the fence - to be updated too. The coding stage complied and the
+        // post-check refused the whole candidate. The reviewer is the first stage that can see
+        // this at all, because it is the first to read the finished candidate, and on c26fd4aa
+        // it did see it: 73% of that job's tokens were spent after the reviewer said so.
+        boolean analyst = "coding.analyze".equals(handlerKey);
+        boolean reviewer = "coding.review".equals(handlerKey);
+        if (analyst || reviewer) {
             List<String> allowed = guardrailSelections.jobSnapshot(aggregate.jobId());
             if (allowed != null && !allowed.isEmpty()) {
                 ObjectNode guardrail = context.putObject("guardrail");
@@ -1386,17 +1408,21 @@ public final class CodingHandlerStageService {
                 // The analyst has no tools, so without this it can only guess at file names
                 // and the coding stage pays for the guess in search turns. Paths are safe
                 // here and nowhere else: this context never reaches an approval screen, and
-                // planSummary is separately forbidden from naming them.
-                List<String> files = guardrailSelections.jobFiles(aggregate.jobId());
-                if (!files.isEmpty()) {
-                    ArrayNode fenceFiles = guardrail.putArray("files");
-                    files.forEach(fenceFiles::add);
+                // planSummary is separately forbidden from naming them. The reviewer is given
+                // the areas above but never this list: reportSummary is read by the same
+                // general administrator, and a model quotes what it was shown.
+                if (analyst) {
+                    List<String> files = guardrailSelections.jobFiles(aggregate.jobId());
+                    if (!files.isEmpty()) {
+                        ArrayNode fenceFiles = guardrail.putArray("files");
+                        files.forEach(fenceFiles::add);
+                    }
+                    guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
+                        guardrail.put("allowNewDependency", rules.allowNewDependency());
+                        guardrail.put("maxChangedFiles", rules.maxChangedFiles());
+                        guardrail.put("maxChangedLines", rules.maxChangedLines());
+                    });
                 }
-                guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
-                    guardrail.put("allowNewDependency", rules.allowNewDependency());
-                    guardrail.put("maxChangedFiles", rules.maxChangedFiles());
-                    guardrail.put("maxChangedLines", rules.maxChangedLines());
-                });
             }
         }
         ArrayNode prior = context.putArray("priorResults");
@@ -1494,7 +1520,27 @@ public final class CodingHandlerStageService {
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "
                     + "array of objects each holding \"criterion\", copied verbatim from the "
                     + "acceptanceCriteria in the coding.analyze payload you were given, and "
-                    + "\"met\", either true or false. ";
+                    + "\"met\", either true or false. "
+                    // The reviewer sees the finished candidate, so it is the first stage that
+                    // can tell the difference between "not done yet" and "cannot be done here".
+                    // Without this field both arrive as changes_requested and the gate, which
+                    // counts rounds rather than reading them, sends the job back to coding to
+                    // do the one thing the post-check will refuse.
+                    + "payload must also contain \"requiresDeniedArea\", either true or false. "
+                    + "Answer true only when finishing this request would require changing a "
+                    + "file that does not belong to any work area named in "
+                    + "guardrail.allowedAreas - a change the pipeline is not permitted to make, "
+                    + "however correct it would be. Answer false in every other case, including "
+                    + "when the remaining work is ordinary and simply not finished yet. When it "
+                    + "is true, still answer port \"changes_requested\" and let reportSummary "
+                    + "explain in plain language that the request cannot be completed within "
+                    + "the permitted areas, naming areas only by the guardrail labels and never "
+                    // Live run 2026-09-09 (Job c26fd4aa): asking for a file outside the fence
+                    // to be updated reads to a general administrator as ordinary feedback, so
+                    // the summary has to say the work stops rather than that it continues.
+                    + "by path or file name, and never describe the work as if it will "
+                    + "continue. When it is false, reportSummary must not mention areas, "
+                    + "permissions, or the guardrail at all. ";
             default -> "";
         };
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "

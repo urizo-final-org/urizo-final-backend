@@ -494,7 +494,11 @@ class NaturalCmsStageServiceTest {
                 .contains("already appears in currentState.body")
                 .contains("lists as an attached image")
                 .contains("Never invent a src")
-                .contains("bold, italic, strike, underline or link marks")
+                // `AI05-017` 2차에서 색과 형광펜이 들어와 계약이 넓어졌다.
+                .contains("bold, italic, strike, underline, textStyle, highlight or link marks")
+                .contains("blockquote and horizontalRule")
+                .contains("Only these colours exist")
+                .contains("Never invent another colour")
                 .contains("never use the mark name as the key")
                 .contains("CREATE sends title and body")
                 .contains("DELETE carries no fields")

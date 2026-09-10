@@ -42,11 +42,19 @@ class PublicChatResponseBoundaryTest {
                 .doesNotContainAnyElementsOf(ADMINISTRATOR_ONLY);
     }
 
-    /** axms-ai02-008: eventStatus("ENDED" | null)가 다섯 번째 공개 필드로 들어왔다. */
+    /**
+     * axms-ai02-008: eventStatus("ENDED" | null)가 다섯 번째 공개 필드로 들어왔다.
+     * axms-ai02-012: imageUrl(원천 대표 사진, 없으면 null)이 여섯 번째로 들어왔다.
+     *
+     * <p>공개 필드가 늘어나는 것은 승인된 변경일 때만이다. 이 목록을 고칠 때는 어떤 작업이
+     * 어떤 필드를 왜 열었는지 위에 한 줄 남긴다 — 그래야 관리자 전용 값이 조용히 새는 것과
+     * 구분된다.
+     */
     @Test
-    void publicCitationCarriesExactlyTheApprovedFiveFields() {
+    void publicCitationCarriesExactlyTheApprovedSixFields() {
         assertThat(componentNames(PublicChatContract.PublicCitation.class))
-                .containsExactly("title", "excerpt", "sourceUrl", "categoryLabel", "eventStatus");
+                .containsExactly("title", "excerpt", "sourceUrl", "categoryLabel", "eventStatus",
+                        "imageUrl");
     }
 
     /** 첫 턴은 category도 previousQuery도 없이 온다 — 둘 다 생략 가능해야 한다. */
@@ -69,7 +77,7 @@ class PublicChatResponseBoundaryTest {
                         List.of(new ProductApiContract.Citation(
                                 "local-tourism-001", "속초 해수욕장", SOURCE_URL,
                                 "[분류] 관광지\n속초 해수욕장은 …", 0.8123, "관광지 > 해수욕장",
-                                null, null)),
+                                null, null, "http://tong.visitkorea.or.kr/cms/resource/1/1_image2_1.jpg")),
                         KNOWLEDGE_VERSION_ID, Instant.parse("2026-08-31T12:00:00Z")));
 
         assertThat(response.conversationId()).isEqualTo(CONVERSATION_ID);
@@ -81,6 +89,10 @@ class PublicChatResponseBoundaryTest {
             assertThat(citation.sourceUrl().getScheme()).isEqualTo("https");
             assertThat(citation.categoryLabel()).isEqualTo("관광지 > 해수욕장");
             assertThat(citation.eventStatus()).isNull();
+            // 사진은 공개 응답까지 통과한다. 원천이 준 실제 주소라 http 그대로 나간다 —
+            // https로 바꿔 적으면 원천에 없는 주소가 된다.
+            assertThat(citation.imageUrl())
+                    .isEqualTo("http://tong.visitkorea.or.kr/cms/resource/1/1_image2_1.jpg");
         });
     }
 
@@ -94,7 +106,7 @@ class PublicChatResponseBoundaryTest {
                         List.of(new ProductApiContract.Citation(
                                 "506926", "안동국제탈춤페스티벌", SOURCE_URL,
                                 "[행사기간] 20261003 ~ 20261018", 0.71, "축제",
-                                "ENDED", LocalDate.of(2026, 10, 18))),
+                                "ENDED", LocalDate.of(2026, 10, 18), null)),
                         KNOWLEDGE_VERSION_ID, Instant.parse("2026-10-20T12:00:00Z")));
 
         assertThat(response.citations()).singleElement()

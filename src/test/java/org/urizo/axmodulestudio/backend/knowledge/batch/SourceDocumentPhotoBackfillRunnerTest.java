@@ -1,9 +1,11 @@
 package org.urizo.axmodulestudio.backend.knowledge.batch;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +14,8 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.support.TransactionCallback;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocumentLoader;
 
 /**
@@ -28,7 +32,7 @@ class SourceDocumentPhotoBackfillRunnerTest {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.batchUpdate(anyString(), anyList())).thenReturn(new int[0]);
 
-        new SourceDocumentPhotoBackfillRunner(jdbc).run(null);
+        new SourceDocumentPhotoBackfillRunner(jdbc, committing()).run(null);
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Object[]>> arguments = ArgumentCaptor.forClass(List.class);
@@ -46,7 +50,7 @@ class SourceDocumentPhotoBackfillRunnerTest {
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         when(jdbc.batchUpdate(anyString(), anyList())).thenReturn(new int[0]);
 
-        new SourceDocumentPhotoBackfillRunner(jdbc).run(null);
+        new SourceDocumentPhotoBackfillRunner(jdbc, committing()).run(null);
 
         ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
         verify(jdbc).batchUpdate(sql.capture(), anyList());
@@ -55,5 +59,26 @@ class SourceDocumentPhotoBackfillRunnerTest {
                 .contains("image_url IS NULL");
         // 본문·digest·임베딩은 건드리지 않는다 — 사진은 표시용 메타데이터일 뿐이다.
         assertThat(sql.getValue()).doesNotContain("content").doesNotContain("digest");
+    }
+
+    @Test
+    void writesInsideATransactionSoTheUpdateIsNotRolledBackOnReturn() {
+        // productDataSource는 autoCommit=false다. 트랜잭션 밖에서 쓰면 batchUpdate가 건수를
+        // 돌려주고도 커넥션 반납 시 롤백된다 — 로그만 남고 image_url은 그대로 NULL이었다.
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        TransactionTemplate neverRuns = mock(TransactionTemplate.class);
+
+        new SourceDocumentPhotoBackfillRunner(jdbc, neverRuns).run(null);
+
+        verify(neverRuns).execute(any());
+        verify(jdbc, never()).batchUpdate(anyString(), anyList());
+    }
+
+    /** 콜백을 그대로 실행하는 TransactionTemplate — 커밋 경계만 흉내 낸다. */
+    private static TransactionTemplate committing() {
+        TransactionTemplate transactions = mock(TransactionTemplate.class);
+        when(transactions.execute(any())).thenAnswer(call ->
+                call.getArgument(0, TransactionCallback.class).doInTransaction(null));
+        return transactions;
     }
 }

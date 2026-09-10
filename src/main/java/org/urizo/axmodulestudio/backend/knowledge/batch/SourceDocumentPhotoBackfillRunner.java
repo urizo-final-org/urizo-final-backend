@@ -12,6 +12,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.core.annotation.Order;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
 import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocumentLoader;
 
@@ -39,9 +40,14 @@ class SourceDocumentPhotoBackfillRunner implements ApplicationRunner {
     private static final int BATCH_SIZE = 500;
 
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate transactions;
 
-    SourceDocumentPhotoBackfillRunner(JdbcTemplate jdbc) {
+    // 파라미터 이름으로 productTransactionTemplate을 고른다. TransactionTemplate 빈이 셋이고
+    // @Primary가 없다 — KnowledgeStore가 쓰는 방식과 같다.
+    SourceDocumentPhotoBackfillRunner(
+            JdbcTemplate jdbc, TransactionTemplate productTransactionTemplate) {
         this.jdbc = jdbc;
+        this.transactions = productTransactionTemplate;
     }
 
     @Override
@@ -55,18 +61,24 @@ class SourceDocumentPhotoBackfillRunner implements ApplicationRunner {
         if (arguments.isEmpty()) {
             return;
         }
-        int filled = 0;
-        for (int start = 0; start < arguments.size(); start += BATCH_SIZE) {
-            List<Object[]> slice = arguments.subList(
-                    start, Math.min(start + BATCH_SIZE, arguments.size()));
-            int[] updated = jdbc.batchUpdate(
-                    "UPDATE app.source_document SET image_url = ? "
-                            + "WHERE external_document_id = ? AND image_url IS NULL",
-                    slice);
-            filled += Arrays.stream(updated).sum();
-        }
+        // 트랜잭션으로 감싼다. productDataSource가 autoCommit=false라 트랜잭션 밖의 UPDATE는
+        // 예외 없이 커밋되지 않고 커넥션 반납 시 롤백된다 — 갱신 건수 로그를 남기고도 행이
+        // 그대로다(KnowledgeStore의 같은 주의와 동일한 함정).
+        Integer filled = transactions.execute(status -> {
+            int count = 0;
+            for (int start = 0; start < arguments.size(); start += BATCH_SIZE) {
+                List<Object[]> slice = arguments.subList(
+                        start, Math.min(start + BATCH_SIZE, arguments.size()));
+                int[] updated = jdbc.batchUpdate(
+                        "UPDATE app.source_document SET image_url = ? "
+                                + "WHERE external_document_id = ? AND image_url IS NULL",
+                        slice);
+                count += Arrays.stream(updated).sum();
+            }
+            return count;
+        });
         // 채운 것이 없으면 조용히 넘어간다 — 매 기동마다 로그를 남기지 않는다.
-        if (filled > 0) {
+        if (filled != null && filled > 0) {
             LOG.info("Backfilled {} source document photos for versions built before the column existed.",
                     filled);
         }

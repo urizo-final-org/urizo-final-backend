@@ -140,7 +140,10 @@ class PublicAnswerComposerTest {
                 .contains("제공된 근거 문서의 내용만 사용한다")
                 .contains("근거에 없는 정보를 추가하지 않는다")
                 .contains("부족하면, 지어내지 말고 부족하다고 말한다")
-                .contains("300자");
+                .contains("300자")
+                // 규칙 5. 종료 문구를 모델 판단이 아니라 [상태] 줄에 고정한다(axms-ai02-014).
+                .contains("[상태] 줄이 있으면 그 행사가 종료됐다는 사실을 답변에 반드시")
+                .contains("[상태] 줄이 없으면 종료 여부를 판단하거나 언급하지 않는다");
 
         String user = request.messages().get(1).content();
         assertThat(user)

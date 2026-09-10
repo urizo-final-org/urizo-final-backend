@@ -1364,8 +1364,10 @@ function Invoke-LocalDockerComposeDeployment {
         throw 'RUNNER_PAYLOAD_INVALID|고정 로컬 배포의 승인 증거가 올바르지 않습니다.'
     }
     $sourceRoot = Get-MergedDeployWorktree -Repository $repository -MergeSha $mergeSha
-    $masterScript = Join-Path (Split-Path -Parent $repositoryRoot) `
-        'urizo-final-master\scripts\rebuild-local-service.ps1'
+    # The Master wrapper sits beside the canonical repositories under the workspace root, which
+    # is where WorkRoot already points; deriving it from this script's own repository would
+    # break as soon as the runner is started from a worktree.
+    $masterScript = Join-Path $workspaceRoot 'urizo-final-master\scripts\rebuild-local-service.ps1'
     if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
         throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
     }

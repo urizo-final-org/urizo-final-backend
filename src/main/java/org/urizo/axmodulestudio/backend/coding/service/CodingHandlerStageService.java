@@ -967,7 +967,8 @@ public final class CodingHandlerStageService {
         subject.put("candidateSha", pullRequest.candidateSha());
         subject.put("sourceValidationHash", pullRequest.validationHash());
         subject.put("adapterKey", deploymentAdapter.adapterKey());
-        subject.put("targetKey", deploymentAdapter.targetKey());
+        subject.put("targetKey", deploymentAdapter.targetKey(
+                pullRequest.payload().path("repository").asText()));
         subject.put("configDigest", deploymentAdapter.configDigest());
         String subjectHash = digest(subject);
         UUID deploymentRequestId = UUID.nameUUIDFromBytes(
@@ -996,8 +997,9 @@ public final class CodingHandlerStageService {
                 .path("deploymentRequestId").asText();
         if (!deploymentAdapter.adapterKey().equals(
                     deployRequest.payload().path("adapterKey").asText())
-                || !deploymentAdapter.targetKey().equals(
-                    deployRequest.payload().path("targetKey").asText())
+                || !deployRequest.payload().path("targetKey").asText().equals(
+                    deploymentAdapter.targetKey(
+                            deployRequest.payload().path("repository").asText()))
                 || !deploymentAdapter.configDigest().equals(
                     deployRequest.payload().path("configDigest").asText())) {
             throw conflict("The server deployment adapter changed after approval was requested.");
@@ -1028,7 +1030,8 @@ public final class CodingHandlerStageService {
         payload.put("deploymentRequestId", deploymentRequestId);
         payload.put("deploymentExecutionId", executionId.toString());
         payload.put("adapterKey", deploymentAdapter.adapterKey());
-        payload.put("targetKey", deploymentAdapter.targetKey());
+        payload.put("targetKey", deploymentAdapter.targetKey(
+                deployRequest.payload().path("repository").asText()));
         payload.put("configDigest", deploymentAdapter.configDigest());
         payload.put("mergeSha", mergeSha);
         payload.put("status", port.toUpperCase(java.util.Locale.ROOT));

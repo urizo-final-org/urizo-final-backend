@@ -2082,7 +2082,7 @@ class CodingHandlerStageServiceTest {
         CodingToolService toolService = mock(CodingToolService.class);
         DeploymentAdapter deployment = mock(DeploymentAdapter.class);
         when(deployment.adapterKey()).thenReturn("local-docker-compose");
-        when(deployment.targetKey()).thenReturn("full:backend:spring-app");
+        when(deployment.targetKey("backend")).thenReturn("full:backend:spring-app");
         when(deployment.configDigest()).thenReturn(DIFF_DIGEST);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
@@ -2233,6 +2233,8 @@ class CodingHandlerStageServiceTest {
         assertThat(response.payload().path("prNumber").asInt()).isEqualTo(42);
     }
 
+    /* The frontend has its own fixed local target, so its receipt advertises deployment the
+     * same way the backend's does; the graph then routes it to the deployment request. */
     @Test
     void prCompletionPublishesToTheRepositoryTheJobWorksIn() {
         PullRequestFixture fixture = pullRequestFixture("frontend");
@@ -2247,7 +2249,7 @@ class CodingHandlerStageServiceTest {
         assertThat(command.getValue().path("repo").asText()).isEqualTo("frontend");
         assertThat(response.payload().path("repository").asText()).isEqualTo("frontend");
         assertThat(response.payload().path("deploymentSupported").isBoolean()).isTrue();
-        assertThat(response.payload().path("deploymentSupported").asBoolean()).isFalse();
+        assertThat(response.payload().path("deploymentSupported").asBoolean()).isTrue();
         assertThat(response.resultPort()).isEqualTo("completed");
     }
 

@@ -74,9 +74,15 @@ public final class PublicChatContract {
      *
      * <p>eventStatus는 행사 종료일({@code source_document.event_end_date})이 서버 기준
      * 오늘보다 과거면 "ENDED", 그 외에는 null이다. 값은 이 둘뿐이다.
+     *
+     * <p>imageUrl은 {@code source_document.image_url}이며 사진이 없는 문서는 null이다
+     * (표본 코퍼스 500건 중 405건만 보유). sourceUrl과 달리 원천이 준 실제 주소라 브라우저에서
+     * 열린다 — 대신 http와 https가 섞여 있어 https 페이지에서는 혼합 콘텐츠로 차단될 수 있다.
+     * 스킴을 https로 바꿔 적지 않는다: 원천에 없는 주소를 지어내는 것이 되고, 틀린 사진은
+     * 사진이 없는 것보다 나쁘다.
      */
     public record PublicCitation(
             String title, String excerpt, URI sourceUrl, String categoryLabel,
-            String eventStatus) {
+            String eventStatus, String imageUrl) {
     }
 }

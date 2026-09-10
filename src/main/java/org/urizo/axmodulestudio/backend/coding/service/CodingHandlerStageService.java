@@ -958,7 +958,7 @@ public final class CodingHandlerStageService {
             return sideEffect(resultId, request, aggregate,
                     "recorded", "DEPLOY_REQUEST_RECORDED");
         }
-        requireBackendPullRequest(pullRequest);
+        requireDeployablePullRequest(pullRequest);
         ObjectNode subject = objectMapper.createObjectNode();
         subject.put("jobId", jobId.toString());
         subject.put("pipelineAttempt", aggregate.pipelineAttempt());
@@ -1101,10 +1101,10 @@ public final class CodingHandlerStageService {
         }
     }
 
-    private static void requireV4DeploymentIdentity(
+    private void requireV4DeploymentIdentity(
             CodingHandlerContract.HandlerResultResponse pullRequest,
             CodingHandlerContract.HandlerResultResponse deployRequest) {
-        requireBackendPullRequest(pullRequest);
+        requireDeployablePullRequest(pullRequest);
         if (!deployRequest.payload().hasNonNull("deploymentRequestId")
                 || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
                 || !Objects.equals(pullRequest.payload().path("repository").asText(),
@@ -1115,11 +1115,14 @@ public final class CodingHandlerStageService {
         }
     }
 
-    private static void requireBackendPullRequest(
+    /* The server-selected adapter decides which repositories have a deployment target; the
+     * stage only refuses a pull request the adapter has no target for. */
+    private void requireDeployablePullRequest(
             CodingHandlerContract.HandlerResultResponse pullRequest) {
-        if (!CodingRepositories.BACKEND.equals(
+        if (!deploymentAdapter.supportsRepository(
                 pullRequest.payload().path("repository").asText())) {
-            throw conflict("Deployment stages are available only for Backend Coding Jobs.");
+            throw conflict(
+                    "Deployment stages are available only for repositories with a server deployment target.");
         }
     }
 

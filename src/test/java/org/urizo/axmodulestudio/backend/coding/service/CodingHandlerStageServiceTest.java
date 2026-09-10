@@ -2081,6 +2081,7 @@ class CodingHandlerStageServiceTest {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        when(deployment.supportsRepository("backend")).thenReturn(true);
         when(deployment.adapterKey()).thenReturn("local-docker-compose");
         when(deployment.targetKey("backend")).thenReturn("full:backend:spring-app");
         when(deployment.configDigest()).thenReturn(DIFF_DIGEST);
@@ -2325,7 +2326,7 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "deploy_request",
                         "coding.deploy_request", RESULT)))
                 .isInstanceOf(CodingWorkerException.class)
-                .hasMessageContaining("only for Backend");
+                .hasMessageContaining("server deployment target");
 
         verify(deployment, never()).deploy(any(), any());
     }
@@ -2584,6 +2585,7 @@ class CodingHandlerStageServiceTest {
         CodingToolService toolService = mock(CodingToolService.class);
         CodingRunnerService runner = mock(CodingRunnerService.class);
         DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        when(deployment.supportsRepository("backend")).thenReturn(true);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
                 mock(CodingModelTurnService.class), runner, deployment,

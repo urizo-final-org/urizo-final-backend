@@ -239,7 +239,8 @@ class PublicAnswerComposerTest {
         composer.rewrite("탈춤 축제 언제야?", answered(ended));
 
         assertThat(captured.get().messages().get(1).content())
-                .contains("[상태] 종료된 행사 (2026-10-18 종료)");
+                // 하이픈 날짜를 넘기면 규칙 2 때문에 답변에도 그대로 나온다.
+                .contains("[상태] 종료된 행사 (2026년 10월 18일 종료)");
     }
 
     /** 종료되지 않은 문서의 블록에는 [상태] 줄이 없다 — 기존 근거 형식이 그대로다. */

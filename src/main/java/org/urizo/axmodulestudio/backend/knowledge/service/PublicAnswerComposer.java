@@ -175,12 +175,19 @@ class PublicAnswerComposer {
             // 종료된 행사는 근거에 명시한다. 규칙 1(근거만 사용) 아래에서 이 줄이 없으면
             // LLM이 종료 사실을 말할 수 없다. 2026-09-09 이후 형식 — 이전 faithfulness
             // 측정치(0.9633)는 이 줄이 없던 형식의 값이다(prereg 문서 정정 참조).
+            // 날짜는 한국어로 적는다. LocalDate.toString()의 "2026-08-30"을 그대로 넘기면
+            // 규칙 2(근거에 적힌 그대로)를 지키느라 답변에도 하이픈 날짜가 그대로 나온다.
             if ("ENDED".equals(citation.eventStatus()) && citation.eventEndDate() != null) {
                 grounding.append('\n').append("[상태] 종료된 행사 (")
-                        .append(citation.eventEndDate()).append(" 종료)");
+                        .append(koreanDate(citation.eventEndDate())).append(" 종료)");
             }
             grounding.append("\n\n");
         }
         return USER_TEMPLATE.formatted(grounding.toString().stripTrailing(), query);
+    }
+
+    /** {@code 2026-08-30} → {@code 2026년 8월 30일}. 답변에 그대로 실려도 읽히는 형식이다. */
+    private static String koreanDate(java.time.LocalDate date) {
+        return date.getYear() + "년 " + date.getMonthValue() + "월 " + date.getDayOfMonth() + "일";
     }
 }

@@ -1210,8 +1210,14 @@ function Invoke-CheckDevMerge {
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
         throw 'RUNNER_PAYLOAD_INVALID|dev merge 확인 payload 가 올바르지 않습니다.'
     }
-    $worktree = Get-AiWorktreePath -Repository $repository
-    $slug = Get-RemoteSlug -Worktree $worktree
+    # The pull request lives on the canonical repository's origin. Reading the slug there
+    # (as the deploy worktree does) means the check does not depend on a Job worktree that
+    # may already have been cleaned up by the time the merge is confirmed.
+    $source = Get-RepositorySourcePath -Repository $repository
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "RUNNER_DEPLOY_BLOCKED|$repository canonical 저장소를 찾을 수 없습니다."
+    }
+    $slug = Get-RemoteSlug -Worktree $source
     $raw = & gh pr view ([int]$prNumber) --repo $slug `
         --json number,url,state,baseRefName,headRefName,headRefOid,mergeCommit 2>&1
     if ($LASTEXITCODE -ne 0) {

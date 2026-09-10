@@ -14,6 +14,15 @@ import org.urizo.axmodulestudio.backend.coding.service.CodingRunnerService;
 class LocalDockerComposeDeploymentAdapterTest {
 
     @Test
+    void advertisesOnlyTheRepositoryWithAnAllowlistedDeploymentTarget() {
+        var adapter = new LocalDockerComposeDeploymentAdapter(mock(CodingRunnerService.class));
+        assertThat(adapter.supportsRepository("backend")).isTrue();
+        assertThat(adapter.supportsRepository("frontend")).isFalse();
+        assertThat(adapter.supportsRepository("unknown")).isFalse();
+        assertThat(adapter.supportsRepository(null)).isFalse();
+    }
+
+    @Test
     void delegatesOnlyTheFixedLocalComposeTaskUnderTheStableExecutionId() {
         CodingRunnerService runner = mock(CodingRunnerService.class);
         UUID executionId = UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");

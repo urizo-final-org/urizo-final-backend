@@ -2246,6 +2246,20 @@ class CodingHandlerStageServiceTest {
         verify(fixture.runner()).enqueue(eq(RESULT), eq("CREATE_PR"), command.capture());
         assertThat(command.getValue().path("repo").asText()).isEqualTo("frontend");
         assertThat(response.payload().path("repository").asText()).isEqualTo("frontend");
+        assertThat(response.payload().path("deploymentSupported").isBoolean()).isTrue();
+        assertThat(response.payload().path("deploymentSupported").asBoolean()).isFalse();
+        assertThat(response.resultPort()).isEqualTo("completed");
+    }
+
+    @Test
+    void backendPrCompletionAdvertisesTheServerDeploymentCapability() {
+        PullRequestFixture fixture = pullRequestFixture("backend");
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "pr_complete", "coding.pr_complete", RESULT));
+        assertThat(response.payload().path("deploymentSupported").asBoolean()).isTrue();
+        assertThat(response.resultPort()).isEqualTo("completed");
     }
 
     @Test
@@ -2472,7 +2486,8 @@ class CodingHandlerStageServiceTest {
         CodingRunnerService runner = mock(CodingRunnerService.class);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
-                mock(CodingModelTurnService.class), runner, mock(DeploymentAdapter.class),
+                mock(CodingModelTurnService.class), runner,
+                new org.urizo.axmodulestudio.backend.coding.integration.LocalDockerComposeDeploymentAdapter(runner),
                 mock(ProfileModelBindingService.class),
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper,

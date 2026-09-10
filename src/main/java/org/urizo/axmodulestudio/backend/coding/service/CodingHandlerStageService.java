@@ -868,6 +868,7 @@ public final class CodingHandlerStageService {
         }
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("repository", repository);
+        payload.put("deploymentSupported", deploymentAdapter.supportsRepository(repository));
         payload.put("base", "dev");
         payload.put("head", branch);
         payload.put("candidateSha", requested.candidateSha());

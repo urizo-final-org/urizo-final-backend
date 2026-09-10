@@ -143,7 +143,12 @@ class PublicAnswerComposerTest {
                 .contains("300자")
                 // 규칙 5. 종료 문구를 모델 판단이 아니라 [상태] 줄에 고정한다(axms-ai02-014).
                 .contains("[상태] 줄이 있으면 그 행사가 종료됐다는 사실을 답변에 반드시")
-                .contains("[상태] 줄이 없으면 종료 여부를 판단하거나 언급하지 않는다");
+                .contains("[상태] 줄이 없으면 종료 여부를 판단하거나 언급하지 않는다")
+                // 규칙 6. 톤과 그 예외 — 사실을 추측형으로 흐리지 못하게 막는 문장이 함께 있어야
+                // 규칙 5가 톤 요구에 밀리지 않는다.
+                .contains("다정하고 상냥한 존댓말")
+                .contains("이모지는 쓰지 않는다")
+                .contains("추측형으로 흐리지 않는다");
 
         String user = request.messages().get(1).content();
         assertThat(user)

@@ -1202,7 +1202,9 @@ function Invoke-CheckDevMerge {
     $head = Get-PayloadValue -Payload $Payload -Name 'head'
     $headSha = Get-PayloadValue -Payload $Payload -Name 'headSha'
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
-    if ($repository -ne 'backend' -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+    # Either published repository may be checked for its dev merge; the Backend decided
+    # which ones can deploy, the runner only refuses a name it does not know.
+    if ($repository -notin @('backend', 'frontend') -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
             -or $head -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$' `
             -or $headSha -notmatch '^sha1:[0-9a-f]{40}$' `
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {

@@ -159,13 +159,18 @@ public final class ProductApiContract {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
+    /**
+     * imageUrl은 원천 메타데이터의 대표 사진 주소이며 없으면 null이다. 표본 코퍼스는 500건 중
+     * 405건만 값을 갖는다 — 사진이 없는 문서가 정상이라 필수 값으로 다루지 않는다.
+     */
     public record PreviewDocument(
             String documentId,
             String title,
             String content,
             List<String> category,
             URI sourceUrl,
-            Instant sourceUpdatedAt) {
+            Instant sourceUpdatedAt,
+            String imageUrl) {
         public PreviewDocument { category = category == null ? List.of() : List.copyOf(category); }
     }
 
@@ -346,6 +351,9 @@ public final class ProductApiContract {
      * eventStatus는 {@code source_document.event_end_date}가 조회 시점(서버 기준 오늘)보다
      * 과거면 "ENDED", 그 외에는 null — 값은 이 둘뿐이다. eventEndDate는 종료 안내 문구를
      * 만들 때 쓰는 원본 날짜다(행사 문서가 아니면 null).
+     *
+     * <p>imageUrl은 {@code source_document.image_url}이며 사진이 없는 문서는 null이다.
+     * 원천 값 그대로라 http와 https가 섞여 있다 — 스킴을 바꿔 적지 않는다.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Citation(
@@ -356,7 +364,8 @@ public final class ProductApiContract {
             double score,
             String categoryLabel,
             String eventStatus,
-            LocalDate eventEndDate) {
+            LocalDate eventEndDate,
+            String imageUrl) {
     }
 
     public record ProductSessionResponse(

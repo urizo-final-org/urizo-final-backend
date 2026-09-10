@@ -88,7 +88,7 @@ public class PublicChatController {
                         .map(citation -> new PublicChatContract.PublicCitation(
                                 citation.title(), citation.excerpt(),
                                 citation.sourceUrl(), citation.categoryLabel(),
-                                citation.eventStatus()))
+                                citation.eventStatus(), citation.imageUrl()))
                         .toList(),
                 answer.generatedAt());
     }

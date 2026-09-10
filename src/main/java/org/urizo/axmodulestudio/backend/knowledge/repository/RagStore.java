@@ -130,7 +130,7 @@ public class RagStore {
         List<GroundingRow> rows = jdbc.query(
                 "SELECT sd.external_document_id, sd.title, sd.source_url, dc.content, "
                         + "GREATEST(0, LEAST(1, 1 - (dc.embedding <=> ?::vector))) AS score, "
-                        + "sd.category, sd.event_end_date "
+                        + "sd.category, sd.event_end_date, sd.image_url "
                         + "FROM app.document_chunk dc JOIN app.source_document sd "
                         + "ON sd.source_document_id = dc.source_document_id "
                         + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL"
@@ -139,7 +139,7 @@ public class RagStore {
                 (rs, row) -> new GroundingRow(
                         rs.getString(1), rs.getString(2), URI.create(rs.getString(3)),
                         rs.getString(4), rs.getDouble(5), rs.getString(6),
-                        rs.getObject(7, LocalDate.class)),
+                        rs.getObject(7, LocalDate.class), rs.getString(8)),
                 arguments.toArray());
         List<GroundingRow> grounded = rows.stream()
                 .filter(row -> DeterministicConnectorFixture.hasGroundingOverlap(
@@ -170,7 +170,7 @@ public class RagStore {
                 .map(row -> new ProductApiContract.Citation(
                         row.documentId(), row.title(), row.sourceUrl(),
                         excerpt(row.content()), row.score(), categoryLabel(row.category()),
-                        eventStatus(row.eventEndDate(), today), row.eventEndDate()))
+                        eventStatus(row.eventEndDate(), today), row.eventEndDate(), row.imageUrl()))
                 .toList();
         return new ProductApiContract.RagQueryResponse(
                 version(), traceId, UUID.randomUUID(), conversationId,
@@ -339,6 +339,6 @@ public class RagStore {
 
     private record GroundingRow(
             String documentId, String title, URI sourceUrl, String content, double score,
-            String category, LocalDate eventEndDate) {
+            String category, LocalDate eventEndDate, String imageUrl) {
     }
 }

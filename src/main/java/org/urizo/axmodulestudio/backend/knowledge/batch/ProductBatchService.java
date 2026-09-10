@@ -170,18 +170,19 @@ final class ProductBatchService {
                 jdbc.update("INSERT INTO app.source_document "
                                 + "(source_document_id, knowledge_version_id, external_document_id, title, "
                                 + "content, category, source_url, source_updated_at, content_digest, created_at, "
-                                + "event_start_date, event_end_date) "
-                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                + "event_start_date, event_end_date, image_url) "
+                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                                 + "ON CONFLICT (knowledge_version_id, external_document_id) DO UPDATE SET "
                                 + "title = EXCLUDED.title, content = EXCLUDED.content, category = EXCLUDED.category, "
                                 + "source_url = EXCLUDED.source_url, source_updated_at = EXCLUDED.source_updated_at, "
                                 + "content_digest = EXCLUDED.content_digest, "
                                 + "event_start_date = EXCLUDED.event_start_date, "
-                                + "event_end_date = EXCLUDED.event_end_date",
+                                + "event_end_date = EXCLUDED.event_end_date, "
+                                + "image_url = EXCLUDED.image_url",
                         documentId, versionId, document.documentId(), document.title(), document.content(),
                         String.join(",", document.category()), document.sourceUrl().toString(),
                         Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now),
-                        period.start(), period.end());
+                        period.start(), period.end(), document.imageUrl());
             }
             updateProgress(jobId, "COLLECT", 15, TourismSampleDocumentLoader.totalCount(),
                     TourismSampleDocumentLoader.totalCount());

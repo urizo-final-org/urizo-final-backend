@@ -20,6 +20,35 @@ class ProfileSnapshotValidatorTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Test
+    void acceptsPrCompletionExitAndRejectsMiswiredOrPartialContracts() throws Exception {
+        ObjectNode upgraded = (ObjectNode) authoringSnapshot();
+        node(upgraded, "pr_complete").withArray("resultPorts").add("closed");
+        node(upgraded, "pr_complete").withObject("config")
+                .put("completionMode", "deployment-capability");
+        upgraded.withArray("edges").addObject()
+                .put("from", "pr_complete").put("resultPort", "closed").put("to", "end");
+        assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", upgraded))
+                .doesNotThrowAnyException();
+
+        ObjectNode miswired = upgraded.deepCopy();
+        for (JsonNode edge : miswired.path("edges")) {
+            if ("closed".equals(edge.path("resultPort").asText())) {
+                ((ObjectNode) edge).put("to", "deploy_request");
+            }
+        }
+        assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", miswired));
+        ObjectNode missingMode = upgraded.deepCopy();
+        node(missingMode, "pr_complete").withObject("config").removeAll();
+        assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", missingMode));
+        ObjectNode missingPort = (ObjectNode) authoringSnapshot();
+        node(missingPort, "pr_complete").withObject("config")
+                .put("completionMode", "deployment-capability");
+        assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", missingPort));
+        assertThatCode(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", authoringSnapshot()))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void acceptsTheRegisteredSnapshotContractsForBothProfiles() throws Exception {
         JsonNode llmOps = authoringSnapshot();
         JsonNode naturalCms = authoringSnapshot(

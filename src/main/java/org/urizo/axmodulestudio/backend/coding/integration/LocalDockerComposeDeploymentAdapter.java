@@ -25,6 +25,11 @@ public final class LocalDockerComposeDeploymentAdapter implements DeploymentAdap
     }
 
     @Override
+    public boolean supportsRepository(String repository) {
+        return "backend".equals(repository);
+    }
+
+    @Override
     public String adapterKey() { return ADAPTER_KEY; }
 
     @Override

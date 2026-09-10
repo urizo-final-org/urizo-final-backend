@@ -12,7 +12,8 @@ public interface DeploymentAdapter {
 
     String adapterKey();
 
-    String targetKey();
+    /** The server-selected target for one supported repository; null for any other repository. */
+    String targetKey(String repository);
 
     String configDigest();
 

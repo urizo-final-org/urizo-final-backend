@@ -24,15 +24,20 @@ public class AdminLangfuseObservabilityController {
     @GetMapping("/metrics")
     LangfuseObservabilityService.MetricsResponse metrics(
             @RequestParam String from,
-            @RequestParam String to) {
-        return service.metrics(from, to);
+            @RequestParam String to,
+            @RequestParam(required = false) String jobId) {
+        return service.metrics(from, to, jobId);
     }
 
     @GetMapping("/observations")
     LangfuseObservabilityService.ObservationsResponse observations(
             @RequestParam String from,
-            @RequestParam String to) {
-        return service.observations(from, to);
+            @RequestParam String to,
+            @RequestParam(required = false) String jobId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "50") int limit,
+            @RequestParam(defaultValue = "ALL") String kind) {
+        return service.observations(from, to, jobId, cursor, limit, kind);
     }
 
     @GetMapping("/scores")

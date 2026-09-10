@@ -206,7 +206,7 @@ class PublicAnswerComposerTest {
     private static ProductApiContract.Citation citation(String title, String excerpt) {
         return new ProductApiContract.Citation(
                 "506926", title, URI.create("https://api-test.local/documents/506926"),
-                excerpt, 0.71, "축제", null, null);
+                excerpt, 0.71, "축제", null, null, null);
     }
 
     /** ENDED 근거 블록에는 [상태] 줄이 붙는다 — 규칙 1 아래에서 이 줄이 종료 사실의 유일한 근거다. */
@@ -221,7 +221,7 @@ class PublicAnswerComposerTest {
                 "506926", "안동국제탈춤페스티벌",
                 URI.create("https://api-test.local/documents/506926"),
                 "[행사기간] 20261003 ~ 20261018\n[개요] 탈춤 공연.", 0.71, "축제",
-                "ENDED", LocalDate.of(2026, 10, 18));
+                "ENDED", LocalDate.of(2026, 10, 18), null);
 
         composer.rewrite("탈춤 축제 언제야?", answered(ended));
 

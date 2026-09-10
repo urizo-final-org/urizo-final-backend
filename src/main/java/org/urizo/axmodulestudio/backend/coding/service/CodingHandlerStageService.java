@@ -958,7 +958,7 @@ public final class CodingHandlerStageService {
             return sideEffect(resultId, request, aggregate,
                     "recorded", "DEPLOY_REQUEST_RECORDED");
         }
-        requireBackendPullRequest(pullRequest);
+        requireDeployablePullRequest(pullRequest);
         ObjectNode subject = objectMapper.createObjectNode();
         subject.put("jobId", jobId.toString());
         subject.put("pipelineAttempt", aggregate.pipelineAttempt());
@@ -967,7 +967,8 @@ public final class CodingHandlerStageService {
         subject.put("candidateSha", pullRequest.candidateSha());
         subject.put("sourceValidationHash", pullRequest.validationHash());
         subject.put("adapterKey", deploymentAdapter.adapterKey());
-        subject.put("targetKey", deploymentAdapter.targetKey());
+        subject.put("targetKey", deploymentAdapter.targetKey(
+                pullRequest.payload().path("repository").asText()));
         subject.put("configDigest", deploymentAdapter.configDigest());
         String subjectHash = digest(subject);
         UUID deploymentRequestId = UUID.nameUUIDFromBytes(
@@ -996,8 +997,9 @@ public final class CodingHandlerStageService {
                 .path("deploymentRequestId").asText();
         if (!deploymentAdapter.adapterKey().equals(
                     deployRequest.payload().path("adapterKey").asText())
-                || !deploymentAdapter.targetKey().equals(
-                    deployRequest.payload().path("targetKey").asText())
+                || !deployRequest.payload().path("targetKey").asText().equals(
+                    deploymentAdapter.targetKey(
+                            deployRequest.payload().path("repository").asText()))
                 || !deploymentAdapter.configDigest().equals(
                     deployRequest.payload().path("configDigest").asText())) {
             throw conflict("The server deployment adapter changed after approval was requested.");
@@ -1028,7 +1030,8 @@ public final class CodingHandlerStageService {
         payload.put("deploymentRequestId", deploymentRequestId);
         payload.put("deploymentExecutionId", executionId.toString());
         payload.put("adapterKey", deploymentAdapter.adapterKey());
-        payload.put("targetKey", deploymentAdapter.targetKey());
+        payload.put("targetKey", deploymentAdapter.targetKey(
+                deployRequest.payload().path("repository").asText()));
         payload.put("configDigest", deploymentAdapter.configDigest());
         payload.put("mergeSha", mergeSha);
         payload.put("status", port.toUpperCase(java.util.Locale.ROOT));
@@ -1098,10 +1101,10 @@ public final class CodingHandlerStageService {
         }
     }
 
-    private static void requireV4DeploymentIdentity(
+    private void requireV4DeploymentIdentity(
             CodingHandlerContract.HandlerResultResponse pullRequest,
             CodingHandlerContract.HandlerResultResponse deployRequest) {
-        requireBackendPullRequest(pullRequest);
+        requireDeployablePullRequest(pullRequest);
         if (!deployRequest.payload().hasNonNull("deploymentRequestId")
                 || !Objects.equals(pullRequest.candidateSha(), deployRequest.candidateSha())
                 || !Objects.equals(pullRequest.payload().path("repository").asText(),
@@ -1112,11 +1115,14 @@ public final class CodingHandlerStageService {
         }
     }
 
-    private static void requireBackendPullRequest(
+    /* The server-selected adapter decides which repositories have a deployment target; the
+     * stage only refuses a pull request the adapter has no target for. */
+    private void requireDeployablePullRequest(
             CodingHandlerContract.HandlerResultResponse pullRequest) {
-        if (!CodingRepositories.BACKEND.equals(
+        if (!deploymentAdapter.supportsRepository(
                 pullRequest.payload().path("repository").asText())) {
-            throw conflict("Deployment stages are available only for Backend Coding Jobs.");
+            throw conflict(
+                    "Deployment stages are available only for repositories with a server deployment target.");
         }
     }
 

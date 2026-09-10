@@ -2081,8 +2081,9 @@ class CodingHandlerStageServiceTest {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        when(deployment.supportsRepository("backend")).thenReturn(true);
         when(deployment.adapterKey()).thenReturn("local-docker-compose");
-        when(deployment.targetKey()).thenReturn("full:backend:spring-app");
+        when(deployment.targetKey("backend")).thenReturn("full:backend:spring-app");
         when(deployment.configDigest()).thenReturn(DIFF_DIGEST);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
@@ -2233,6 +2234,8 @@ class CodingHandlerStageServiceTest {
         assertThat(response.payload().path("prNumber").asInt()).isEqualTo(42);
     }
 
+    /* The frontend has its own fixed local target, so its receipt advertises deployment the
+     * same way the backend's does; the graph then routes it to the deployment request. */
     @Test
     void prCompletionPublishesToTheRepositoryTheJobWorksIn() {
         PullRequestFixture fixture = pullRequestFixture("frontend");
@@ -2247,7 +2250,7 @@ class CodingHandlerStageServiceTest {
         assertThat(command.getValue().path("repo").asText()).isEqualTo("frontend");
         assertThat(response.payload().path("repository").asText()).isEqualTo("frontend");
         assertThat(response.payload().path("deploymentSupported").isBoolean()).isTrue();
-        assertThat(response.payload().path("deploymentSupported").asBoolean()).isFalse();
+        assertThat(response.payload().path("deploymentSupported").asBoolean()).isTrue();
         assertThat(response.resultPort()).isEqualTo("completed");
     }
 
@@ -2323,7 +2326,7 @@ class CodingHandlerStageServiceTest {
                         "1.0", TRACE, 4, 1, "deploy_request",
                         "coding.deploy_request", RESULT)))
                 .isInstanceOf(CodingWorkerException.class)
-                .hasMessageContaining("only for Backend");
+                .hasMessageContaining("server deployment target");
 
         verify(deployment, never()).deploy(any(), any());
     }
@@ -2582,6 +2585,7 @@ class CodingHandlerStageServiceTest {
         CodingToolService toolService = mock(CodingToolService.class);
         CodingRunnerService runner = mock(CodingRunnerService.class);
         DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        when(deployment.supportsRepository("backend")).thenReturn(true);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, mock(CodingModelTurnGuard.class),
                 mock(CodingModelTurnService.class), runner, deployment,

@@ -28,6 +28,27 @@ class CodingHandlerMigrationTest {
                 .doesNotContain("DROP TABLE");
     }
 
+    /* AI04-021 opens the deployment request and merge check rows to the frontend as well; the
+     * repository set is the same one the pull request row already accepts, nothing else moves. */
+    @Test
+    void allowsBothPublishedRepositoriesThroughTheDeploymentRows() throws Exception {
+        String sql = new ClassPathResource(
+                "db/migration/V20260910025913767__allow_frontend_deployment_handlers.sql")
+                .getContentAsString(StandardCharsets.UTF_8);
+
+        assertThat(sql)
+                .contains("DROP CONSTRAINT ck_coding_handler_result_ai04_016_payload")
+                .contains("ADD CONSTRAINT ck_coding_handler_result_ai04_021_payload")
+                .contains("handler_key <> 'coding.dev_merge_check'")
+                .contains("handler_key <> 'coding.deploy_request'")
+                .doesNotContain("payload ->> 'repository' = 'backend'")
+                .doesNotContain("CREATE TABLE")
+                .doesNotContain("DROP TABLE");
+        assertThat(sql.split("payload ->> 'repository' IN \\('backend', 'frontend'\\)", -1))
+                .as("pr_complete, dev_merge_check and deploy_request each name both repositories")
+                .hasSize(4);
+    }
+
     @Test
     void allowsFrontendOnlyForPrCompletionAndKeepsDeploymentBackendOnly()
             throws Exception {

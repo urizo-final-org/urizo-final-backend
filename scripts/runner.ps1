@@ -1202,14 +1202,22 @@ function Invoke-CheckDevMerge {
     $head = Get-PayloadValue -Payload $Payload -Name 'head'
     $headSha = Get-PayloadValue -Payload $Payload -Name 'headSha'
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
-    if ($repository -ne 'backend' -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+    # Either published repository may be checked for its dev merge; the Backend decided
+    # which ones can deploy, the runner only refuses a name it does not know.
+    if ($repository -notin @('backend', 'frontend') -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
             -or $head -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$' `
             -or $headSha -notmatch '^sha1:[0-9a-f]{40}$' `
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
         throw 'RUNNER_PAYLOAD_INVALID|dev merge 확인 payload 가 올바르지 않습니다.'
     }
-    $worktree = Get-AiWorktreePath -Repository $repository
-    $slug = Get-RemoteSlug -Worktree $worktree
+    # The pull request lives on the canonical repository's origin. Reading the slug there
+    # (as the deploy worktree does) means the check does not depend on a Job worktree that
+    # may already have been cleaned up by the time the merge is confirmed.
+    $source = Get-RepositorySourcePath -Repository $repository
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "RUNNER_DEPLOY_BLOCKED|$repository canonical 저장소를 찾을 수 없습니다."
+    }
+    $slug = Get-RemoteSlug -Worktree $source
     $raw = & gh pr view ([int]$prNumber) --repo $slug `
         --json number,url,state,baseRefName,headRefName,headRefOid,mergeCommit 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -1255,12 +1263,15 @@ function Invoke-CheckDevMerge {
 }
 
 function Get-MergedDeployWorktree {
-    param([Parameter(Mandatory = $true)][string]$MergeSha)
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$MergeSha
+    )
 
     $rawMergeSha = $MergeSha.Substring('sha1:'.Length)
-    $source = Get-RepositorySourcePath -Repository 'backend'
+    $source = Get-RepositorySourcePath -Repository $Repository
     if (-not (Test-Path -LiteralPath $source -PathType Container)) {
-        throw 'RUNNER_DEPLOY_BLOCKED|Backend canonical 저장소를 찾을 수 없습니다.'
+        throw "RUNNER_DEPLOY_BLOCKED|$Repository canonical 저장소를 찾을 수 없습니다."
     }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -1290,7 +1301,7 @@ function Get-MergedDeployWorktree {
     }
 
     $resolvedWorkRoot = [IO.Path]::GetFullPath($WorkRoot)
-    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot 'deploy-backend'))
+    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot "deploy-$Repository"))
     $prefix = $resolvedWorkRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) `
         + [IO.Path]::DirectorySeparatorChar
     if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -1341,7 +1352,10 @@ function Invoke-LocalDockerComposeDeployment {
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
     $mergeSha = Get-PayloadValue -Payload $Payload -Name 'mergeSha'
     $validationHash = Get-PayloadValue -Payload $Payload -Name 'validationHash'
-    if ($repository -ne 'backend' `
+    # One fixed Compose service per repository. The Backend adapter chose the target; the
+    # runner only translates the repository it already knows into that service.
+    $targets = @{ backend = 'full:backend:spring-app'; frontend = 'full:frontend:frontend' }
+    if (-not $targets.ContainsKey("$repository") `
             -or $deploymentRequestId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' `
             -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$' `
@@ -1349,17 +1363,27 @@ function Invoke-LocalDockerComposeDeployment {
             -or $validationHash -notmatch '^sha256:[0-9a-f]{64}$') {
         throw 'RUNNER_PAYLOAD_INVALID|고정 로컬 배포의 승인 증거가 올바르지 않습니다.'
     }
-    $sourceRoot = Get-MergedDeployWorktree -MergeSha $mergeSha
-    $masterScript = Join-Path (Split-Path -Parent $repositoryRoot) `
-        'urizo-final-master\scripts\rebuild-local-service.ps1'
+    $sourceRoot = Get-MergedDeployWorktree -Repository $repository -MergeSha $mergeSha
+    # The Master wrapper sits beside the canonical repositories under the workspace root, which
+    # is where WorkRoot already points; deriving it from this script's own repository would
+    # break as soon as the runner is started from a worktree.
+    $masterScript = Join-Path $workspaceRoot 'urizo-final-master\scripts\rebuild-local-service.ps1'
     if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
         throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
     }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & $masterScript -Service spring-app -Profile full `
-            -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
+        $output = switch ($repository) {
+            'backend' {
+                & $masterScript -Service spring-app -Profile full `
+                    -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
+            }
+            'frontend' {
+                & $masterScript -Service frontend -Profile full `
+                    -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
+            }
+        }
         $exit = $LASTEXITCODE
     }
     finally { $ErrorActionPreference = $previous }
@@ -1372,7 +1396,7 @@ function Invoke-LocalDockerComposeDeployment {
     }
     return @{
         adapter = 'local-docker-compose'
-        target = 'full:backend:spring-app'
+        target = $targets["$repository"]
         sourceSha = $mergeSha
         status = 'COMPLETED'
     }

@@ -901,10 +901,10 @@ public final class CodingHandlerStageService {
         command.put("headSha", pullRequest.payload().path("headSha").asText());
         command.put("candidateSha", pullRequest.candidateSha());
         runner.enqueue(resultId, "CHECK_DEV_MERGE", command);
-        CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(resultId, "CHECK_DEV_MERGE");
-        if (runnerPending(outcome)) {
-            throw runnerPending("The dev merge check is still pending.");
-        }
+        // The DEPLOY gate opens twice by design (not merged, then merged), so failing over
+        // here would charge the Job one attempt per press. Wait like the pull request does.
+        CodingRunnerService.TaskOutcome outcome = awaitRunnerOutcome(
+                resultId, "CHECK_DEV_MERGE", "The dev merge check is still pending.");
         if (!"SUCCEEDED".equals(outcome.status()) || outcome.result() == null) {
             throw new CodingWorkerException(
                     outcome.errorCode() == null ? "DEV_MERGE_CHECK_BLOCKED" : outcome.errorCode(),
@@ -1019,11 +1019,7 @@ public final class CodingHandlerStageService {
         command.put("candidateSha", deployRequest.candidateSha());
         command.put("mergeSha", mergeSha);
         command.put("validationHash", deployRequest.validationHash());
-        DeploymentAdapter.DeploymentOutcome outcome = deploymentAdapter.deploy(
-                executionId, command);
-        if (outcome.status() == DeploymentAdapter.Status.PENDING) {
-            throw runnerPending("The allowlisted deployment is still pending.");
-        }
+        DeploymentAdapter.DeploymentOutcome outcome = awaitDeployment(executionId, command);
         String port = outcome.status() == DeploymentAdapter.Status.COMPLETED
                 ? "completed" : "blocked";
         ObjectNode payload = objectMapper.createObjectNode();
@@ -1068,6 +1064,25 @@ public final class CodingHandlerStageService {
         }
         if (runnerPending(outcome)) {
             throw runnerPending(pendingMessage);
+        }
+        return outcome;
+    }
+
+    /**
+     * The same patience for the deployment adapter. Its {@code deploy} re-reads the fixed
+     * execution id, so asking again reports how far the runner got instead of starting a
+     * second deployment.
+     */
+    private DeploymentAdapter.DeploymentOutcome awaitDeployment(UUID executionId, JsonNode command) {
+        DeploymentAdapter.DeploymentOutcome outcome = deploymentAdapter.deploy(executionId, command);
+        for (int poll = 0;
+                poll < maxRunnerPolls && outcome.status() == DeploymentAdapter.Status.PENDING;
+                poll++) {
+            sleep(runnerPollInterval);
+            outcome = deploymentAdapter.deploy(executionId, command);
+        }
+        if (outcome.status() == DeploymentAdapter.Status.PENDING) {
+            throw runnerPending("The allowlisted deployment is still pending.");
         }
         return outcome;
     }

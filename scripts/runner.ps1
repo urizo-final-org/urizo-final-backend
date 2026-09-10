@@ -1371,24 +1371,32 @@ function Invoke-LocalDockerComposeDeployment {
     if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
         throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
     }
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = switch ($repository) {
-            'backend' {
-                & $masterScript -Service spring-app -Profile full `
-                    -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
-            }
-            'frontend' {
-                & $masterScript -Service frontend -Profile full `
-                    -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
-            }
+    $service = @{ backend = 'spring-app'; frontend = 'frontend' }["$repository"]
+    # A child process, not an in-process call under 2>&1. The Master script runs with
+    # $ErrorActionPreference = 'Stop', and Windows PowerShell 5.1 turns every native stderr
+    # line that passes through a redirection into an ErrorRecord. Compose reports build
+    # progress on stderr, so its first line (" Image ... Building ") became a terminating
+    # error and Job 7c5af098 was marked blocked ten seconds after a build that had completed.
+    # The whole transcript stays on disk for the next diagnosis; the report carries its tail.
+    $logRoot = Join-Path (Split-Path -Parent $PSScriptRoot) '.local\runner'
+    New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+    $stdoutLog = Join-Path $logRoot "deploy-$deploymentRequestId.stdout.log"
+    $stderrLog = Join-Path $logRoot "deploy-$deploymentRequestId.stderr.log"
+    $process = Start-Process -FilePath 'powershell.exe' -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$masterScript`"",
+            '-Service', $service, '-Profile', 'full',
+            '-SourceRoot', "`"$sourceRoot`"",
+            '-ApproveLocalMutation', '-ApproveNetwork')
+    if ($process.ExitCode -ne 0) {
+        $tail = @(Get-Content -LiteralPath $stderrLog -ErrorAction SilentlyContinue |
+            Where-Object { "$_".Trim() } | Select-Object -Last 4)
+        if ($tail.Count -eq 0) {
+            $tail = @(Get-Content -LiteralPath $stdoutLog -ErrorAction SilentlyContinue |
+                Where-Object { "$_".Trim() } | Select-Object -Last 4)
         }
-        $exit = $LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previous }
-    if ($exit -ne 0) {
-        $detail = "$(($output | Select-Object -Last 4) -join ' ')"
+        $detail = "$($tail -join ' ') (exit $($process.ExitCode); log: $stderrLog)"
         if (Test-NetworkFailure -Detail $detail) {
             throw "RUNNER_DEPLOY_TRANSIENT|로컬 Compose 배포 일시 실패: $detail"
         }

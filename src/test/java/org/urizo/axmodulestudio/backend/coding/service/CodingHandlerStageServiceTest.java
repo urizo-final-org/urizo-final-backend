@@ -2660,6 +2660,191 @@ class CodingHandlerStageServiceTest {
         verify(deployment, never()).deploy(any(), any());
     }
 
+    @Test
+    void devMergeCheckWaitsForTheRunnerInsteadOfSpendingTheJobsAttempts() {
+        // Job d7414a3c pressed DEPLOY twice as the graph intends (not merged, then merged)
+        // and each press cost a worker attempt because this stage failed over at once.
+        DeployFixture fixture = deployFixture(false, 120, Duration.ofMillis(1));
+        ObjectMapper mapper = new ObjectMapper();
+        when(fixture.runner().taskOutcome(RESULT, "CHECK_DEV_MERGE")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null),
+                new CodingRunnerService.TaskOutcome("RUNNING", null, null),
+                new CodingRunnerService.TaskOutcome("SUCCEEDED", null,
+                        mapper.createObjectNode()
+                                .put("status", "NOT_MERGED")
+                                .put("candidateSha", BASE_SHA)
+                                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("headSha",
+                                        "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "dev_merge_check",
+                        "coding.dev_merge_check", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("not_merged");
+        assertThat(response.payload().path("status").asText()).isEqualTo("NOT_MERGED");
+        verify(fixture.runner(), times(3)).taskOutcome(RESULT, "CHECK_DEV_MERGE");
+    }
+
+    @Test
+    void devMergeCheckStillGivesUpWhenTheRunnerNeverFinishes() {
+        DeployFixture fixture = deployFixture(false, 3, Duration.ofMillis(1));
+        when(fixture.runner().taskOutcome(RESULT, "CHECK_DEV_MERGE")).thenReturn(
+                new CodingRunnerService.TaskOutcome("PENDING", null, null));
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "dev_merge_check",
+                        "coding.dev_merge_check", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .extracting(failure -> ((CodingWorkerException) failure).code())
+                .isEqualTo("RUNNER_TASK_PENDING");
+        // One look before the wait, then one per poll: the outer net is still there.
+        verify(fixture.runner(), times(4)).taskOutcome(RESULT, "CHECK_DEV_MERGE");
+    }
+
+    @Test
+    void deploymentWaitsForTheAdapterInsteadOfSpendingTheJobsAttempts() {
+        DeployFixture fixture = deployFixture(true, 120, Duration.ofMillis(1));
+        ObjectMapper mapper = new ObjectMapper();
+        when(fixture.deployment().deploy(any(), any())).thenReturn(
+                new DeploymentAdapter.DeploymentOutcome(
+                        DeploymentAdapter.Status.PENDING, null, null),
+                new DeploymentAdapter.DeploymentOutcome(
+                        DeploymentAdapter.Status.PENDING, null, null),
+                new DeploymentAdapter.DeploymentOutcome(
+                        DeploymentAdapter.Status.COMPLETED,
+                        mapper.createObjectNode().put("status", "COMPLETED"), null));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy", "coding.deploy", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(response.payload().path("status").asText()).isEqualTo("COMPLETED");
+        // Every look uses the same execution id, so the adapter reports on one deployment
+        // rather than starting another.
+        ArgumentCaptor<UUID> executionIds = ArgumentCaptor.forClass(UUID.class);
+        verify(fixture.deployment(), times(3)).deploy(executionIds.capture(), any());
+        assertThat(executionIds.getAllValues()).containsOnly(executionIds.getAllValues().get(0));
+    }
+
+    @Test
+    void deploymentStillGivesUpWhenTheAdapterNeverFinishes() {
+        DeployFixture fixture = deployFixture(true, 3, Duration.ofMillis(1));
+        when(fixture.deployment().deploy(any(), any())).thenReturn(
+                new DeploymentAdapter.DeploymentOutcome(
+                        DeploymentAdapter.Status.PENDING, null, null));
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "deploy", "coding.deploy", RESULT)))
+                .isInstanceOf(CodingWorkerException.class)
+                .extracting(failure -> ((CodingWorkerException) failure).code())
+                .isEqualTo("RUNNER_TASK_PENDING");
+        verify(fixture.deployment(), times(4)).deploy(any(), any());
+    }
+
+    private record DeployFixture(
+            CodingHandlerStageService service,
+            CodingRunnerService runner,
+            DeploymentAdapter deployment) { }
+
+    /**
+     * A frontend Job approved at DEPLOY, ready for {@code coding.dev_merge_check}; with
+     * {@code merged} it also carries the merged receipt {@code coding.deploy} needs.
+     */
+    private DeployFixture deployFixture(
+            boolean merged, int maxRunnerPolls, Duration runnerPollInterval) {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingRunnerService runner = mock(CodingRunnerService.class);
+        DeploymentAdapter deployment = mock(DeploymentAdapter.class);
+        String configDigest =
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        when(deployment.supportsRepository("frontend")).thenReturn(true);
+        when(deployment.adapterKey()).thenReturn("local-docker-compose");
+        when(deployment.targetKey("frontend")).thenReturn("full:frontend:frontend");
+        when(deployment.configDigest()).thenReturn(configDigest);
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, mock(CodingModelTurnGuard.class),
+                mock(CodingModelTurnService.class), runner, deployment,
+                mock(ProfileModelBindingService.class),
+                mock(GuardrailPathSelectionService.class),
+                mock(GuardrailRuleService.class), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC), maxRunnerPolls, runnerPollInterval);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE, 4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding", BASE_SHA, DIFF_DIGEST, DIFF_DIGEST, "coding-v1",
+                Set.of("CHAT"), Set.of("coding"), Set.of(), NOW.plusSeconds(60), PROFILE);
+        when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
+        CodingHandlerContract.HandlerResultResponse pullRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.pr_complete",
+                        CodingHandlerContract.ResultType.PULL_REQUEST, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                        mapper.createObjectNode()
+                                .put("repository", "frontend")
+                                .put("base", "dev")
+                                .put("head", "system/llmops-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                                .put("headSha",
+                                        "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                                .put("prNumber", 42)
+                                .put("candidateSha", BASE_SHA),
+                        NOW);
+        String deployHash =
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+        CodingHandlerContract.HandlerResultResponse deployRequest =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.deploy_request",
+                        CodingHandlerContract.ResultType.DEPLOY_REQUEST, "recorded",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, deployHash,
+                        mapper.createObjectNode()
+                                .put("deploymentRequestId",
+                                        "81818181-8181-4181-8181-818181818181")
+                                .put("repository", "frontend")
+                                .put("prNumber", 42)
+                                .put("candidateSha", BASE_SHA)
+                                .put("adapterKey", "local-docker-compose")
+                                .put("targetKey", "full:frontend:frontend")
+                                .put("configDigest", configDigest),
+                        NOW);
+        CodingHandlerContract.ApprovalDecisionSummary deployApproval =
+                new CodingHandlerContract.ApprovalDecisionSummary(
+                        UUID.randomUUID(), "deploy_approval",
+                        CodingHandlerContract.ApprovalStage.DEPLOY, 1,
+                        CodingHandlerContract.Decision.APPROVED,
+                        BASE_SHA, deployHash, null, UUID.randomUUID(),
+                        "SUPER_ADMIN", 6, null, NOW);
+        List<CodingHandlerContract.HandlerResultResponse> results =
+                new java.util.ArrayList<>(List.of(pullRequest, deployRequest));
+        if (merged) {
+            results.add(new CodingHandlerContract.HandlerResultResponse(
+                    "1.0", UUID.randomUUID(), JOB, TRACE, 1,
+                    "coding.dev_merge_check", CodingHandlerContract.ResultType.DEV_MERGE,
+                    "merged", WORKSPACE, BASE_SHA, DIFF_DIGEST, DIFF_DIGEST,
+                    mapper.createObjectNode().put(
+                            "mergeSha", "sha1:cccccccccccccccccccccccccccccccccccccccc"),
+                    NOW));
+        }
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE, "deploy frontend",
+                        List.copyOf(results), List.of(), List.of(deployApproval), NOW, null));
+        return new DeployFixture(service, runner, deployment);
+    }
+
     private static ProfileToolBindingPolicy bindingPolicy(ObjectMapper mapper) {
         try {
             JsonNode snapshot = mapper.readTree(Files.readString(Path.of(

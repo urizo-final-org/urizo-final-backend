@@ -467,7 +467,9 @@ class NaturalCmsStageServiceTest {
                 .contains("Create one POST command with operation CREATE, UPDATE or DELETE")
                 .contains("CREATE sends title and body")
                 .contains("never send a board field")
-                .contains("headings (##)");
+                .contains("ProseMirror document")
+                .contains("thumbnailImageId")
+                .contains("reference.codes");
     }
 
     /**

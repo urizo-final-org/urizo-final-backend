@@ -19,12 +19,7 @@ public final class CmsRequests {
             Long targetId) {
     }
 
-    /**
-     * 컨텐츠와 게시물이 함께 쓴다.
-     *
-     * <p>본문 상한은 컨텐츠가 Tiptap Document(JSON)로 저장되면서 올렸다. 같은 글이라도 부품과
-     * 속성이 붙어 마크다운의 여러 배가 된다. 게시물은 마크다운 그대로라 여유가 늘어날 뿐이다.
-     */
+    /** 콘텐츠 본문은 Tiptap Document JSON으로 저장한다. */
     public record ArticleRequest(
             @NotBlank @Size(max = 200) String title,
             @NotBlank @Size(max = 200000) String body) {
@@ -32,7 +27,36 @@ public final class CmsRequests {
 
     public record BoardRequest(
             @NotBlank @Size(max = 100) String name,
-            @Size(max = 300) String description) {
+            @Size(max = 300) String description,
+            @Pattern(regexp = "LIST|CARD") String displayType,
+            @Size(max = 40) String regionGroupKey,
+            @Size(max = 40) String categoryGroupKey) {
+        public BoardRequest(String name, String description) {
+            this(name, description, "LIST", null, null);
+        }
+    }
+
+    public record PostRequest(
+            @NotBlank @Size(max = 200) String title,
+            @NotBlank @Size(max = 200000) String body,
+            @Min(1) Long thumbnailImageId,
+            @Size(max = 200) String thumbnailAlt,
+            @Min(1) Long regionCodeId,
+            @Min(1) Long categoryCodeId) {
+    }
+
+    public record CodeGroupRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,40}") String key,
+            @NotBlank @Size(max = 100) String label,
+            @Min(0) int displayOrder,
+            boolean enabled) {
+    }
+
+    public record CodeRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9_-]{1,40}") String value,
+            @NotBlank @Size(max = 100) String label,
+            @Min(0) int displayOrder,
+            boolean enabled) {
     }
 
     public record TemplateRequest(

@@ -48,7 +48,13 @@ public final class CmsResponses {
             String name,
             String description,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            String displayType,
+            String regionGroupKey,
+            String categoryGroupKey) {
+        public BoardView(long id, String name, String description, Instant createdAt, Instant updatedAt) {
+            this(id, name, description, createdAt, updatedAt, "LIST", null, null);
+        }
     }
 
     public record PostView(
@@ -59,7 +65,21 @@ public final class CmsResponses {
             String title,
             String body,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            Long thumbnailImageId,
+            String thumbnailAlt,
+            Long regionCodeId,
+            Long categoryCodeId) {
+        public PostView(long id, long boardId, UUID authorId, String authorName, String title,
+                        String body, Instant createdAt, Instant updatedAt) {
+            this(id, boardId, authorId, authorName, title, body, createdAt, updatedAt, null, "", null, null);
+        }
+    }
+
+    public record CodeGroupView(String key, String label, int displayOrder, boolean enabled) {
+    }
+
+    public record CodeView(long id, String groupKey, String value, String label, int displayOrder, boolean enabled) {
     }
 
     public record TemplateView(

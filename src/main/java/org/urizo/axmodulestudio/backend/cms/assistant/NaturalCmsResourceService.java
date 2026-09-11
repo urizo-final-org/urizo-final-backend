@@ -38,13 +38,6 @@ import org.urizo.axmodulestudio.backend.cms.service.ContentBody;
 @Profile("local-full")
 public final class NaturalCmsResourceService {
 
-    /**
-     * 에디터가 지원하지 않는 줄 시작 문법. 순서 목록, 인용, 코드 블록, 표, 구분선,
-     * {@code ## } 외 제목, {@code - } 외 글머리 기호를 막는다.
-     */
-    private static final Pattern UNSUPPORTED_LINE = Pattern.compile(
-            "^(?:#(?!# )|#{3,}|>|\\*\\s|\\+\\s|\\d+\\.\\s|```|~~~|\\||-{3,}|!\\[)");
-
     /** 등록은 만들기 전이라 가리킬 id가 없다. 대상 id 자리에 고정 표식을 쓴다. */
     public static final String NEW_ID = "new";
 
@@ -67,7 +60,7 @@ public final class NaturalCmsResourceService {
     private final CmsRequestValidator requestValidator;
     private final ObjectMapper objectMapper;
     private final Map<String, ResourceHandler<?>> handlers;
-    private final ResourceHandler<CmsRequests.ArticleRequest> posts;
+    private final ResourceHandler<CmsRequests.PostRequest> posts;
 
     public NaturalCmsResourceService(
             CmsService cmsService,
@@ -196,25 +189,6 @@ public final class NaturalCmsResourceService {
             }
         }
         return new Command(operation, fields, actorId);
-    }
-
-    /**
-     * 본문은 제목 {@code ## }, 강조 {@code **문구**}, 목록 {@code - } 셋만 쓴다.
-     *
-     * <p>에디터가 지원하지 않는 문법이 들어오면 사용자 화면에서 원문 그대로 노출된다.
-     * 저장 전에 막는 편이 낫다.
-     */
-    private static void requireSupportedMarkdown(String body) {
-        if (body == null) {
-            return;
-        }
-        for (String line : body.split("\n", -1)) {
-            String trimmed = line.strip();
-            if (UNSUPPORTED_LINE.matcher(trimmed).find() || trimmed.contains("](")) {
-                throw invalidCommand(
-                        "The body may use headings (##), emphasis (**text**) and list items (-) only.");
-            }
-        }
     }
 
     private static NaturalCmsException invalidCommand(String message) {
@@ -602,192 +576,157 @@ public final class NaturalCmsResourceService {
      * 구조가 아니라 사람이 쓴 글이라서 자연어 한 마디로 지울 일이 아니다.
      */
     private final class BoardHandler implements ResourceHandler<CmsRequests.BoardRequest> {
-
-        @Override
-        public Set<String> operations() {
-            return Set.of("CREATE", "UPDATE", "DELETE");
+        @Override public Set<String> operations() { return Set.of("CREATE", "UPDATE", "DELETE"); }
+        @Override public Map<String, FieldType> fields() {
+            return Map.of("name", FieldType.TEXT, "description", FieldType.TEXT_OR_NULL,
+                    "displayType", FieldType.TEXT, "regionGroupKey", FieldType.TEXT_OR_NULL,
+                    "categoryGroupKey", FieldType.TEXT_OR_NULL);
         }
-
-        @Override
-        public Map<String, FieldType> fields() {
-            return Map.of("name", FieldType.TEXT, "description", FieldType.TEXT_OR_NULL);
-        }
-
-        /** 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 등록 대상도 빈 틀을 준다. */
-        @Override
-        public ObjectNode snapshot(String id) {
+        @Override public ObjectNode snapshot(String id) {
             ObjectNode state = objectMapper.createObjectNode();
             if (NEW_ID.equals(id)) {
                 state.put("id", NEW_ID);
                 state.putNull("name");
                 state.putNull("description");
-                return state;
+                state.put("displayType", "LIST");
+                state.putNull("regionGroupKey");
+                state.putNull("categoryGroupKey");
+            } else {
+                var board = cmsService.board(numericId(id, "BOARD"));
+                state.put("id", board.id());
+                state.put("name", board.name());
+                state.put("description", board.description());
+                state.put("displayType", board.displayType());
+                state.put("regionGroupKey", board.regionGroupKey());
+                state.put("categoryGroupKey", board.categoryGroupKey());
+                state.put("updatedAt", board.updatedAt().toString());
             }
-            BoardView view = cmsService.board(numericId(id, "BOARD"));
-            state.put("id", view.id());
-            state.put("name", view.name());
-            state.put("description", view.description());
-            state.put("updatedAt", view.updatedAt().toString());
             return state;
         }
-
-        /**
-         * 삭제 가능 여부를 판정 단계가 알아야 한다.
-         *
-         * <p>판정 지시문이 "게시물이 없을 때만 삭제"라고만 하면 모델은 그 조건을 확인할 수단이 없어
-         * 안전하게 거부한다. 실제로 같은 게시판에 `이 게시판 지워줘`는 통과하고 `지워줘`는
-         * 거부되는 흔들림이 나왔다. 개수만 주면 모델이 스스로 판단한다.
-         *
-         * <p>제목까지 주지 않는다. 필요한 것은 0인지 아닌지뿐이고, 게시물은 리소스 중 갯수가 가장 많다.
-         */
-        @Override
-        public ObjectNode promptContext(String id) {
-            if (NEW_ID.equals(id)) {
-                return null;
-            }
+        @Override public ObjectNode promptContext(String id) {
             ObjectNode context = objectMapper.createObjectNode();
-            context.put("posts", cmsService.posts(numericId(id, "BOARD")).size());
+            context.put("posts", NEW_ID.equals(id) ? 0 : cmsService.posts(numericId(id, "BOARD")).size());
+            context.set("codeGroups", objectMapper.valueToTree(cmsService.codeGroups()));
             return context;
         }
-
-        @Override
-        public CmsRequests.BoardRequest merged(Command command, String id) {
-            JsonNode fields = command.fields();
+        @Override public CmsRequests.BoardRequest merged(Command command, String id) {
             if (command.deletes()) {
                 requireEmptyBoard(numericId(id, "BOARD"));
                 return null;
             }
-            if (command.creates()) {
-                return new CmsRequests.BoardRequest(
-                        text(fields, "name", null), text(fields, "description", null));
+            BoardView view = command.creates() ? null : cmsService.board(numericId(id, "BOARD"));
+            JsonNode fields = command.fields();
+            var request = new CmsRequests.BoardRequest(
+                    text(fields, "name", view == null ? null : view.name()),
+                    text(fields, "description", view == null ? null : view.description()),
+                    text(fields, "displayType", view == null ? "LIST" : view.displayType()),
+                    text(fields, "regionGroupKey", view == null ? null : view.regionGroupKey()),
+                    text(fields, "categoryGroupKey", view == null ? null : view.categoryGroupKey()));
+            try {
+                cmsService.validateBoardOptions(request, view);
+            } catch (org.urizo.axmodulestudio.backend.cms.service.CmsServiceException failure) {
+                throw invalidCommand(failure.getMessage());
             }
-            BoardView view = cmsService.board(numericId(id, "BOARD"));
-            return new CmsRequests.BoardRequest(
-                    text(fields, "name", view.name()),
-                    text(fields, "description", view.description()));
+            return request;
         }
-
-        @Override
-        public JsonNode save(Command command, String id, CmsRequests.BoardRequest request) {
+        @Override public JsonNode save(Command command, String id, CmsRequests.BoardRequest request) {
             if (command.deletes()) {
-                long boardId = numericId(id, "BOARD");
                 ObjectNode removed = snapshot(id);
-                cmsService.deleteBoard(boardId);
+                cmsService.deleteBoard(numericId(id, "BOARD"));
                 return removed;
             }
-            if (command.creates()) {
-                return objectMapper.valueToTree(
-                        cmsService.createBoard(request.name(), request.description()));
-            }
-            return objectMapper.valueToTree(cmsService.updateBoard(
-                    numericId(id, "BOARD"), request.name(), request.description()));
+            return objectMapper.valueToTree(command.creates() ? cmsService.createBoard(request)
+                    : cmsService.updateBoard(numericId(id, "BOARD"), request));
         }
-
-        /**
-         * 게시물이 남아 있으면 삭제하지 않는다. 기준은 0건이다.
-         *
-         * <p>기존 CMS의 {@code deleteBoard}는 게시물을 먼저 소프트 삭제하고 진행한다. 그 경로는
-         * 그대로 두고 자연어에만 이 선을 둔다. 갯수만 알려주고 목록은 화면이 이미 갖고 있다.
-         */
         private void requireEmptyBoard(long boardId) {
             int posts = cmsService.posts(boardId).size();
-            if (posts > 0) {
-                throw invalidCommand("This board still has " + posts
-                        + " posts and cannot be deleted here.");
-            }
+            if (posts > 0) throw invalidCommand("This board still has " + posts + " posts and cannot be deleted here.");
         }
     }
 
-    /**
-     * 게시물은 별도 Resource 타입이 아니라 게시판 화면의 말단 리소스다.
-     *
-     * <p>대상 id가 소속 게시판을 함께 담아 등록·수정·삭제 모두 서버가 소속을 확인한다.
-     * 게시판 사이 이동은 열지 않는다. {@code fields()}에 게시판 필드가 없어 그 자리에서 거부된다.
-     */
-    private final class PostHandler implements ResourceHandler<CmsRequests.ArticleRequest> {
-
-        @Override
-        public Set<String> operations() {
-            return Set.of("CREATE", "UPDATE", "DELETE");
+    /** Posts keep their board-scoped resource id and share the CMS document editor contract. */
+    private final class PostHandler implements ResourceHandler<CmsRequests.PostRequest> {
+        @Override public Set<String> operations() { return Set.of("CREATE", "UPDATE", "DELETE"); }
+        @Override public Map<String, FieldType> fields() {
+            return Map.of("title", FieldType.TEXT, "body", FieldType.TEXT,
+                    "thumbnailImageId", FieldType.NUMBER_OR_NULL, "thumbnailAlt", FieldType.TEXT_OR_NULL,
+                    "regionCodeId", FieldType.NUMBER_OR_NULL, "categoryCodeId", FieldType.NUMBER_OR_NULL);
         }
-
-        @Override
-        public Map<String, FieldType> fields() {
-            return Map.of("title", FieldType.TEXT, "body", FieldType.TEXT);
-        }
-
-        @Override
-        public ObjectNode snapshot(String id) {
+        @Override public ObjectNode snapshot(String id) {
             PostTarget target = PostTarget.of(id);
             ObjectNode state = objectMapper.createObjectNode();
-            // MCP가 Snapshot의 id와 대상 id를 문자열로 대조하므로 합쳐진 id를 그대로 쓴다.
-            state.put("id", id);
             if (target.creates()) {
                 state.putNull("title");
                 state.putNull("body");
-                return state;
+                state.putNull("thumbnailImageId");
+                state.put("thumbnailAlt", "");
+                state.putNull("regionCodeId");
+                state.putNull("categoryCodeId");
+            } else {
+                var post = ownedPost(target);
+                state.put("title", post.title());
+                state.put("body", post.body());
+                state.put("thumbnailImageId", post.thumbnailImageId());
+                state.put("thumbnailAlt", post.thumbnailAlt());
+                state.put("regionCodeId", post.regionCodeId());
+                state.put("categoryCodeId", post.categoryCodeId());
+                state.put("updatedAt", post.updatedAt().toString());
             }
-            PostView view = ownedPost(target);
-            state.put("title", view.title());
-            state.put("body", view.body());
-            state.put("updatedAt", view.updatedAt().toString());
+            state.put("id", id);
             return state;
         }
-
-        @Override
-        public CmsRequests.ArticleRequest merged(Command command, String id) {
+        @Override public ObjectNode promptContext(String id) {
+            var board = cmsService.board(PostTarget.of(id).boardId());
+            ObjectNode context = objectMapper.createObjectNode();
+            context.set("board", objectMapper.valueToTree(board));
+            context.set("codes", objectMapper.valueToTree(cmsService.codeValues().stream()
+                    .filter(code -> Objects.equals(code.groupKey(), board.regionGroupKey())
+                            || Objects.equals(code.groupKey(), board.categoryGroupKey())).toList()));
+            context.set("codeGroups", objectMapper.valueToTree(cmsService.codeGroups()));
+            return context;
+        }
+        @Override public void normalize(ObjectNode fields) {
+            if (fields.path("body").isTextual()) fields.put("body", ContentBody.normalize(fields.path("body").textValue()));
+        }
+        @Override public CmsRequests.PostRequest merged(Command command, String id) {
             PostTarget target = PostTarget.of(id);
-            JsonNode fields = command.fields();
             if (command.deletes()) {
                 ownedPost(target);
                 return null;
             }
-            if (command.creates()) {
-                // 등록은 대상이 아직 없으니 부모 게시판만 확인한다. 메뉴 등록과 같은 방향이다.
-                cmsService.board(target.boardId());
-                return article(fields, null, null);
+            PostView view = command.creates() ? null : ownedPost(target);
+            JsonNode fields = command.fields();
+            String body = ContentBody.normalize(text(fields, "body", view == null ? null : view.body()));
+            String problem = ContentBody.problem(body);
+            if (problem != null) throw invalidCommand(problem);
+            var request = new CmsRequests.PostRequest(
+                    text(fields, "title", view == null ? null : view.title()), body,
+                    number(fields, "thumbnailImageId", view == null ? null : view.thumbnailImageId()),
+                    text(fields, "thumbnailAlt", view == null ? "" : view.thumbnailAlt()),
+                    number(fields, "regionCodeId", view == null ? null : view.regionCodeId()),
+                    number(fields, "categoryCodeId", view == null ? null : view.categoryCodeId()));
+            try {
+                cmsService.validatePost(request, cmsService.board(target.boardId()), view);
+            } catch (org.urizo.axmodulestudio.backend.cms.service.CmsServiceException failure) {
+                throw invalidCommand(failure.getMessage());
             }
-            PostView view = ownedPost(target);
-            return article(fields, view.title(), view.body());
+            return request;
         }
-
-        @Override
-        public JsonNode save(Command command, String id, CmsRequests.ArticleRequest request) {
+        @Override public JsonNode save(Command command, String id, CmsRequests.PostRequest request) {
             PostTarget target = PostTarget.of(id);
             if (command.deletes()) {
                 ObjectNode removed = snapshot(id);
                 cmsService.deletePost(target.postId());
                 return removed;
             }
-            if (command.creates()) {
-                return objectMapper.valueToTree(cmsService.createPost(
-                        command.actorId(), target.boardId(),
-                        request.title(), request.body()));
-            }
-            return objectMapper.valueToTree(cmsService.updatePost(
-                    target.postId(), request.title(), request.body()));
+            return objectMapper.valueToTree(command.creates()
+                    ? cmsService.createPost(command.actorId(), target.boardId(), request)
+                    : cmsService.updatePost(target.postId(), request));
         }
-
-        private CmsRequests.ArticleRequest article(
-                JsonNode fields, String currentTitle, String currentBody) {
-            String body = text(fields, "body", currentBody);
-            requireSupportedMarkdown(body);
-            return new CmsRequests.ArticleRequest(text(fields, "title", currentTitle), body);
-        }
-
-        /**
-         * 대상 게시물이 화면에서 연 게시판의 것인지 확인한다.
-         *
-         * <p>모델이 다른 게시판의 게시물 번호를 잡아도 여기서 멈춘다.
-         */
         private PostView ownedPost(PostTarget target) {
             PostView view = cmsService.post(target.postId());
-            if (view.boardId() != target.boardId()) {
-                throw new NaturalCmsException(
-                        "CMS_RESOURCE_INVALID",
-                        "The Natural CMS post belongs to another board.",
-                        HttpStatus.UNPROCESSABLE_ENTITY);
-            }
+            if (view.boardId() != target.boardId()) throw new NaturalCmsException(
+                    "CMS_RESOURCE_INVALID", "The Natural CMS post belongs to another board.", HttpStatus.UNPROCESSABLE_ENTITY);
             return view;
         }
     }

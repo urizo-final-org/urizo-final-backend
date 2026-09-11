@@ -254,6 +254,11 @@ public class CmsRepository {
                 .findFirst();
     }
 
+    /** Include soft-deleted rows so restarting cannot recreate intentionally removed demo data. */
+    public boolean hasContentOrBoards() {
+        return contentRepository.count() > 0 || boardRepository.count() > 0;
+    }
+
     public Optional<Long> findContentIdByTitle(String title) {
         return contentRepository.findFirstByTitleAndDeletedYnOrderByContentIdAsc(
                         title, NOT_DELETED)
@@ -285,6 +290,18 @@ public class CmsRepository {
         return contentRepository.findByContentIdAndDeletedYn(id, NOT_DELETED);
     }
 
+    public boolean contentImageExists(long id) {
+        return contentImageRepository.existsById(id);
+    }
+
+    public void updateBoardOptions(long id, String displayType, String regionGroupKey, String categoryGroupKey) {
+        findBoardEntity(id).orElseThrow().changeOptions(displayType, regionGroupKey, categoryGroupKey);
+    }
+
+    public void updatePostOptions(long id, Long thumbnailImageId, String thumbnailAlt, Long regionCodeId, Long categoryCodeId) {
+        findPostEntity(id).orElseThrow().changeOptions(thumbnailImageId, thumbnailAlt, regionCodeId, categoryCodeId);
+    }
+
     private Optional<CmsBoardEntity> findBoardEntity(long id) {
         return boardRepository.findByBoardIdAndDeletedYn(id, NOT_DELETED);
     }
@@ -313,14 +330,16 @@ public class CmsRepository {
 
     private static BoardView board(CmsBoardEntity board) {
         return new BoardView(board.getBoardId(), board.getBoardName(), board.getDescription(),
-                board.getCreatedAt(), board.getUpdatedAt());
+                board.getCreatedAt(), board.getUpdatedAt(), board.getDisplayType(),
+                board.getRegionGroupKey(), board.getCategoryGroupKey());
     }
 
     private static PostView post(CmsPostEntity post) {
         AdminAccountEntity author = post.getAuthor();
         return new PostView(post.getPostId(), post.getBoard().getBoardId(),
                 author.getAccountId(), author.getDisplayName(), post.getTitle(), post.getBody(),
-                post.getCreatedAt(), post.getUpdatedAt());
+                post.getCreatedAt(), post.getUpdatedAt(), post.getThumbnailImageId(),
+                post.getThumbnailAlt(), post.getRegionCodeId(), post.getCategoryCodeId());
     }
 
     private static TemplateView template(CmsTemplateEntity template) {

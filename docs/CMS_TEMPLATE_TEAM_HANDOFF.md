@@ -85,6 +85,14 @@ JSON을 정규화하여 계산한 packageHash는
 
 ## 2. Source·Runtime 준비
 
+| 저장소 | 배포 PR | 검증된 제품/도구 Commit |
+|---|---|---|
+| Frontend | [#80](https://github.com/urizo-final-org/urizo-final-frontend/pull/80) | `b0bb05820bb4dc8e934808fe15ac11dc137995d9` |
+| Backend | [#97](https://github.com/urizo-final-org/urizo-final-backend/pull/97) | `666056f037701ad1dd6266ca2710f55afe079d94` |
+
+위 Commit은 코드 검증 기준이다. 해당 PR의 최신 Head에는 문서의 배포 정보 보완이 추가될 수 있다.
+팀원 적용 시 실제 PR의 MERGED 상태와 최신 Head의 origin/dev 조상 포함을 함께 확인한다.
+
 Backend PR #96의 `b130c37fdbbad4177f057468992aece2a670c91a`는 이전 여행 데모 배포다.
 이번 변경의 실제 PR/Head는 `axms-template-banner-layouts` 작업으로 조회하고,
 PR의 base=dev, state=MERGED 및 해당 Head의 origin/dev 조상 포함을 검증한다.

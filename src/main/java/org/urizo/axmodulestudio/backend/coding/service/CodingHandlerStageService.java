@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -108,6 +109,31 @@ public final class CodingHandlerStageService {
     private static final Set<String> CODE_TOOLS = Set.of(
             "read_file", "search_code", "read_diff", "apply_patch");
     /**
+     * Every tool result is re-sent with every later answer, and that replay - not the
+     * turns themselves - is where the code stage spends its tokens. Measured on Job
+     * 45593ba8: 20 answers, 263,279 input tokens, of which 238,539 (91%) were earlier
+     * results replayed; the two largest reads alone, 3,806 and 3,108 tokens, were carried
+     * by 16 and 15 later answers for 107,516. The model did not use them for the edit
+     * either: before each apply_patch it re-read the exact 10-15 lines it was about to
+     * replace (turns 14-17), and oldText came from those small reads. So once a read or
+     * search is older than the last few, its body is folded down to this note and the
+     * model is told to read again if it needs the text. The same run replayed with three
+     * kept comes to 99,840 tokens; with every folded read re-read once, 169,782.
+     *
+     * <p>Only read_file and search_code fold. read_diff stays: it is the edit's reference
+     * point and small (3,950 bytes on the same Job). The review stage is left alone -
+     * it reads the diff on its first answer and judges on its last, and the fold would
+     * take the judgement's evidence away.
+     *
+     * <p>A JSON object, because the turn service forwards an object body untouched and
+     * wraps anything else.
+     */
+    static final String FOLDED_TOOL_CONTENT =
+            "{\"content\":\"[folded: this result was shown earlier and is no longer in "
+                    + "the conversation. Call the same tool again - read_file with "
+                    + "startLine and endLine - when you need its exact text.]\"}";
+    private static final Set<String> FOLDABLE_TOOLS = Set.of("read_file", "search_code");
+    /**
      * The files that declare a dependency. Lock files are included: a library arrives through
      * one just as surely as through the manifest that names it.
      */
@@ -144,13 +170,35 @@ public final class CodingHandlerStageService {
      */
     private final int maxRunnerPolls;
     private final Duration runnerPollInterval;
+    /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
+    private final int toolHistoryKeep;
 
     /**
-     * Two constructors mean Spring cannot guess, and without this it looks for a no-arg
-     * one and fails the whole context at startup. The second exists so a test can shorten
-     * the runner poll; production takes these defaults.
+     * Three constructors mean Spring cannot guess, and without the annotation it looks for
+     * a no-arg one and fails the whole context at startup. The annotated one takes the
+     * configured fold depth; the eleven-argument one keeps the tests' wiring unchanged
+     * with the production default; the full one exists so a test can shorten the runner
+     * poll or set the fold depth.
      */
     @Autowired
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, 120, Duration.ofMillis(500), toolHistoryKeep);
+    }
+
     CodingHandlerStageService(
             CodingHandlerResultService results,
             CodingToolService tools,
@@ -165,7 +213,27 @@ public final class CodingHandlerStageService {
             Clock clock) {
         this(results, tools, modelGuard, models, runner, deploymentAdapter,
                 profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
-                clock, 120, Duration.ofMillis(500));
+                clock, 120, Duration.ofMillis(500), 3);
+    }
+
+    /** Shortened runner poll with the production fold depth - the runner-stage tests use this. */
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, maxRunnerPolls, runnerPollInterval, 3);
     }
 
     CodingHandlerStageService(
@@ -181,7 +249,9 @@ public final class CodingHandlerStageService {
             ObjectMapper objectMapper,
             Clock clock,
             int maxRunnerPolls,
-            Duration runnerPollInterval) {
+            Duration runnerPollInterval,
+            int toolHistoryKeep) {
+        this.toolHistoryKeep = toolHistoryKeep;
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -364,6 +434,7 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
+            foldOldToolResults(messages, request.handlerKey());
             CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, messages,
@@ -1620,6 +1691,7 @@ public final class CodingHandlerStageService {
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
                         + "recovered. "
+                        + foldingHint()
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -1789,6 +1861,56 @@ public final class CodingHandlerStageService {
      * turn declaring calls that have no result, which the message contract rightly refuses.
      * The history must record what the pipeline did, not what the model asked for.
      */
+    /**
+     * Folds every read_file/search_code result older than the last {@code toolHistoryKeep}
+     * of them, in the code stage only. The tool message keeps its ids and result metadata,
+     * and the assistant message that asked for it keeps the call's arguments, so the model
+     * still sees what it read and where - only the body is gone. Already-folded messages
+     * are left as they are, so the same message is never rewritten twice and the request
+     * digest of a retried turn stays what it was.
+     */
+    private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
+        if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
+            return;
+        }
+        int kept = 0;
+        for (int index = messages.size() - 1; index >= 0; index--) {
+            JsonNode message = messages.get(index);
+            if (!"tool".equals(message.path("role").textValue())
+                    || !FOLDABLE_TOOLS.contains(toolNameBefore(messages, index))) {
+                continue;
+            }
+            if (++kept <= toolHistoryKeep
+                    || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
+                continue;
+            }
+            ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
+        }
+    }
+
+    /**
+     * Said out loud in the code stage prompt, because a model that finds a folded body
+     * where it expects a file would otherwise copy oldText from memory - and apply_patch
+     * refuses text that does not match the file exactly.
+     */
+    private String foldingHint() {
+        if (toolHistoryKeep <= 0) {
+            return "";
+        }
+        return "Only your last " + toolHistoryKeep + " read_file and search_code results "
+                + "stay in the conversation; older ones are folded to a short note. Before "
+                + "apply_patch, read_file the exact lines you will replace so oldText is "
+                + "copied from a fresh read, never from memory. ";
+    }
+
+    /** The tool message carries no name; the assistant message right before it does. */
+    private static String toolNameBefore(List<JsonNode> messages, int toolIndex) {
+        if (toolIndex == 0) {
+            return "";
+        }
+        return messages.get(toolIndex - 1).path("toolCalls").path(0).path("name").asText("");
+    }
+
     private ObjectNode assistantToolMessage(
             CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
         ObjectNode message = objectMapper.createObjectNode();

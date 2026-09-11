@@ -81,6 +81,12 @@ class CodingHandlerStageServiceTest {
 
     private static StageFixture stageFixture(
             ObjectMapper mapper, ProfileToolBindingPolicy toolBindings) {
+        return stageFixture(mapper, toolBindings, 3);
+    }
+
+    /** {@code toolHistoryKeep} is the fold depth of the code stage; 3 is the production default. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
@@ -106,7 +112,8 @@ class CodingHandlerStageServiceTest {
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), mock(DeploymentAdapter.class), anyBindings,
                 mock(GuardrailPathSelectionService.class),
-                mock(GuardrailRuleService.class), mapper, clock);
+                mock(GuardrailRuleService.class), mapper, clock,
+                120, Duration.ofMillis(500), toolHistoryKeep);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -186,6 +193,88 @@ class CodingHandlerStageServiceTest {
                 ModelProvider.GOOGLE_GENAI, "coding-test-model",
                 "{\"port\":\"completed\",\"payload\":{\"summary\":\"done\"}}",
                 12, 6, Duration.ofMillis(10));
+    }
+
+    private static List<String> toolBodies(ProviderChatRequest request) {
+        return request.messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList();
+    }
+
+    private static ProviderChatResponse[] threeReadsThenDone() {
+        return new ProviderChatResponse[] {
+            toolCallReply("read_file", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "{\"path\":\"src/App.java\"}"),
+            toolCallReply("read_file", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "{\"path\":\"src/App.java\",\"startLine\":1,\"endLine\":9}"),
+            toolCallReply("search_code", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "{\"query\":\"App\",\"scope\":\"src\"}"),
+            terminalReply(),
+        };
+    }
+
+    /**
+     * Measured on Job 45593ba8: 91% of the code stage's 263,279 input tokens were earlier
+     * tool results replayed on every later answer. With a fold depth of one, each new read
+     * or search folds the one before it, and the request that follows carries the note
+     * instead of the body. read_diff is never folded.
+     */
+    @Test
+    void foldsReadResultsOlderThanTheKeptOnesInTheCodeStage() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        // Fourth request: read_diff, read_file, read_file so far - only the first read folds.
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        assertThat(fourth).hasSize(3);
+        assertThat(fourth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fourth.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fourth.get(2)).contains(DIFF_DIGEST);
+        // Fifth request: the search arrived, so the second read folds too. The first read's
+        // note is the same text as before - folded once, not rewritten.
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(4);
+        assertThat(fifth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fifth.get(1)).isEqualTo(fourth.get(1));
+        assertThat(fifth.get(2)).isEqualTo(fourth.get(1));
+        assertThat(fifth.get(3)).contains(DIFF_DIGEST);
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .contains("Only your last 1 read_file and search_code results");
+    }
+
+    @Test
+    void aZeroFoldDepthLeavesEveryToolBodyInPlace() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 0);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        assertThat(toolBodies(routed.getAllValues().get(4)))
+                .hasSize(4)
+                .allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .doesNotContain("folded to a short note");
     }
 
     @Test

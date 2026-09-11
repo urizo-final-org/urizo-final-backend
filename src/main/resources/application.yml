@@ -68,3 +68,6 @@ ax:
       enabled: false
     model-turn-bridge:
       enabled: false
+      # Recent read_file/search_code results the code stage keeps verbatim; older ones
+      # fold to a note. 0 disables folding.
+      tool-history-keep: 3

@@ -8,7 +8,6 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.http.HttpStatus;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
@@ -140,29 +139,6 @@ final class TemplateCommandPolicy {
                 && !buttonPaths(cms).contains(fields.path("heroButtonUrl").asText())) {
             throw invalid("메인 버튼은 기존 메뉴 또는 검색·사이트맵 경로로만 연결할 수 있습니다.");
         }
-    }
-
-    static ObjectNode fieldSchema(ObjectMapper mapper) {
-        ObjectNode fields = mapper.createObjectNode().put("type", "object")
-                .put("additionalProperties", false).put("minProperties", 1);
-        ObjectNode properties = fields.putObject("properties");
-        properties.putObject("layout").put("type", "string").putArray("enum")
-                .add("CLASSIC").add("MINIMAL").add("BOLD");
-        properties.putObject("primaryColor").put("type", "string").put("pattern", "^#[0-9A-Fa-f]{6}$");
-        properties.putObject("heroTitle").put("type", "string").put("minLength", 1).put("maxLength", 160);
-        properties.putObject("headerText").put("type", "string").put("maxLength", 200);
-        properties.putObject("footerText").put("type", "string").put("maxLength", 200);
-        properties.putObject("heroSubtitle").put("type", "string").put("maxLength", 300);
-        properties.putObject("heroButtonLabel").put("type", "string").put("maxLength", 60);
-        properties.putObject("heroButtonUrl").put("type", "string").put("maxLength", 180);
-        ObjectNode item = properties.putObject("heroImages").put("type", "array")
-                .put("maxItems", 5).putObject("items").put("type", "object").put("additionalProperties", false);
-        item.putArray("required").add("url").add("title").add("description");
-        ObjectNode image = item.putObject("properties");
-        image.putObject("url").put("type", "string").put("minLength", 1).put("maxLength", 500);
-        image.putObject("title").put("type", "string").put("maxLength", 120);
-        image.putObject("description").put("type", "string").put("maxLength", 240);
-        return fields;
     }
 
     private static NaturalCmsException invalid(String message) {

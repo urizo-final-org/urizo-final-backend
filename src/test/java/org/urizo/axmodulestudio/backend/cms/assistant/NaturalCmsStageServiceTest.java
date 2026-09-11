@@ -30,6 +30,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
@@ -149,6 +150,17 @@ class NaturalCmsStageServiceTest {
             assertThat(request.getValue().toolSchemas())
                     .singleElement()
                     .satisfies(schema -> {
+                        // Exercise the real gateway parser and digest check, not only the mocked model.
+                        var definition = ProviderToolDefinition.fromContract(schema);
+                        assertThat(definition.schemaDigest()).isEqualTo(
+                                NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS.get("validate_cms_command"));
+                        if ("TEMPLATE".equals(type)) {
+                            assertThat(definition.normalizeArguments("""
+                                    {"command":{"operation":"UPDATE","fields":{"heroImages":[
+                                      {"url":"/api/site/images/5","title":"Photo","description":"Caption"}
+                                    ]}}}
+                                    """)).contains("heroImages", "/api/site/images/5");
+                        }
                         assertThat(schema.path("name").asText())
                                 .isEqualTo("validate_cms_command");
                         JsonNode commandSchema = schema.path("inputSchema")

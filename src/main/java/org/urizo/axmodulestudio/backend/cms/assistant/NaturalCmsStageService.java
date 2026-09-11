@@ -157,7 +157,7 @@ public final class NaturalCmsStageService {
                 toolPolicy, stage.nodeId(),
                 Set.of("validate_cms_command"),
                 Set.of("resolve_cms_target", "create_cms_preview"));
-        List<JsonNode> schemas = previewToolSchemas(job.resource());
+        List<JsonNode> schemas = previewToolSchemas();
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(job, stage, ModelUseCase.TOOL_CALL);
         CodingModelTurnContract.Response response = modelTurn(
@@ -638,7 +638,7 @@ public final class NaturalCmsStageService {
         return arguments;
     }
 
-    private List<JsonNode> previewToolSchemas(NaturalCmsContract.ResourceRef resource) {
+    private List<JsonNode> previewToolSchemas() {
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("name", "validate_cms_command");
         schema.put("description", "Submit one Natural CMS UPDATE command.");
@@ -654,10 +654,6 @@ public final class NaturalCmsStageService {
         ObjectNode commandProperties = command.putObject("properties");
         commandProperties.putObject("operation").put("type", "string");
         commandProperties.putObject("fields").put("type", "object");
-        if ("TEMPLATE".equals(resource.type())) {
-            ((ObjectNode) commandProperties.path("operation")).putArray("enum").add("UPDATE");
-            commandProperties.set("fields", TemplateCommandPolicy.fieldSchema(objectMapper));
-        }
         command.putArray("required").add("operation").add("fields");
         input.putArray("required").add("command");
         return List.of(schema);

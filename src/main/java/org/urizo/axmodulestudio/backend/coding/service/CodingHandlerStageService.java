@@ -32,6 +32,7 @@ import org.urizo.axmodulestudio.backend.coding.integration.DeploymentAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
@@ -335,7 +336,7 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate),
+                1, List.of(), initialMessages(request.handlerKey(), aggregate, false),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -421,8 +422,12 @@ public final class CodingHandlerStageService {
             throw forbidden("The Coding Job does not allow tool calling.");
         }
         List<JsonNode> schemas = toolSchemas(allowedTools);
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(authority, request, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
+        boolean foldHistory = foldsToolHistory(modelBindings);
         List<JsonNode> messages = new ArrayList<>(
-                initialMessages(request.handlerKey(), aggregate));
+                initialMessages(request.handlerKey(), aggregate, foldHistory));
         JsonNode latestDiff = null;
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
@@ -430,11 +435,10 @@ public final class CodingHandlerStageService {
         // could not land one - and only this tells them apart.
         boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
-        List<ProviderModelRegistration> modelBindings =
-                modelBindings(authority, request, schemas.isEmpty()
-                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
-            foldOldToolResults(messages, request.handlerKey());
+            if (foldHistory) {
+                foldOldToolResults(messages, request.handlerKey());
+            }
             CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, messages,
@@ -1461,7 +1465,8 @@ public final class CodingHandlerStageService {
 
     private List<JsonNode> initialMessages(
             String handlerKey,
-            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            boolean foldHistory) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1691,7 +1696,7 @@ public final class CodingHandlerStageService {
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
                         + "recovered. "
-                        + foldingHint()
+                        + foldingHint(foldHistory)
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -1856,11 +1861,23 @@ public final class CodingHandlerStageService {
     }
 
     /**
-     * Replays only the call that actually ran. A model may hand back several tool calls in one
-     * answer, but this loop executes the first alone - replaying the rest would leave the next
-     * turn declaring calls that have no result, which the message contract rightly refuses.
-     * The history must record what the pipeline did, not what the model asked for.
+     * Whether the code stage may fold its tool history under these bindings: a fold depth
+     * above zero, and a primary provider that tolerates a rewritten history.
+     *
+     * <p>Gemini does not. The shared adapter stores each turn's thought signatures under a
+     * key hashed from the whole earlier conversation (its correlationId), so changing an old
+     * tool body changes the key of every call after it, the signatures come back empty, and
+     * Gemini refuses the unsigned function calls - MODEL_RESPONSE_INVALID on the first turn
+     * that folded (measured 2026-09-11). Claude and OpenAI store no such signature and fold
+     * safely. The primary binding decides once, before the first turn, because the fold is
+     * decided for the whole conversation, not per turn.
      */
+    private boolean foldsToolHistory(List<ProviderModelRegistration> modelBindings) {
+        return toolHistoryKeep > 0
+                && !modelBindings.isEmpty()
+                && modelBindings.get(0).provider() != ModelProvider.GOOGLE_GENAI;
+    }
+
     /**
      * Folds every read_file/search_code result older than the last {@code toolHistoryKeep}
      * of them, in the code stage only. The tool message keeps its ids and result metadata,
@@ -1893,8 +1910,8 @@ public final class CodingHandlerStageService {
      * where it expects a file would otherwise copy oldText from memory - and apply_patch
      * refuses text that does not match the file exactly.
      */
-    private String foldingHint() {
-        if (toolHistoryKeep <= 0) {
+    private String foldingHint(boolean foldHistory) {
+        if (!foldHistory) {
             return "";
         }
         return "Only your last " + toolHistoryKeep + " read_file and search_code results "
@@ -1911,6 +1928,12 @@ public final class CodingHandlerStageService {
         return messages.get(toolIndex - 1).path("toolCalls").path(0).path("name").asText("");
     }
 
+    /**
+     * Replays only the call that actually ran. A model may hand back several tool calls in one
+     * answer, but this loop executes the first alone - replaying the rest would leave the next
+     * turn declaring calls that have no result, which the message contract rightly refuses.
+     * The history must record what the pipeline did, not what the model asked for.
+     */
     private ObjectNode assistantToolMessage(
             CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
         ObjectNode message = objectMapper.createObjectNode();

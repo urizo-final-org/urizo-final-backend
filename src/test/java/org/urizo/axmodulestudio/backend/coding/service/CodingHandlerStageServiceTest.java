@@ -87,13 +87,20 @@ class CodingHandlerStageServiceTest {
     /** {@code toolHistoryKeep} is the fold depth of the code stage; 3 is the production default. */
     private static StageFixture stageFixture(
             ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep) {
+        return stageFixture(mapper, toolBindings, toolHistoryKeep, ModelProvider.GOOGLE_GENAI);
+    }
+
+    /** The provider is the code node's primary binding; the fold guard reads it. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
+            ModelProvider provider) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
         ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         ProviderModelRegistration registration = new ProviderModelRegistration(
-                ModelProvider.GOOGLE_GENAI,
+                provider,
                 "coding-test-model",
                 Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
                 Duration.ofSeconds(30),
@@ -181,16 +188,25 @@ class CodingHandlerStageServiceTest {
     /** The provider returns the tool call natively; the content stays empty. */
     private static ProviderChatResponse toolCallReply(
             String tool, String callId, String arguments) {
+        return toolCallReply(ModelProvider.GOOGLE_GENAI, tool, callId, arguments);
+    }
+
+    private static ProviderChatResponse toolCallReply(
+            ModelProvider provider, String tool, String callId, String arguments) {
         return new ProviderChatResponse(
-                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                provider, "coding-test-model",
                 "",
                 List.of(new ProviderChatMessage.ToolCall(callId, tool, arguments)),
                 10, 5, Duration.ofMillis(10));
     }
 
     private static ProviderChatResponse terminalReply() {
+        return terminalReply(ModelProvider.GOOGLE_GENAI);
+    }
+
+    private static ProviderChatResponse terminalReply(ModelProvider provider) {
         return new ProviderChatResponse(
-                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                provider, "coding-test-model",
                 "{\"port\":\"completed\",\"payload\":{\"summary\":\"done\"}}",
                 12, 6, Duration.ofMillis(10));
     }
@@ -203,14 +219,18 @@ class CodingHandlerStageServiceTest {
     }
 
     private static ProviderChatResponse[] threeReadsThenDone() {
+        return threeReadsThenDone(ModelProvider.GOOGLE_GENAI);
+    }
+
+    private static ProviderChatResponse[] threeReadsThenDone(ModelProvider provider) {
         return new ProviderChatResponse[] {
-            toolCallReply("read_file", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+            toolCallReply(provider, "read_file", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
                     "{\"path\":\"src/App.java\"}"),
-            toolCallReply("read_file", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+            toolCallReply(provider, "read_file", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
                     "{\"path\":\"src/App.java\",\"startLine\":1,\"endLine\":9}"),
-            toolCallReply("search_code", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+            toolCallReply(provider, "search_code", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
                     "{\"query\":\"App\",\"scope\":\"src\"}"),
-            terminalReply(),
+            terminalReply(provider),
         };
     }
 
@@ -223,12 +243,14 @@ class CodingHandlerStageServiceTest {
     @Test
     void foldsReadResultsOlderThanTheKeptOnesInTheCodeStage() {
         ObjectMapper mapper = new ObjectMapper();
-        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1);
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 1, ModelProvider.ANTHROPIC);
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(
-                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
-                threeReadsThenDone());
+                toolCallReply(ModelProvider.ANTHROPIC,
+                        "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone(ModelProvider.ANTHROPIC));
 
         CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
                 "Bearer worker", JOB, 1, RESULT, fixture.request());
@@ -258,7 +280,40 @@ class CodingHandlerStageServiceTest {
     @Test
     void aZeroFoldDepthLeavesEveryToolBodyInPlace() {
         ObjectMapper mapper = new ObjectMapper();
-        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 0);
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 0, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.ANTHROPIC,
+                        "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone(ModelProvider.ANTHROPIC));
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        assertThat(toolBodies(routed.getAllValues().get(4)))
+                .hasSize(4)
+                .allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .doesNotContain("folded to a short note");
+    }
+
+    /**
+     * Gemini keeps its thought signatures under a key hashed from the whole earlier
+     * conversation (the shared adapter's correlationId). A folded body would change that
+     * key for every later call, the signatures would come back empty, and Gemini would
+     * refuse the unsigned calls - measured on 2026-09-11 as MODEL_RESPONSE_INVALID on the
+     * first folded turn. So with a Gemini primary binding the code stage keeps every body
+     * and drops the folding hint, whatever the fold depth says.
+     */
+    @Test
+    void aGeminiPrimaryBindingNeverFoldsToolHistory() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 1, ModelProvider.GOOGLE_GENAI);
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(

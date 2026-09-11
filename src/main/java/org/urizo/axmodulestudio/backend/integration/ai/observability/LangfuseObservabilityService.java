@@ -65,18 +65,23 @@ public final class LangfuseObservabilityService {
     }
 
     public MetricsResponse metrics(String from, String to) {
+        return metrics(from, to, null);
+    }
+
+    public MetricsResponse metrics(String from, String to, String jobId) {
         TimeRange range = timeRange(from, to);
+        String selectedJob = optionalJobId(jobId);
         Availability unavailable = configurationAvailability();
         if (unavailable != null) {
             return MetricsResponse.empty(unavailable, range);
         }
-        CacheKey key = new CacheKey("metrics", range.from(), range.to());
+        CacheKey key = new CacheKey("metrics:" + selectedJob, range.from(), range.to());
         MetricsResponse cached = cached(key, MetricsResponse.class);
         if (cached != null) {
             return cached;
         }
         try {
-            JsonNode root = request(metricsPath(range));
+            JsonNode root = request(metricsPath(range, selectedJob));
             MetricsResponse response = new MetricsResponse(
                     Availability.AVAILABLE, null, range.from(), range.to(), ENVIRONMENT,
                     data(root).stream().map(this::metricRow).toList());
@@ -89,29 +94,53 @@ public final class LangfuseObservabilityService {
     }
 
     public ObservationsResponse observations(String from, String to) {
+        return observations(from, to, null, null, 50, "ALL");
+    }
+
+    public ObservationsResponse observations(
+            String from, String to, String jobId, String cursor, int limit, String kind) {
         TimeRange range = timeRange(from, to);
+        String selectedJob = optionalJobId(jobId);
+        String pageCursor = optionalCursor(cursor);
+        if (limit < 1 || limit > 50) {
+            throw new IllegalArgumentException("Observation limit must be between 1 and 50.");
+        }
+        Set<String> names = switch (kind) {
+            case "ALL" -> OBSERVATION_NAMES;
+            case "NODE" -> Set.of(NODE_OBSERVATION_NAME, "axms.tool", "axms.check");
+            case "PROVIDER" -> Set.of("axms.model");
+            default -> throw new IllegalArgumentException("Unknown observation kind.");
+        };
         Availability unavailable = configurationAvailability();
         if (unavailable != null) {
-            return ObservationsResponse.empty(unavailable, range);
+            return ObservationsResponse.empty(unavailable, range, limit);
         }
-        CacheKey key = new CacheKey("observations", range.from(), range.to());
+        String path = observationsPath(range, selectedJob, pageCursor, limit, names);
+        CacheKey key = new CacheKey(path, range.from(), range.to());
         ObservationsResponse cached = cached(key, ObservationsResponse.class);
         if (cached != null) {
             return cached;
         }
         try {
-            JsonNode root = request(observationsPath(range));
+            JsonNode root = request(path);
             List<ObservationRow> rows = data(root).stream()
-                    .filter(row -> OBSERVATION_NAMES.contains(row.path("name").asText()))
+                    .filter(row -> names.contains(row.path("name").asText()))
                     .map(this::observationRow)
+                    .filter(row -> selectedJob == null || selectedJob.equals(row.metadata().jobId()))
                     .toList();
+            String nextCursor = nullableText(root.path("meta"), "cursor");
+            if (nextCursor != null && (nextCursor.isBlank() || !validCursor(nextCursor)
+                    || nextCursor.equals(pageCursor))) {
+                throw new UpstreamFailure();
+            }
             ObservationsResponse response = new ObservationsResponse(
-                    Availability.AVAILABLE, null, range.from(), range.to(), ENVIRONMENT, rows);
+                    Availability.AVAILABLE, null, range.from(), range.to(), ENVIRONMENT,
+                    rows, nextCursor, limit);
             put(key, response);
             return response;
         }
         catch (UpstreamFailure failure) {
-            return ObservationsResponse.empty(Availability.UNAVAILABLE, range);
+            return ObservationsResponse.empty(Availability.UNAVAILABLE, range, limit);
         }
     }
 
@@ -249,7 +278,7 @@ public final class LangfuseObservabilityService {
         }
     }
 
-    private String metricsPath(TimeRange range) {
+    private String metricsPath(TimeRange range, String jobId) {
         ObjectNode query = objectMapper.createObjectNode();
         query.put("view", "observations");
         ArrayNode dimensions = query.putArray("dimensions");
@@ -270,6 +299,7 @@ public final class LangfuseObservabilityService {
         environment.put("type", "stringOptions");
         fixedStringFilter(filters, "name", "axms.model");
         fixedStringFilter(filters, "type", "GENERATION");
+        if (jobId != null) metadataFilter(filters, "jobId", jobId);
         query.put("fromTimestamp", range.from().toString());
         query.put("toTimestamp", range.to().toString());
         ObjectNode order = query.putArray("orderBy").addObject();
@@ -298,12 +328,42 @@ public final class LangfuseObservabilityService {
         filter.put("type", "string");
     }
 
-    private static String observationsPath(TimeRange range) {
-        return "/api/public/v2/observations"
-                + "?fields=core%2Cbasic%2Cmetadata%2Cmodel%2Cusage%2Cmetrics"
-                + "&limit=50&environment=local"
-                + "&fromStartTime=" + encode(range.from().toString())
-                + "&toStartTime=" + encode(range.to().toString());
+    private String observationsPath(
+            TimeRange range, String jobId, String cursor, int limit, Set<String> names) {
+        // The advanced filter overrides flat parameters: keep every constraint in it.
+        ArrayNode filters = objectMapper.createArrayNode();
+        filter(filters, "string", "environment", null, "=", ENVIRONMENT);
+        filter(filters, "datetime", "startTime", null, ">=", range.from().toString());
+        filter(filters, "datetime", "startTime", null, "<", range.to().toString());
+        ObjectNode nameFilter = filters.addObject();
+        nameFilter.put("type", "stringOptions");
+        nameFilter.put("column", "name");
+        nameFilter.put("operator", "any of");
+        ArrayNode nameValues = nameFilter.putArray("value");
+        names.stream().sorted().forEach(nameValues::add);
+        if (jobId != null) metadataFilter(filters, "jobId", jobId);
+        return selectedPath(filters, limit) + (cursor == null ? "" : "&cursor=" + encode(cursor));
+    }
+
+    private static String optionalJobId(String jobId) {
+        if (jobId == null || jobId.isBlank()) return null;
+        String value = jobId.trim().toLowerCase(Locale.ROOT);
+        if (!value.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+            throw new IllegalArgumentException("Job ID must be a full UUID.");
+        }
+        return value;
+    }
+
+    private static String optionalCursor(String cursor) {
+        if (cursor == null || cursor.isEmpty()) return null;
+        if (!validCursor(cursor)) {
+            throw new IllegalArgumentException("Invalid observation cursor.");
+        }
+        return cursor;
+    }
+
+    private static boolean validCursor(String cursor) {
+        return cursor.length() <= 2048 && cursor.matches("[A-Za-z0-9_+/=-]+");
     }
 
     private String selectedAnchorPath(
@@ -721,12 +781,19 @@ public final class LangfuseObservabilityService {
             Instant from,
             Instant to,
             String environment,
-            List<ObservationRow> observations) {
+            List<ObservationRow> observations,
+            String nextCursor,
+            int limit) {
 
-        static ObservationsResponse empty(Availability status, TimeRange range) {
+        public ObservationsResponse(Availability status, String errorCode, Instant from,
+                Instant to, String environment, List<ObservationRow> observations) {
+            this(status, errorCode, from, to, environment, observations, null, 50);
+        }
+
+        static ObservationsResponse empty(Availability status, TimeRange range, int limit) {
             return new ObservationsResponse(status,
                     LangfuseObservabilityService.errorCode(status), range.from(), range.to(),
-                    ENVIRONMENT, List.of());
+                    ENVIRONMENT, List.of(), null, limit);
         }
     }
 

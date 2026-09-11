@@ -2,6 +2,9 @@
 
 Spring Backend repository and intended local development execution root for AX Module Studio.
 
+CMS 여행 데모 데이터 팀 공유: [팀원 LLM 적용 안내](docs/CMS_DEMO_TEAM_HANDOFF.md).
+기본 dry-run 후 승인된 CMS 항목만 가져오며, 계정·AI·RAG 데이터는 복제하지 않습니다.
+
 ## Current state
 
 The repository owns the complete local-development integration root. Stage 0

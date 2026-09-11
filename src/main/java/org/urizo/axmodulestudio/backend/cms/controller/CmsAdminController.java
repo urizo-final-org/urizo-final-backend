@@ -10,6 +10,8 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.authentication.AuthenticationCredentialsNotFoundException;
 import org.springframework.security.core.Authentication;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.transaction.annotation.Transactional;
+import org.urizo.axmodulestudio.backend.governance.CmsChangeRecorder;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -23,6 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.ArticleRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.BoardRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.PostRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.MenuRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.TemplateRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
@@ -43,10 +46,12 @@ public class CmsAdminController {
 
     private final CmsService cms;
     private final AuthService authService;
+    private final CmsChangeRecorder history;
 
-    public CmsAdminController(CmsService cms, AuthService authService) {
+    public CmsAdminController(CmsService cms, AuthService authService, CmsChangeRecorder history) {
         this.cms = cms;
         this.authService = authService;
+        this.history = history;
     }
 
     @GetMapping("/members")
@@ -65,20 +70,31 @@ public class CmsAdminController {
     }
 
     @PostMapping("/menus")
-    MenuView createMenu(@Valid @RequestBody MenuRequest request) {
-        return cms.createMenu(request.name(), request.path(), request.parentId(),
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public MenuView createMenu(Authentication authentication, @Valid @RequestBody MenuRequest request) {
+        var actor = actor(authentication);
+        var result = cms.createMenu(request.name(), request.path(), request.parentId(),
                 request.displayOrder(), request.targetType(), request.targetId());
+        history.record(actor, "MENU", String.valueOf(result.id()), "CREATE", result.name());
+        return result;
     }
 
     @PutMapping("/menus/{id}")
-    MenuView updateMenu(@PathVariable long id, @Valid @RequestBody MenuRequest request) {
-        return cms.updateMenu(id, request.name(), request.path(), request.parentId(),
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public MenuView updateMenu(Authentication authentication, @PathVariable long id, @Valid @RequestBody MenuRequest request) {
+        var actor = actor(authentication);
+        var result = cms.updateMenu(id, request.name(), request.path(), request.parentId(),
                 request.displayOrder(), request.targetType(), request.targetId());
+        history.record(actor, "MENU", String.valueOf(id), "UPDATE", result.name());
+        return result;
     }
 
     @DeleteMapping("/menus/{id}")
-    ResponseEntity<Void> deleteMenu(@PathVariable long id) {
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ResponseEntity<Void> deleteMenu(Authentication authentication, @PathVariable long id) {
+        var actor = actor(authentication);
         cms.deleteMenu(id);
+        history.record(actor, "MENU", String.valueOf(id), "DELETE", "메뉴 #" + id);
         return ResponseEntity.noContent().build();
     }
 
@@ -93,20 +109,31 @@ public class CmsAdminController {
     }
 
     @PostMapping("/contents")
-    ContentView createContent(
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ContentView createContent(
             Authentication authentication, @Valid @RequestBody ArticleRequest request) {
-        return cms.createContent(actor(authentication).actorId(), request.title(), request.body());
+        var actor = actor(authentication);
+        var result = cms.createContent(actor.actorId(), request.title(), request.body());
+        history.record(actor, "CONTENT", String.valueOf(result.id()), "CREATE", result.title());
+        return result;
     }
 
     @PutMapping("/contents/{id}")
-    ContentView updateContent(
-            @PathVariable long id, @Valid @RequestBody ArticleRequest request) {
-        return cms.updateContent(id, request.title(), request.body());
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ContentView updateContent(
+            Authentication authentication, @PathVariable long id, @Valid @RequestBody ArticleRequest request) {
+        var actor = actor(authentication);
+        var result = cms.updateContent(id, request.title(), request.body());
+        history.record(actor, "CONTENT", String.valueOf(id), "UPDATE", result.title());
+        return result;
     }
 
     @DeleteMapping("/contents/{id}")
-    ResponseEntity<Void> deleteContent(@PathVariable long id) {
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ResponseEntity<Void> deleteContent(Authentication authentication, @PathVariable long id) {
+        var actor = actor(authentication);
         cms.deleteContent(id);
+        history.record(actor, "CONTENT", String.valueOf(id), "DELETE", "콘텐츠 #" + id);
         return ResponseEntity.noContent().build();
     }
 
@@ -134,18 +161,29 @@ public class CmsAdminController {
     }
 
     @PostMapping("/boards")
-    BoardView createBoard(@Valid @RequestBody BoardRequest request) {
-        return cms.createBoard(request.name(), request.description());
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public BoardView createBoard(Authentication authentication, @Valid @RequestBody BoardRequest request) {
+        var actor = actor(authentication);
+        var result = cms.createBoard(request);
+        history.record(actor, "BOARD", String.valueOf(result.id()), "CREATE", result.name());
+        return result;
     }
 
     @PutMapping("/boards/{id}")
-    BoardView updateBoard(@PathVariable long id, @Valid @RequestBody BoardRequest request) {
-        return cms.updateBoard(id, request.name(), request.description());
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public BoardView updateBoard(Authentication authentication, @PathVariable long id, @Valid @RequestBody BoardRequest request) {
+        var actor = actor(authentication);
+        var result = cms.updateBoard(id, request);
+        history.record(actor, "BOARD", String.valueOf(id), "UPDATE", result.name());
+        return result;
     }
 
     @DeleteMapping("/boards/{id}")
-    ResponseEntity<Void> deleteBoard(@PathVariable long id) {
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ResponseEntity<Void> deleteBoard(Authentication authentication, @PathVariable long id) {
+        var actor = actor(authentication);
         cms.deleteBoard(id);
+        history.record(actor, "BOARD", String.valueOf(id), "DELETE", "게시판 #" + id);
         return ResponseEntity.noContent().build();
     }
 
@@ -155,12 +193,15 @@ public class CmsAdminController {
     }
 
     @PostMapping("/boards/{boardId}/posts")
-    PostView createPost(
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public PostView createPost(
             Authentication authentication,
             @PathVariable long boardId,
-            @Valid @RequestBody ArticleRequest request) {
-        return cms.createPost(
-                actor(authentication).actorId(), boardId, request.title(), request.body());
+            @Valid @RequestBody PostRequest request) {
+        var actor = actor(authentication);
+        var result = cms.createPost(actor.actorId(), boardId, request);
+        history.record(actor, "POST", String.valueOf(result.id()), "CREATE", result.title());
+        return result;
     }
 
     @GetMapping("/posts/{id}")
@@ -169,13 +210,20 @@ public class CmsAdminController {
     }
 
     @PutMapping("/posts/{id}")
-    PostView updatePost(@PathVariable long id, @Valid @RequestBody ArticleRequest request) {
-        return cms.updatePost(id, request.title(), request.body());
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public PostView updatePost(Authentication authentication, @PathVariable long id, @Valid @RequestBody PostRequest request) {
+        var actor = actor(authentication);
+        var result = cms.updatePost(id, request);
+        history.record(actor, "POST", String.valueOf(id), "UPDATE", result.title());
+        return result;
     }
 
     @DeleteMapping("/posts/{id}")
-    ResponseEntity<Void> deletePost(@PathVariable long id) {
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public ResponseEntity<Void> deletePost(Authentication authentication, @PathVariable long id) {
+        var actor = actor(authentication);
         cms.deletePost(id);
+        history.record(actor, "POST", String.valueOf(id), "DELETE", "게시글 #" + id);
         return ResponseEntity.noContent().build();
     }
 
@@ -185,12 +233,16 @@ public class CmsAdminController {
     }
 
     @PutMapping("/templates/{key}")
-    TemplateView saveTemplate(
-            @PathVariable String key, @Valid @RequestBody TemplateRequest request) {
-        return cms.saveTemplate(key, request.layout(), request.primaryColor(), request.siteName(),
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public TemplateView saveTemplate(
+            Authentication authentication, @PathVariable String key, @Valid @RequestBody TemplateRequest request) {
+        var actor = actor(authentication);
+        var result = cms.saveTemplate(key, request.layout(), request.primaryColor(), request.siteName(),
                 request.headerText(), request.footerText(), request.heroImageUrl(),
                 request.heroTitle(), request.heroSubtitle(), request.heroButtonLabel(),
-                request.heroButtonUrl());
+                request.heroButtonUrl(), request.heroImageUrls(), request.heroImages());
+        history.record(actor, "TEMPLATE", key, "SAVE", request.siteName());
+        return result;
     }
 
     private AuthenticatedActor actor(Authentication authentication) {

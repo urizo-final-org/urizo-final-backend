@@ -367,15 +367,13 @@ public final class NaturalCmsStageService {
         String emptyDelete =
                 " DELETE carries no fields and its fields object stays empty.";
         if (NaturalCmsResourceService.isPost(resource)) {
-            return "Create one POST command with operation CREATE, UPDATE or DELETE. "
-                    + "Call validate_cms_command exactly once with that command. "
-                    + "fields may use only names from editableFields."
-                    + changedFieldsOnly
-                    + " CREATE sends title and body."
-                    + emptyDelete
-                    + " The post stays in the board it is already in, so never send a board"
-                    + " field. A body may use headings (##), emphasis (**text**) and list"
-                    + " items (-) only.";
+            return commandInstruction(new NaturalCmsContract.ResourceRef("CONTENT", "new"))
+                    .replace("Create one CONTENT command", "Create one POST command")
+                    + " The post stays in its board; never send a board field."
+                    + " thumbnailImageId is a separate CMS image id, not a body image."
+                    + " Take thumbnail ids only from the current thumbnail, body images or attached image URLs."
+                    + " regionCodeId and categoryCodeId come only from reference.codes in the board's matching group."
+                    + " Never invent ids or create codes. Null explicitly clears an optional image or classification.";
         }
         if ("BOARD".equals(resourceType)) {
             return "Create one BOARD command with operation CREATE, UPDATE or DELETE. "
@@ -385,7 +383,9 @@ public final class NaturalCmsStageService {
                     + " CREATE sends at least name and leaves description out when the request"
                     + " does not give one."
                     + emptyDelete
-                    + " A board that still has posts cannot be deleted.";
+                    + " A board that still has posts cannot be deleted."
+                    + " displayType is LIST or CARD. regionGroupKey and categoryGroupKey are optional"
+                    + " keys from reference.codeGroups only. Never create or invent groups.";
         }
         if ("CONTENT".equals(resourceType)) {
             // 본문이 Tiptap Document(JSON)다. 모델이 트리를 지어내지 않도록 현재 문서를 고쳐
@@ -399,9 +399,16 @@ public final class NaturalCmsStageService {
                     + " change only the parts the request asks for and keep everything else"
                     + " exactly as it is, then send the whole document back as one JSON string."
                     + " A document is {\"type\":\"doc\",\"content\":[...]} and its nodes may only"
-                    + " be paragraph, heading, bulletList, orderedList, listItem, text, image and"
-                    + " hardBreak; a text node may carry bold, italic, strike, underline or"
-                    + " link marks."
+                    + " be paragraph, heading, bulletList, orderedList, listItem, text, image,"
+                    + " hardBreak, blockquote and horizontalRule; a text node may carry bold,"
+                    + " italic, strike, underline, textStyle, highlight or link marks."
+                    + " A horizontalRule node has no content."
+                    + " Colour is written as {\"type\":\"textStyle\",\"attrs\":{\"color\":\"#c0392b\"}}"
+                    + " for text and {\"type\":\"highlight\",\"attrs\":{\"color\":\"#fff3a3\"}} for a"
+                    + " marker pen. Only these colours exist: text #6b7d84 grey, #c0392b red,"
+                    + " #1d6fb8 blue, #2a7d55 green, #c1701a orange; marker #fff3a3 yellow,"
+                    + " #d5f2dd green, #d8ecfb blue, #fbdce8 pink, #e6ebed grey."
+                    + " Never invent another colour."
                     + " A heading uses attrs.level 2 or 3."
                     + " A picture is an image node, never a link and never plain text: write"
                     + " {\"type\":\"image\",\"attrs\":{\"src\":\"...\",\"alt\":\"short description\"}}"
@@ -454,12 +461,16 @@ public final class NaturalCmsStageService {
         else if (NaturalCmsResourceService.isPost(resource)) {
             // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
             scope = "the posts of the selected board: writing a new post and changing or "
-                    + "deleting a post's title and body";
+                    + "deleting a post's title and rich-text body, using supported headings, lists,"
+                    + " quotes, dividers, bold, italic, strike, underline, colours and links;"
+                    + " placing, moving or removing already uploaded body images and a separate thumbnail,"
+                    + " and choosing region/category codes from reference.codes."
+                    + " Attached images are already uploaded, so asking to upload or add them is included";
             excluded = "changing the board itself, menus, static content pages, templates "
-                    + "and members";
+                    + "and members, finding unattached images, inventing or creating codes";
         }
         else if ("BOARD".equals(resource.type())) {
-            scope = "boards only: creating a board, changing a board's name or description, "
+            scope = "boards only: creating a board, changing a board's name, description, LIST/CARD display type or existing code group bindings, "
                     + "and deleting a board";
             excluded = "writing or editing posts, menus, static content pages, templates "
                     + "and members";
@@ -480,8 +491,16 @@ public final class NaturalCmsStageService {
             //
             // 첨부한 사진을 `올려줘`라고 하면 반려됐다. 범위에 `놓기`만 있어 모델이 업로드를
             // 화면 밖 일로 읽었다. 사람이 쓰는 말과 실제 하는 일을 이어 준다.
+            //
+            // `밑줄 적용해서 작성해줘`도 같은 이유로 반려됐다. 범위에 `제목과 본문을 바꾼다`까지만
+            // 있고 본문에 무엇을 쓸 수 있는지가 없어, 서식을 지정한 요청을 화면 밖으로 읽었다.
+            // 36초 뒤 같은 일을 `밑줄 적용해줘`로 짧게 쓰니 통과했다. 쓸 수 있는 것을 적어 둔다.
             scope = "static content pages only: creating a content page, changing the selected "
-                    + "page's title and body, and deleting the selected page. Placing, moving or "
+                    + "page's title and body, and deleting the selected page. A body may use"
+                    + " headings, bullet and numbered lists, quotes, dividers, bold, italic,"
+                    + " strike, underline, text colour, a marker pen, links and images, so asking"
+                    + " for any of those while writing or editing"
+                    + " the body is part of this screen. Placing, moving or "
                     + "removing an image the body already contains or the request attaches is "
                     + "included. An attached image has already been uploaded, so asking to "
                     + "upload, put up or add it means placing it in the body and stays feasible";

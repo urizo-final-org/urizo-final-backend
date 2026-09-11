@@ -193,6 +193,7 @@ class CmsSiteSettingsServiceTest {
         assertThat(result.template().key()).isEqualTo("BOLD");
         assertThat(result.template().siteName()).isEqualTo("여름 캠페인");
         assertThat(result.template().primaryColor()).isEqualTo("#112233");
+        assertThat(result.template().heroImageUrls()).containsExactly("/hero.svg", "/second.png");
     }
 
     private static SiteView site(
@@ -203,6 +204,7 @@ class CmsSiteSettingsServiceTest {
 
     private static TemplateView template(String key) {
         return new TemplateView(key, key, "#112233", "템플릿 예시명", "header", "footer",
-                "/hero.svg", "hero", "subtitle", "button", "/about", false, UPDATED_AT);
+                "/hero.svg", "hero", "subtitle", "button", "/about", false, UPDATED_AT,
+                List.of("/hero.svg", "/second.png"));
     }
 }

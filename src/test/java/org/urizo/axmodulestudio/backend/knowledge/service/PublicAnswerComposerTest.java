@@ -7,6 +7,7 @@ import java.net.URI;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
@@ -139,7 +140,20 @@ class PublicAnswerComposerTest {
                 .contains("제공된 근거 문서의 내용만 사용한다")
                 .contains("근거에 없는 정보를 추가하지 않는다")
                 .contains("부족하면, 지어내지 말고 부족하다고 말한다")
-                .contains("300자");
+                // 규칙 4. 산문 상한이 아니라 덩어리 구조 지시로 바뀌었다(axms-ai02-014).
+                .contains("한 곳씩 덩어리로 나눈다")
+                .contains("500자")
+                // 규칙 5. 종료 문구를 모델 판단이 아니라 [상태] 줄에 고정한다(axms-ai02-014).
+                .contains("[상태] 줄이 있으면 그 행사가 종료됐다는 사실을 답변에 반드시")
+                .contains("[상태] 줄이 없으면 종료 여부를 판단하거나 언급하지 않는다")
+                // 규칙 6. 톤과 그 예외 — 사실을 추측형으로 흐리지 못하게 막는 문장이 함께 있어야
+                // 규칙 5가 톤 요구에 밀리지 않는다.
+                .contains("다정하고 상냥한 존댓말")
+                .contains("이모지는 쓰지")   // 줄바꿈이 끼므로 문장 전체로 단언하지 않는다
+                .contains("추측형으로 흐리지 않는다")
+                // 규칙 7. 화면이 마크다운을 렌더링하지 않으므로 기호를 쓰면 글자로 노출된다.
+                .contains("마크다운 기호를 쓰지 않는다")
+                .contains("가운뎃점");
 
         String user = request.messages().get(1).content();
         assertThat(user)
@@ -205,6 +219,41 @@ class PublicAnswerComposerTest {
     private static ProductApiContract.Citation citation(String title, String excerpt) {
         return new ProductApiContract.Citation(
                 "506926", title, URI.create("https://api-test.local/documents/506926"),
-                excerpt, 0.71, "축제");
+                excerpt, 0.71, "축제", null, null, null);
+    }
+
+    /** ENDED 근거 블록에는 [상태] 줄이 붙는다 — 규칙 1 아래에서 이 줄이 종료 사실의 유일한 근거다. */
+    @Test
+    void endedEventCarriesAStatusLineInItsGroundingBlock() {
+        AtomicReference<ProviderChatRequest> captured = new AtomicReference<>();
+        PublicAnswerComposer composer = composer(true, Duration.ofSeconds(20), request -> {
+            captured.set(request);
+            return reply("답변");
+        });
+        ProductApiContract.Citation ended = new ProductApiContract.Citation(
+                "506926", "안동국제탈춤페스티벌",
+                URI.create("https://api-test.local/documents/506926"),
+                "[행사기간] 20261003 ~ 20261018\n[개요] 탈춤 공연.", 0.71, "축제",
+                "ENDED", LocalDate.of(2026, 10, 18), null);
+
+        composer.rewrite("탈춤 축제 언제야?", answered(ended));
+
+        assertThat(captured.get().messages().get(1).content())
+                // 하이픈 날짜를 넘기면 규칙 2 때문에 답변에도 그대로 나온다.
+                .contains("[상태] 종료된 행사 (2026년 10월 18일 종료)");
+    }
+
+    /** 종료되지 않은 문서의 블록에는 [상태] 줄이 없다 — 기존 근거 형식이 그대로다. */
+    @Test
+    void nonEndedGroundingBlockStaysUnchanged() {
+        AtomicReference<ProviderChatRequest> captured = new AtomicReference<>();
+        PublicAnswerComposer composer = composer(true, Duration.ofSeconds(20), request -> {
+            captured.set(request);
+            return reply("답변");
+        });
+
+        composer.rewrite("진주남강유등축제 언제 열려?", answered());
+
+        assertThat(captured.get().messages().get(1).content()).doesNotContain("[상태]");
     }
 }

@@ -77,7 +77,19 @@ public final class TourismSampleDocumentLoader {
                 text(node, "text"),
                 List.of(text(node, "category_id"), text(node, "category_label")),
                 URI.create(SOURCE_URL_PREFIX + documentId),
-                updatedAt(node.path("metadata").path("modifiedtime").asText(""), documentId));
+                updatedAt(node.path("metadata").path("modifiedtime").asText(""), documentId),
+                imageUrl(node.path("metadata").path("firstimage").asText("")));
+    }
+
+    /**
+     * 대표 사진 주소. 표본 500건 중 405건에만 있어 없으면 null이다 — 필수 값으로 다루지 않는다.
+     *
+     * <p>스킴이 http/https가 아닌 값은 버린다. source_document의 CHECK와 같은 기준이며,
+     * 여기서 걸러야 적재 단계에서 500건 전체가 실패하지 않는다. 스킴을 추측해 붙이지 않는다.
+     */
+    private static String imageUrl(String value) {
+        String trimmed = value.trim();
+        return trimmed.startsWith("http://") || trimmed.startsWith("https://") ? trimmed : null;
     }
 
     private static String text(JsonNode node, String field) {

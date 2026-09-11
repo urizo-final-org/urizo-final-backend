@@ -57,11 +57,11 @@ class AdminLangfuseObservabilityControllerTest {
         authenticate(AdminRole.SUPER_ADMIN);
         Instant from = Instant.parse(FROM);
         Instant to = Instant.parse(TO);
-        when(service.metrics(FROM, TO)).thenReturn(
+        when(service.metrics(FROM, TO, null)).thenReturn(
                 new LangfuseObservabilityService.MetricsResponse(
                         LangfuseObservabilityService.Availability.AVAILABLE,
                         null, from, to, "local", List.of()));
-        when(service.observations(FROM, TO)).thenReturn(
+        when(service.observations(FROM, TO, null, null, 50, "ALL")).thenReturn(
                 new LangfuseObservabilityService.ObservationsResponse(
                         LangfuseObservabilityService.Availability.AVAILABLE,
                         null, from, to, "local", List.of()));
@@ -85,12 +85,14 @@ class AdminLangfuseObservabilityControllerTest {
     void generalAdminIsForbiddenBeforeTheLangfuseService() throws Exception {
         authenticate(AdminRole.GENERAL_ADMIN);
 
-        mockMvc.perform(get("/api/admin/ai/observability/metrics")
+        for (String endpoint : List.of("metrics", "observations", "scores")) {
+            mockMvc.perform(get("/api/admin/ai/observability/" + endpoint)
                         .queryParam("from", FROM)
                         .queryParam("to", TO)
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error.code").value("FORBIDDEN"));
+        }
 
         verifyNoInteractions(service);
     }
@@ -98,7 +100,7 @@ class AdminLangfuseObservabilityControllerTest {
     @Test
     void invalidRangeHasAStableSafeError() throws Exception {
         authenticate(AdminRole.SUPER_ADMIN);
-        when(service.metrics(FROM, TO)).thenThrow(
+        when(service.metrics(FROM, TO, null)).thenThrow(
                 new IllegalArgumentException("The observability range is invalid."));
 
         mockMvc.perform(get("/api/admin/ai/observability/metrics")
@@ -107,6 +109,31 @@ class AdminLangfuseObservabilityControllerTest {
                         .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error.code").value("INVALID_OBSERVABILITY_RANGE"));
+    }
+
+    @Test
+    void observationQueryPassesJobCursorLimitAndKindAndReturnsNextCursor() throws Exception {
+        authenticate(AdminRole.SUPER_ADMIN);
+        String jobId = ACTOR_ID.toString();
+        when(service.observations(FROM, TO, jobId, "cGFnZTI=", 20, "NODE")).thenReturn(
+                new LangfuseObservabilityService.ObservationsResponse(
+                        LangfuseObservabilityService.Availability.AVAILABLE, null,
+                        Instant.parse(FROM), Instant.parse(TO), "local", List.of(), "cGFnZTM=", 20));
+        mockMvc.perform(get("/api/admin/ai/observability/observations")
+                        .queryParam("from", FROM).queryParam("to", TO).queryParam("jobId", jobId)
+                        .queryParam("cursor", "cGFnZTI=").queryParam("limit", "20").queryParam("kind", "NODE")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.nextCursor").value("cGFnZTM="))
+                .andExpect(jsonPath("$.limit").value(20));
+    }
+
+    @Test
+    void unauthenticatedPageRequestNeverReachesLangfuse() throws Exception {
+        mockMvc.perform(get("/api/admin/ai/observability/observations")
+                        .queryParam("from", FROM).queryParam("to", TO))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(service);
     }
 
     private void authenticate(AdminRole role) {

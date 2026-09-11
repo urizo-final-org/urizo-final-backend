@@ -592,12 +592,25 @@ function Set-PreviewEnvironment {
     # whole point of the preview is the screen the model just changed, and the shared
     # checkout is not that. A backend Job did not change the screen, so it uses the canonical
     # frontend checkout next to the Backend repository.
-    param([string]$FrontendSource)
+    #
+    # BackendSource is the same idea for the Backend half. compose.dev.yaml builds spring-app,
+    # flyway and database from ${AXMS_BACKEND_SOURCE_ROOT:-.}, and the default is the project
+    # directory, which is already right. But this runner is started by bootstrap-dev.ps1 from
+    # inside start-cms-local.ps1's rebuild, which has that variable set to whichever checkout
+    # was rebuilt - and Start-Process hands the whole environment down. Left inherited, a
+    # backend Job's preview would build the main stack's code and offer it as the candidate
+    # nobody wrote. Set here so the preview builds what this command was given, not what the
+    # shell that happened to start the runner was doing.
+    param([string]$FrontendSource, [string]$BackendSource)
 
     $env:AXMS_PREVIEW_NAME = $PreviewProject
     $env:AXMS_PREVIEW_HTTP_PORT = "$PreviewHttpPort"
     $env:AXMS_PREVIEW_DB_PORT = "$PreviewDbPort"
     $env:AXMS_PREVIEW_SECRETS_ROOT = Join-Path (Join-Path $workspaceRoot 'urizo-final-backend') '.local\secrets'
+    # Set even when empty. Leaving an inherited value in place for a caller that passed nothing
+    # is the exact failure this guards against; empty makes Compose fall back to the project
+    # directory, which is the right answer for a caller that named no source.
+    $env:AXMS_BACKEND_SOURCE_ROOT = $BackendSource
     $frontend = if ($FrontendSource) { $FrontendSource } else { Get-RepositorySourcePath -Repository 'frontend' }
     if (-not (Test-Path -LiteralPath $frontend -PathType Container)) {
         throw "RUNNER_REPOSITORY_MISSING|Frontend 미리보기 Source가 없습니다: $frontend"
@@ -607,7 +620,8 @@ function Set-PreviewEnvironment {
 
 function Clear-PreviewEnvironment {
     foreach ($name in 'AXMS_PREVIEW_NAME', 'AXMS_PREVIEW_HTTP_PORT', 'AXMS_PREVIEW_DB_PORT',
-        'AXMS_PREVIEW_SECRETS_ROOT', 'AXMS_PREVIEW_FRONTEND_SOURCE') {
+        'AXMS_PREVIEW_SECRETS_ROOT', 'AXMS_PREVIEW_FRONTEND_SOURCE',
+        'AXMS_BACKEND_SOURCE_ROOT') {
         Remove-Item "Env:$name" -ErrorAction SilentlyContinue
     }
 }
@@ -689,7 +703,13 @@ function Invoke-PreviewUp {
     # Same split as BUILD: the Compose files are Backend files, so the project directory is a
     # Backend checkout even when the Job worked in the frontend.
     if ($repository -eq 'frontend') {
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # The canonical checkout rather than an AI work folder. Nothing changed in the Backend
+        # for a frontend Job, so any Backend checkout would do - but <WorkRoot>\ai-backend is
+        # only ever made by the old CREATE_WORKTREE command, which no product flow runs any
+        # more. It survives here as a stale August copy and is absent under any other WorkRoot,
+        # so a runner started with the team lead's default WorkRoot fails the frontend Job at
+        # BUILD. The canonical path is derived from the same WorkRoot and is always there.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         $frontendSource = $exported
     }
     else {
@@ -704,7 +724,7 @@ function Invoke-PreviewUp {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        Set-PreviewEnvironment -FrontendSource $frontendSource
+        Set-PreviewEnvironment -FrontendSource $frontendSource -BackendSource $backendWorktree
         # 1. Clear anything left behind, including from an abnormal exit.
         & docker compose -p $PreviewProject down 2>&1 | Out-Null
 
@@ -767,8 +787,11 @@ function Invoke-ComposeBuild {
     if ($repository -eq 'frontend') {
         # The Compose files live in the Backend repository, so the project directory stays a
         # Backend checkout no matter which repository is being built. A frontend workspace holds
-        # no compose.dev.yaml and naming it here fails before the build starts.
-        $backendWorktree = Get-AiWorktreePath -Repository 'backend'
+        # no compose.dev.yaml and naming it here fails before the build starts. The canonical
+        # checkout is used rather than <WorkRoot>\ai-backend: see PREVIEW_UP above for why that
+        # folder cannot be relied on. Nothing in the Backend changed for a frontend Job, so the
+        # canonical copy is also the correct one to compose from.
+        $backendWorktree = Get-RepositorySourcePath -Repository 'backend'
         # The image is built from the model's own work when there is any. Falling back to the
         # shared checkout would build a screen nobody changed and call it the candidate.
         $frontendWorktree = if ($exported) { $exported } else { Get-AiWorktreePath -Repository 'frontend' }
@@ -792,7 +815,7 @@ function Invoke-ComposeBuild {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        Set-PreviewEnvironment -FrontendSource $frontendWorktree
+        Set-PreviewEnvironment -FrontendSource $frontendWorktree -BackendSource $backendWorktree
         $output = & docker @arguments 2>&1
     }
     finally {
@@ -1179,14 +1202,22 @@ function Invoke-CheckDevMerge {
     $head = Get-PayloadValue -Payload $Payload -Name 'head'
     $headSha = Get-PayloadValue -Payload $Payload -Name 'headSha'
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
-    if ($repository -ne 'backend' -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
+    # Either published repository may be checked for its dev merge; the Backend decided
+    # which ones can deploy, the runner only refuses a name it does not know.
+    if ($repository -notin @('backend', 'frontend') -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
             -or $head -notmatch '^system/llmops-[a-z0-9][a-z0-9-]*$' `
             -or $headSha -notmatch '^sha1:[0-9a-f]{40}$' `
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$') {
         throw 'RUNNER_PAYLOAD_INVALID|dev merge 확인 payload 가 올바르지 않습니다.'
     }
-    $worktree = Get-AiWorktreePath -Repository $repository
-    $slug = Get-RemoteSlug -Worktree $worktree
+    # The pull request lives on the canonical repository's origin. Reading the slug there
+    # (as the deploy worktree does) means the check does not depend on a Job worktree that
+    # may already have been cleaned up by the time the merge is confirmed.
+    $source = Get-RepositorySourcePath -Repository $repository
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw "RUNNER_DEPLOY_BLOCKED|$repository canonical 저장소를 찾을 수 없습니다."
+    }
+    $slug = Get-RemoteSlug -Worktree $source
     $raw = & gh pr view ([int]$prNumber) --repo $slug `
         --json number,url,state,baseRefName,headRefName,headRefOid,mergeCommit 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -1232,12 +1263,15 @@ function Invoke-CheckDevMerge {
 }
 
 function Get-MergedDeployWorktree {
-    param([Parameter(Mandatory = $true)][string]$MergeSha)
+    param(
+        [Parameter(Mandatory = $true)][string]$Repository,
+        [Parameter(Mandatory = $true)][string]$MergeSha
+    )
 
     $rawMergeSha = $MergeSha.Substring('sha1:'.Length)
-    $source = Get-RepositorySourcePath -Repository 'backend'
+    $source = Get-RepositorySourcePath -Repository $Repository
     if (-not (Test-Path -LiteralPath $source -PathType Container)) {
-        throw 'RUNNER_DEPLOY_BLOCKED|Backend canonical 저장소를 찾을 수 없습니다.'
+        throw "RUNNER_DEPLOY_BLOCKED|$Repository canonical 저장소를 찾을 수 없습니다."
     }
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -1267,7 +1301,7 @@ function Get-MergedDeployWorktree {
     }
 
     $resolvedWorkRoot = [IO.Path]::GetFullPath($WorkRoot)
-    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot 'deploy-backend'))
+    $target = [IO.Path]::GetFullPath((Join-Path $resolvedWorkRoot "deploy-$Repository"))
     $prefix = $resolvedWorkRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) `
         + [IO.Path]::DirectorySeparatorChar
     if (-not $target.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -1318,7 +1352,10 @@ function Invoke-LocalDockerComposeDeployment {
     $candidateSha = Get-PayloadValue -Payload $Payload -Name 'candidateSha'
     $mergeSha = Get-PayloadValue -Payload $Payload -Name 'mergeSha'
     $validationHash = Get-PayloadValue -Payload $Payload -Name 'validationHash'
-    if ($repository -ne 'backend' `
+    # One fixed Compose service per repository. The Backend adapter chose the target; the
+    # runner only translates the repository it already knows into that service.
+    $targets = @{ backend = 'full:backend:spring-app'; frontend = 'full:frontend:frontend' }
+    if (-not $targets.ContainsKey("$repository") `
             -or $deploymentRequestId -notmatch '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' `
             -or "$prNumber" -notmatch '^[1-9][0-9]*$' `
             -or $candidateSha -notmatch '^sha1:[0-9a-f]{40}$' `
@@ -1326,22 +1363,40 @@ function Invoke-LocalDockerComposeDeployment {
             -or $validationHash -notmatch '^sha256:[0-9a-f]{64}$') {
         throw 'RUNNER_PAYLOAD_INVALID|고정 로컬 배포의 승인 증거가 올바르지 않습니다.'
     }
-    $sourceRoot = Get-MergedDeployWorktree -MergeSha $mergeSha
-    $masterScript = Join-Path (Split-Path -Parent $repositoryRoot) `
-        'urizo-final-master\scripts\rebuild-local-service.ps1'
+    $sourceRoot = Get-MergedDeployWorktree -Repository $repository -MergeSha $mergeSha
+    # The Master wrapper sits beside the canonical repositories under the workspace root, which
+    # is where WorkRoot already points; deriving it from this script's own repository would
+    # break as soon as the runner is started from a worktree.
+    $masterScript = Join-Path $workspaceRoot 'urizo-final-master\scripts\rebuild-local-service.ps1'
     if (-not (Test-Path -LiteralPath $masterScript -PathType Leaf)) {
         throw 'RUNNER_DEPLOY_BLOCKED|고정 배포 스크립트를 찾을 수 없습니다.'
     }
-    $previous = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try {
-        $output = & $masterScript -Service spring-app -Profile full `
-            -SourceRoot $sourceRoot -ApproveLocalMutation -ApproveNetwork 2>&1
-        $exit = $LASTEXITCODE
-    }
-    finally { $ErrorActionPreference = $previous }
-    if ($exit -ne 0) {
-        $detail = "$(($output | Select-Object -Last 4) -join ' ')"
+    $service = @{ backend = 'spring-app'; frontend = 'frontend' }["$repository"]
+    # A child process, not an in-process call under 2>&1. The Master script runs with
+    # $ErrorActionPreference = 'Stop', and Windows PowerShell 5.1 turns every native stderr
+    # line that passes through a redirection into an ErrorRecord. Compose reports build
+    # progress on stderr, so its first line (" Image ... Building ") became a terminating
+    # error and Job 7c5af098 was marked blocked ten seconds after a build that had completed.
+    # The whole transcript stays on disk for the next diagnosis; the report carries its tail.
+    $logRoot = Join-Path (Split-Path -Parent $PSScriptRoot) '.local\runner'
+    New-Item -ItemType Directory -Force -Path $logRoot | Out-Null
+    $stdoutLog = Join-Path $logRoot "deploy-$deploymentRequestId.stdout.log"
+    $stderrLog = Join-Path $logRoot "deploy-$deploymentRequestId.stderr.log"
+    $process = Start-Process -FilePath 'powershell.exe' -NoNewWindow -Wait -PassThru `
+        -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-File', "`"$masterScript`"",
+            '-Service', $service, '-Profile', 'full',
+            '-SourceRoot', "`"$sourceRoot`"",
+            '-ApproveLocalMutation', '-ApproveNetwork')
+    if ($process.ExitCode -ne 0) {
+        $tail = @(Get-Content -LiteralPath $stderrLog -ErrorAction SilentlyContinue |
+            Where-Object { "$_".Trim() } | Select-Object -Last 4)
+        if ($tail.Count -eq 0) {
+            $tail = @(Get-Content -LiteralPath $stdoutLog -ErrorAction SilentlyContinue |
+                Where-Object { "$_".Trim() } | Select-Object -Last 4)
+        }
+        $detail = "$($tail -join ' ') (exit $($process.ExitCode); log: $stderrLog)"
         if (Test-NetworkFailure -Detail $detail) {
             throw "RUNNER_DEPLOY_TRANSIENT|로컬 Compose 배포 일시 실패: $detail"
         }
@@ -1349,7 +1404,7 @@ function Invoke-LocalDockerComposeDeployment {
     }
     return @{
         adapter = 'local-docker-compose'
-        target = 'full:backend:spring-app'
+        target = $targets["$repository"]
         sourceSha = $mergeSha
         status = 'COMPLETED'
     }

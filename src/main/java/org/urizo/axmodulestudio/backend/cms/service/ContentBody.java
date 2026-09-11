@@ -20,7 +20,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * <p>저장 입구는 {@link #problem}으로 막는다. 허용한 부품만 통과하며, 이것이 마크다운 3문법
  * 제한을 대신하는 가드레일이다. 사람이 쓰든 모델이 쓰든 같은 검사를 탄다.
  *
- * <p>게시물은 이 클래스를 쓰지 않는다. 마크다운과 {@code RichText}를 그대로 유지한다.
+ * <p>게시물도 같은 문서를 사용하며 옛 마크다운은 조회 시 호환 변환한다.
  */
 public final class ContentBody {
 
@@ -29,7 +29,7 @@ public final class ContentBody {
     /** 사용자 화면 렌더러가 그릴 수 있는 부품. 목록에 없으면 저장을 막는다. */
     private static final Set<String> NODES = Set.of(
             "doc", "paragraph", "heading", "bulletList", "orderedList", "listItem",
-            "text", "image", "hardBreak");
+            "text", "image", "hardBreak", "blockquote", "horizontalRule");
 
     /**
      * 글자에 붙는 서식. 속성이 없어 이름만 확인하면 된다.
@@ -40,7 +40,22 @@ public final class ContentBody {
      * <p>인라인 코드는 열지 않는다. 이 사이트의 컨텐츠에 명령어나 함수 이름을 쓸 일이 없다.
      */
     private static final Set<String> MARKS = Set.of(
-            "bold", "italic", "link", "strike", "underline");
+            "bold", "italic", "link", "strike", "underline", "textStyle", "highlight");
+
+    /**
+     * 본문에 쓸 수 있는 색.
+     *
+     * <p>**고정 목록으로 둔다.** 색을 자유롭게 받으면 임의의 CSS 값이 본문에 들어오고, 그것이
+     * 안전한지 판단할 방법이 없다. 허용 목록을 두는 의미가 사라진다.
+     *
+     * <p>Frontend `features/site/contentPalette.ts`가 같은 값을 들고 있다. 저장소가 갈려 있어
+     * 한 벌을 공유할 수 없으므로 한쪽을 고치면 다른 쪽도 고친다.
+     */
+    private static final Set<String> TEXT_COLORS = Set.of(
+            "#6b7d84", "#c0392b", "#1d6fb8", "#2a7d55", "#c1701a");
+
+    private static final Set<String> HIGHLIGHT_COLORS = Set.of(
+            "#fff3a3", "#d5f2dd", "#d8ecfb", "#fbdce8", "#e6ebed");
 
     /** 사이트 본문이 그리는 제목 단계. 문서 제목은 별도 필드라 1단계는 쓰지 않는다. */
     private static final Set<Integer> HEADING_LEVELS = Set.of(2, 3);
@@ -54,6 +69,26 @@ public final class ContentBody {
     private static final Pattern BOLD = Pattern.compile("\\*\\*([^*]+)\\*\\*");
 
     private ContentBody() {
+    }
+
+    /** Call only after problem() has accepted the document. */
+    public static Set<Long> imageIds(String body) {
+        Set<Long> ids = new java.util.HashSet<>();
+        collectImages(parse(body), ids);
+        return ids;
+    }
+
+    private static void collectImages(JsonNode node, Set<Long> ids) {
+        if (node == null) return;
+        if ("image".equals(node.path("type").asText())) {
+            String src = node.path("attrs").path("src").asText();
+            try {
+                ids.add(Long.parseLong(src.substring(src.lastIndexOf('/') + 1)));
+            } catch (NumberFormatException failure) {
+                throw CmsServiceException.invalidRequest("이미지 ID가 올바르지 않습니다.");
+            }
+        }
+        for (JsonNode child : node.path("content")) collectImages(child, ids);
     }
 
     /**
@@ -141,6 +176,19 @@ public final class ContentBody {
         }
     }
 
+    /**
+     * 색 속성이 팔레트 안에 있는지.
+     *
+     * @param optional 색이 없어도 되는지. {@code textStyle}은 색 말고 다른 속성만 담고 올 수 있다.
+     */
+    private static boolean allowedColor(JsonNode mark, Set<String> palette, boolean optional) {
+        JsonNode color = mark.path("attrs").path("color");
+        if (color.isMissingNode() || color.isNull()) {
+            return optional;
+        }
+        return color.isTextual() && palette.contains(color.textValue());
+    }
+
     /** 부품을 하나씩 내려가며 확인한다. 처음 걸린 사유 하나만 돌려준다. */
     private static String walk(JsonNode node) {
         String type = node.path("type").asText();
@@ -163,6 +211,13 @@ public final class ContentBody {
             if ("link".equals(markType)
                     && !LINK_HREF.matcher(mark.path("attrs").path("href").asText()).matches()) {
                 return "링크 주소가 올바르지 않습니다.";
+            }
+            // 색은 정해 둔 것만 받는다. `textStyle`은 색 없이 올 수도 있어 있을 때만 본다.
+            if ("textStyle".equals(markType) && !allowedColor(mark, TEXT_COLORS, true)) {
+                return "글자색은 고를 수 있는 색만 쓸 수 있습니다.";
+            }
+            if ("highlight".equals(markType) && !allowedColor(mark, HIGHLIGHT_COLORS, false)) {
+                return "형광펜은 고를 수 있는 색만 쓸 수 있습니다.";
             }
         }
         for (JsonNode child : node.path("content")) {

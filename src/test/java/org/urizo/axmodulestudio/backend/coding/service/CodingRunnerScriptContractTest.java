@@ -29,6 +29,7 @@ class CodingRunnerScriptContractTest {
                 .contains("'CHECK_DEV_MERGE'")
                 .contains("function Invoke-LocalDockerComposeDeployment")
                 .contains("-Service spring-app -Profile full")
+                .contains("-Service frontend -Profile full")
                 .contains("'DEPLOY_LOCAL_COMPOSE'")
                 .doesNotContain("Invoke-Expression")
                 .doesNotContain("deployedPort");

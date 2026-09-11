@@ -76,7 +76,7 @@ class LangfuseObservabilityServiceTest {
             assertSafeRequest(endpoint, headers);
             assertThat(URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8))
                     .contains("fields=core,basic,metadata,model,usage,metrics")
-                    .contains("environment=local")
+                    .contains("\"column\":\"environment\",\"operator\":\"=\",\"value\":\"local\"")
                     .doesNotContain("fields=io", "prompt");
             return new LangfuseHttpTransport.Response(200, """
                     {"data":[{
@@ -537,6 +537,92 @@ class LangfuseObservabilityServiceTest {
 
         assertLangfusePassthrough(springApp);
         assertLangfusePassthrough(codingRuntime);
+    }
+
+    @Test
+    void pagesFilteredJobsAndKindsUpstreamAndIsolatesTheCache() {
+        String jobId = "aaaaaaaa-1111-4111-8111-111111111111";
+        AtomicInteger calls = new AtomicInteger();
+        LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {
+            calls.incrementAndGet();
+            assertSafeRequest(endpoint, headers);
+            String query = URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8);
+            assertThat(query).contains("limit=20", "\"key\":\"jobId\"", jobId,
+                    "\"column\":\"environment\"", "\"value\":\"local\"",
+                    "\"operator\":\">=\",\"value\":\"" + FROM,
+                    "\"operator\":\"<\",\"value\":\"" + TO);
+            boolean secondPage = query.contains("cursor=cGFnZTI=");
+            boolean provider = query.contains("[\"axms.model\"]");
+            assertThat(query).contains(provider ? "axms.model" : "axms.node");
+            return new LangfuseHttpTransport.Response(200, """
+                    {"data":[{"id":"%s","traceId":"trace-1","type":"SPAN",
+                      "name":"%s","environment":"local","startTime":"2026-09-01T01:00:00Z",
+                      "metadata":{"jobId":"%s"}}],"meta":{"cursor":%s}}
+                    """.formatted(secondPage ? "older" : "newer", provider ? "axms.model" : "axms.node",
+                            jobId, secondPage ? "null" : "\"cGFnZTI=\""));
+        };
+        LangfuseObservabilityService service = service(configured(), transport);
+        var first = service.observations(FROM, TO, " " + jobId.toUpperCase() + " ", null, 20, "NODE");
+        assertThat(first.nextCursor()).isEqualTo("cGFnZTI=");
+        assertThat(first.limit()).isEqualTo(20);
+        assertThat(first.observations()).extracting(LangfuseObservabilityService.ObservationRow::id)
+                .containsExactly("newer");
+        assertThat(service.observations(FROM, TO, jobId, null, 20, "NODE")).isSameAs(first);
+        var second = service.observations(FROM, TO, jobId, first.nextCursor(), 20, "NODE");
+        assertThat(second.nextCursor()).isNull();
+        assertThat(second.observations()).extracting(LangfuseObservabilityService.ObservationRow::id)
+                .containsExactly("older");
+        service.observations(FROM, TO, jobId, null, 20, "PROVIDER");
+        assertThat(calls).hasValue(3);
+    }
+
+    @Test
+    void metricsUseTheSameJobFilterAndDifferentJobsDoNotShareCache() {
+        AtomicInteger calls = new AtomicInteger();
+        LangfuseObservabilityService service = service(configured(), (endpoint, headers, timeout, maximum) -> {
+            calls.incrementAndGet();
+            String query = URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8);
+            assertThat(query).contains("\"type\":\"stringObject\",\"column\":\"metadata\",\"key\":\"jobId\"");
+            return new LangfuseHttpTransport.Response(200, "{\"data\":[]}");
+        });
+        String firstJob = "11111111-1111-4111-8111-111111111111";
+        service.metrics(FROM, TO, firstJob);
+        service.metrics(FROM, TO, firstJob);
+        service.metrics(FROM, TO, "22222222-2222-4222-8222-222222222222");
+        assertThat(calls).hasValue(2);
+    }
+
+    @Test
+    void invalidPageInputsAreRejectedBeforeUpstream() {
+        LangfuseObservabilityService service = service(configured(), (endpoint, headers, timeout, maximum) -> {
+            throw new AssertionError("invalid input must not reach upstream");
+        });
+        assertThatThrownBy(() -> service.observations(FROM, TO, "partial", null, 50, "NODE"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.metrics(FROM, TO, "partial"))
+                .isInstanceOf(IllegalArgumentException.class);
+        for (String cursor : new String[]{"bad&environment=prod", " ", "a".repeat(2049)}) {
+            assertThatThrownBy(() -> service.observations(FROM, TO, null, cursor, 50, "NODE"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        for (int limit : new int[]{0, 51}) {
+            assertThatThrownBy(() -> service.observations(FROM, TO, null, null, limit, "NODE"))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> service.observations(FROM, TO, null, null, 50, "CUSTOM"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void malformedOrRepeatingUpstreamCursorIsUnavailableAndCannotAdvance() {
+        for (String cursor : new String[]{"\"bad&query\"", "123", "\"\"", "\"cGFnZTI=\""}) {
+            LangfuseObservabilityService service = service(configured(), (endpoint, headers, timeout, maximum) ->
+                    new LangfuseHttpTransport.Response(200, "{\"data\":[],\"meta\":{\"cursor\":" + cursor + "}}"));
+            var response = service.observations(FROM, TO, null, "cGFnZTI=", 20, "NODE");
+            assertThat(response.status()).isEqualTo(LangfuseObservabilityService.Availability.UNAVAILABLE);
+            assertThat(response.nextCursor()).isNull();
+            assertThat(response.limit()).isEqualTo(20);
+        }
     }
 
     private static LangfuseProperties configured() {

@@ -38,6 +38,26 @@ public class CmsPostEntity {
     @Column(name = "body", nullable = false, columnDefinition = "text")
     private String body;
 
+    @Column(name = "thumbnail_image_id")
+    private Long thumbnailImageId;
+    @Column(name = "thumbnail_alt", nullable = false, length = 200)
+    private String thumbnailAlt = "";
+    @Column(name = "region_code_id")
+    private Long regionCodeId;
+    @Column(name = "category_code_id")
+    private Long categoryCodeId;
+
+    public Long getThumbnailImageId() { return thumbnailImageId; }
+    public String getThumbnailAlt() { return thumbnailAlt; }
+    public Long getRegionCodeId() { return regionCodeId; }
+    public Long getCategoryCodeId() { return categoryCodeId; }
+    public void changeOptions(Long thumbnailImageId, String thumbnailAlt, Long regionCodeId, Long categoryCodeId) {
+        this.thumbnailImageId = thumbnailImageId;
+        this.thumbnailAlt = thumbnailAlt;
+        this.regionCodeId = regionCodeId;
+        this.categoryCodeId = categoryCodeId;
+    }
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

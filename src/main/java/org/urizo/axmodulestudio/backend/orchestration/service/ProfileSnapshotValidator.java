@@ -50,7 +50,7 @@ final class ProfileSnapshotValidator {
     private static final Set<String> EMPTY_CONFIG_HANDLERS = Set.of(
             "common.start", "common.check", "common.end",
             "coding.analyze", "coding.code", "coding.review", "coding.preview",
-            "coding.pr_request", "coding.pr_complete", "coding.dev_merge_check", "coding.deploy",
+            "coding.pr_request", "coding.dev_merge_check", "coding.deploy",
             "cms.analyze", "cms.preview", "cms.discard", "cms.apply");
     private static final Set<String> CODING_APPROVAL_STAGES =
             Set.of("SCOPE", "CANDIDATE", "GITHUB", "CMS", "DEPLOY");
@@ -78,7 +78,7 @@ final class ProfileSnapshotValidator {
             handler("coding.approval", "approval", "approved"),
             handler("coding.preview_approval", "approval", "approved", "rejected"),
             handler("coding.pr_request", "tool", "requested"),
-            handler("coding.pr_complete", "tool", "completed"),
+            handler("coding.pr_complete", "tool", "completed", "closed"),
             handler("coding.dev_merge_check", "check", "merged", "not_merged", "blocked"),
             handler("coding.deploy_request", "tool", "recorded"),
             handler("coding.deploy", "tool", "completed", "blocked"),
@@ -337,6 +337,15 @@ final class ProfileSnapshotValidator {
             requirePortLeadsTo(changeApproval, "approved", prRequest, byId, edges);
             requirePortCannotBypass(changeApproval, "rejected", prRequest, byId, edges);
             requirePortLeadsTo(githubApproval, "approved", prComplete, byId, edges);
+            if (prComplete.resultPorts().contains("closed")) {
+                Node end = nodes.stream().filter(node -> "end".equals(node.type()))
+                        .findFirst().orElseThrow();
+                if (edges.stream().noneMatch(edge -> edge.from().equals(prComplete.id())
+                        && "closed".equals(edge.resultPort()) && edge.to().equals(end.id()))) {
+                    invalid("coding.pr_complete closed result must route directly to end");
+                }
+                requirePortLeadsTo(prComplete, "completed", deployRequest, byId, edges);
+            }
             requirePortLeadsTo(deployApproval, "approved", mergeCheck, byId, edges);
         }
         else {
@@ -471,7 +480,10 @@ final class ProfileSnapshotValidator {
                 invalid("node.handlerKey is not registered for this Profile");
             }
             Set<String> ports = stringSet(node.get("resultPorts"), RESULT_PORT, "node.resultPorts");
-            if (!ports.equals(contract.resultPorts())) {
+            boolean legacyPrCompletion = "coding.pr_complete".equals(handlerKey)
+                    && node.path("config").isObject() && node.path("config").isEmpty();
+            Set<String> expectedPorts = legacyPrCompletion ? Set.of("completed") : contract.resultPorts();
+            if (!ports.equals(expectedPorts)) {
                 invalid("node.resultPorts do not match the registered Handler");
             }
             ObjectNode nodeConfig = object(node.get("config"), "node.config");
@@ -483,6 +495,11 @@ final class ProfileSnapshotValidator {
     }
 
     private static void validateHandlerConfig(String handlerKey, ObjectNode config) {
+        if ("coding.pr_complete".equals(handlerKey) && !config.isEmpty()
+                && (config.size() != 1
+                    || !"deployment-capability".equals(config.path("completionMode").asText()))) {
+            invalid("coding.pr_complete config is invalid");
+        }
         if ("common.approval".equals(handlerKey)) {
             invalid("common.approval is unavailable without a Backend approval authority");
         }

@@ -212,7 +212,7 @@ final class CodingApprovalReadiness {
                   AND handler_key = 'coding.deploy_request'
                   AND result_type = 'DEPLOY_REQUEST'
                   AND result_port = 'recorded'
-                  AND payload ? 'deploymentRequestId'
+                  AND jsonb_exists(payload, 'deploymentRequestId')
                 ORDER BY recorded_at DESC, result_id DESC
                 LIMIT 1
                 """);

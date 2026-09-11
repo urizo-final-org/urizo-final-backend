@@ -36,6 +36,21 @@ class TourismSampleDocumentLoaderTest {
                         .startsWith("https://api-test.local/documents/"));
     }
 
+    /**
+     * 사진은 있는 문서에만 있다. 건수를 계약으로 박아 두면 fixture가 조용히 바뀌었을 때 드러난다.
+     */
+    @Test
+    void carriesTheSourcePhotoOnlyForDocumentsThatHaveOne() {
+        List<ProductApiContract.PreviewDocument> withPhoto = TourismSampleDocumentLoader.documents()
+                .stream().filter(document -> document.imageUrl() != null).toList();
+
+        assertThat(withPhoto).hasSize(405);
+        // 스킴은 원천 값 그대로다 — http가 섞여 있고 https로 바꿔 적지 않는다.
+        assertThat(withPhoto).allSatisfy(document -> assertThat(document.imageUrl())
+                .matches("^https?://.+")
+                .hasSizeLessThanOrEqualTo(500));
+    }
+
     @Test
     void carriesCategoryCodeAndLabelForLaterFiltering() {
         ProductApiContract.PreviewDocument document = TourismSampleDocumentLoader.documents().get(0);

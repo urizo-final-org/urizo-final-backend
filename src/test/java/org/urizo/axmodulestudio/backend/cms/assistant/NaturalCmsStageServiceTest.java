@@ -104,8 +104,8 @@ class NaturalCmsStageServiceTest {
                                  "heroButtonUrl":null,"active":true,
                                  "updatedAt":"2026-08-30T08:00:00Z"}
                                 """),
-                        Set.of("layout", "primaryColor", "siteName", "headerText",
-                                "footerText", "heroImageUrl", "heroTitle", "heroSubtitle",
+                        Set.of("layout", "primaryColor", "headerText",
+                                "footerText", "heroImages", "heroTitle", "heroSubtitle",
                                 "heroButtonLabel", "heroButtonUrl")));
 
         for (PromptCase promptCase : cases) {
@@ -117,6 +117,8 @@ class NaturalCmsStageServiceTest {
             when(harness.models.executeNaturalCms(any(), any())).thenReturn(
                     toolResponse("validate_cms_command", command));
             when(harness.resources.validateCommand(eq(promptCase.resource()), any()))
+                    .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+            when(harness.resources.validateCommand(eq(promptCase.resource()), any(), any()))
                     .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
             stubPreviewTools(harness, promptCase.currentState());
 
@@ -336,6 +338,32 @@ class NaturalCmsStageServiceTest {
         verify(harness.mcp).callTool(eq("revalidate_cms_preview"), any());
         verify(harness.mcp).callTool(eq("apply_cms_preview"), any());
         verify(harness.resources).apply(RESOURCE, command, ACTOR);
+    }
+
+    @Test
+    void templateApplyUsesTheSavedPreviewInsideTheAtomicStoreBoundary() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        var resource = new NaturalCmsContract.ResourceRef("TEMPLATE", "CLASSIC");
+        var command = mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":{\"heroImages\":[]}}");
+        ObjectNode before = mapper.createObjectNode().put("id", "CLASSIC");
+        ObjectNode preview = mapper.createObjectNode().put("previewId", PREVIEW.toString()).put("previewHash", PREVIEW_HASH);
+        preview.set("resource", mapper.valueToTree(resource)); preview.set("command", command); preview.set("before", before);
+        var job = new NaturalCmsContract.JobResponse("1.0", JOB, TRACE, PROFILE, 1, 1, "WAITING_APPROVAL",
+                "사진 연결 해제", resource, command, PREVIEW, PREVIEW_HASH, true, "APPROVED", null, NOW, NOW, preview);
+        Harness harness = new Harness(job);
+        when(harness.resources.validateCommand(resource, command, job.requestText())).thenReturn(command);
+        when(harness.resources.snapshot(resource)).thenReturn(before);
+        when(harness.mcp.callTool(eq("revalidate_cms_preview"), any())).thenReturn(structured(mapper.createObjectNode().put("valid", true)));
+        ObjectNode ready = mapper.createObjectNode().put("applyReady", true); ready.set("command", command);
+        when(harness.mcp.callTool(eq("apply_cms_preview"), any())).thenReturn(structured(ready));
+        when(harness.resources.applyApprovedTemplate(resource, command, ACTOR, job.requestText(), before)).thenReturn(before);
+        assertThat(harness.service.execute("Bearer worker", JOB, 1, RESULT, stageRequest("cms.apply", RESULT)).resultPort()).isEqualTo("applied");
+        verify(harness.resources).applyApprovedTemplate(resource, command, ACTOR, job.requestText(), before);
+        verify(harness.resources, never()).apply(any(), any(), any());
+        preview.put("previewHash", "tampered");
+        assertThat(job.preview().path("previewHash").asText()).isEqualTo(PREVIEW_HASH);
+        ((ObjectNode) job.preview()).put("previewHash", "tampered again");
+        assertThat(job.preview().path("previewHash").asText()).isEqualTo(PREVIEW_HASH);
     }
 
     @Test

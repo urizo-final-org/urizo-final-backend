@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageBytes;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentImageView;
@@ -187,6 +188,18 @@ public class CmsService {
     public ContentImageBytes contentImage(long id) {
         return repository.findContentImage(id)
                 .orElseThrow(() -> notFound("이미지를 찾을 수 없습니다."));
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
+    public boolean contentImageExists(long id) {
+        return repository.contentImageExists(id);
+    }
+
+    /** 승인 상태 재확인과 저장 사이에 수동 수정이 끼어들지 않게 같은 트랜잭션에서 잠근다. */
+    @Transactional(transactionManager = "authJpaTransactionManager", propagation = Propagation.MANDATORY)
+    public TemplateView templateForUpdate(String key) {
+        return repository.findTemplateForUpdate(key)
+                .orElseThrow(() -> notFound("템플릿을 찾을 수 없습니다."));
     }
 
     /** 파일 앞부분 바이트로 실제 형식을 가린다. 목록에 없으면 {@code null}이다. */

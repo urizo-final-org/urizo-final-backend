@@ -232,6 +232,10 @@ public class CmsRepository {
         return templateRepository.findById(key).map(CmsRepository::template);
     }
 
+    public Optional<TemplateView> findTemplateForUpdate(String key) {
+        return templateRepository.findForUpdate(key).map(CmsRepository::template);
+    }
+
     public boolean templateExists(String key) {
         return templateRepository.existsById(key);
     }

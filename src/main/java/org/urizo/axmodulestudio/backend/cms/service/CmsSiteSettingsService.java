@@ -99,7 +99,7 @@ public class CmsSiteSettingsService {
                 template.key(), template.layout(), template.primaryColor(),
                 site.name(), template.headerText(), template.footerText(), template.heroImageUrl(),
                 template.heroTitle(), template.heroSubtitle(), template.heroButtonLabel(),
-                template.heroButtonUrl(), template.active(), template.updatedAt());
+                template.heroButtonUrl(), template.active(), template.updatedAt(), template.heroImageUrls(), template.heroImages());
         return new PublicSiteView(site.key(), site.name(), site.publicPath(), presentation);
     }
 

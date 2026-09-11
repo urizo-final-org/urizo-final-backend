@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.dto;
 
+import java.util.List;
+
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -65,11 +67,25 @@ public final class CmsRequests {
             @NotBlank @Size(max = 100) String siteName,
             @Size(max = 200) String headerText,
             @Size(max = 200) String footerText,
-            @NotBlank @Size(max = 500) String heroImageUrl,
+            @Size(max = 500) String heroImageUrl,
             @NotBlank @Size(max = 160) String heroTitle,
             @Size(max = 300) String heroSubtitle,
             @Size(max = 60) String heroButtonLabel,
-            @Size(max = 180) String heroButtonUrl) {
+            @Size(max = 180) String heroButtonUrl,
+            @Size(max = 5) List<@NotBlank @Size(max = 500) String> heroImageUrls,
+            @Size(max = 5) List<@jakarta.validation.Valid @jakarta.validation.constraints.NotNull TemplateHeroImage> heroImages) {
+        public TemplateRequest(String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl, List<String> heroImageUrls) {
+            this(layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, heroImageUrls, null);
+        }
+        public TemplateRequest(String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl) {
+            this(layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, null);
+        }
     }
 
     public record SiteSettingsRequest(

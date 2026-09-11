@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.dto;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 public final class CmsResponses {
@@ -95,7 +96,34 @@ public final class CmsResponses {
             String heroButtonLabel,
             String heroButtonUrl,
             boolean active,
-            Instant updatedAt) {
+            Instant updatedAt,
+            List<String> heroImageUrls, List<TemplateHeroImage> heroImages) {
+        public TemplateView {
+            heroImageUrls = heroImageUrls == null
+                    ? (heroImageUrl == null || heroImageUrl.isBlank() ? List.of() : List.of(heroImageUrl))
+                    : List.copyOf(heroImageUrls);
+            heroImages = heroImages == null
+                    ? heroImageUrls.stream().map(url -> new TemplateHeroImage(url, "", "")).toList()
+                    : List.copyOf(heroImages);
+            heroImageUrls = heroImages.stream().map(TemplateHeroImage::url).toList();
+            heroImageUrl = heroImageUrls.isEmpty() ? "" : heroImageUrls.get(0);
+        }
+
+        public TemplateView(String key, String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl,
+                boolean active, Instant updatedAt, List<String> heroImageUrls) {
+            this(key, layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, active, updatedAt, heroImageUrls, null);
+        }
+
+        public TemplateView(String key, String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl,
+                boolean active, Instant updatedAt) {
+            this(key, layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, active, updatedAt, null);
+        }
     }
 
     public record SiteSettingsView(

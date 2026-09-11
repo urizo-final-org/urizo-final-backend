@@ -44,6 +44,7 @@ TABLES = {k: 'cms_' + v for k, v in {
 REF_KIND = {'thumbnailImageId':'image', 'regionCodeId':'code', 'categoryCodeId':'code', 'parentId':'menu'}
 KEY_FIELD = {'group':'key', 'template':'key', 'site':'key'}
 META = ('_authorId', '_createdAt', '_updatedAt', '_deleted', '_deletedAt', '_active', '_default', '_byteSize')
+TEMPLATE_IMAGE_FIELDS = tuple(n for n in FIELDS['template'] if n not in ('siteName','heroImageUrl')) + ('heroImages',)
 
 
 class Blocked(Exception):
@@ -67,8 +68,8 @@ def identity(kind, row):
     return row[KEY_FIELD.get(kind, 'id')]
 
 
-def project(kind, row):
-    return {name: row.get(name) for name in FIELDS[kind]}
+def project(kind, row, names=None):
+    return {name: row.get(name) for name in (FIELDS[kind] if names is None else names)}
 
 
 def save_json(path, value):
@@ -105,7 +106,8 @@ def exclusive(directory):
 
 def load_package(directory):
     package = read_json(directory / 'manifest.json')
-    require(isinstance(package, dict) and package.get('schemaVersion') == 1, 'Unsupported manifest.')
+    require(isinstance(package, dict) and package.get('schemaVersion') in (1,2), 'Unsupported manifest.')
+    image_templates = package['schemaVersion'] == 2
     require(re.fullmatch(r'[a-z0-9-]{1,60}', package.get('packageId', '')), 'Invalid package ID.')
     require(re.fullmatch(r'[0-9]{17}', package.get('minimumFlyway', '')), 'Invalid Flyway requirement.')
     items = package.get('items', [])
@@ -116,6 +118,7 @@ def load_package(directory):
         require(isinstance(key, str) and re.fullmatch(r'[A-Za-z0-9_:/-]{1,240}', key), 'Invalid item key.')
         require(key not in by_key and kind in FIELDS, 'Duplicate key or unapproved resource kind.')
         by_key[key] = item
+        require(not image_templates or kind in ('image','template'), 'Template package cannot change other resources.')
         if kind == 'image':
             require(set(item) == {'key','kind','file','sha256','contentType'}, 'Invalid image fields.')
             name = item['file']
@@ -128,7 +131,29 @@ def load_package(directory):
         else:
             extras = {'groupKey'} if kind == 'code' else {'boardRef'} if kind == 'post' else set()
             require(set(item) == {'key','kind','fields'} | extras, 'Unapproved manifest metadata: ' + key)
-            require(set(item['fields']) == set(FIELDS[kind]), 'Unapproved business fields: ' + key)
+            expected = TEMPLATE_IMAGE_FIELDS if image_templates and kind=='template' else FIELDS[kind]
+            require(set(item['fields']) == set(expected), 'Unapproved business fields: ' + key)
+            if image_templates and kind=='template':
+                fields = item['fields']
+                require(fields['layout'] in ('CLASSIC','BOLD','MINIMAL') and
+                        isinstance(fields['primaryColor'],str) and re.fullmatch(r'#[0-9A-F]{6}',fields['primaryColor']),
+                        'Invalid template layout/color: '+key)
+                for name,limit in (('headerText',200),('footerText',200),('heroTitle',160),
+                                   ('heroSubtitle',300),('heroButtonLabel',60),('heroButtonUrl',180)):
+                    value = fields[name]
+                    require(isinstance(value,str) and len(value.encode('utf-16-le'))//2<=limit and value==value.strip(),
+                            'Invalid template text: '+key+'/'+name)
+                require(fields['heroTitle'] and re.fullmatch(r'/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?',fields['heroButtonUrl']),
+                        'Template requires a title and local button path: '+key)
+                images = fields['heroImages']
+                require(isinstance(images,list) and len(images)<=5, 'Template image limit exceeded: '+key)
+                for entry in images:
+                    require(isinstance(entry,dict) and set(entry)=={'imageRef','title','description'}, 'Invalid template image fields: '+key)
+                    require(isinstance(entry['imageRef'],str), 'Invalid template image reference: '+key)
+                    for name,limit in (('title',120),('description',240)):
+                        value = entry[name]
+                        require(isinstance(value,str) and value==value.strip() and len(value.encode('utf-16-le'))//2<=limit,
+                                'Invalid image caption: '+key)
             for name in ('key','groupKey','value','regionGroupKey','categoryGroupKey','templateKey'):
                 val = item.get(name) if name == 'groupKey' else item['fields'].get(name)
                 if val is not None:
@@ -140,6 +165,9 @@ def load_package(directory):
                 require(isinstance(json.loads(body), dict), 'Expected a CMS document: ' + key)
     for item in items:
         f = item.get('fields', {})
+        for entry in f.get('heroImages',[]):
+            ref = entry['imageRef']
+            require(ref in by_key and by_key[ref]['kind']=='image', 'Unknown template image reference: '+item['key'])
         for name, value in f.items():
             if isinstance(value, dict):
                 require(set(value) == {'ref'} and value['ref'] in by_key, 'Unresolved reference: ' + item['key'])
@@ -157,10 +185,22 @@ def load_package(directory):
     return package, digest(package)
 
 
-def resolved_fields(item, mapping, placeholders=True):
+def resolved_fields(item, mapping, placeholders=True, current=None):
     if item['kind'] == 'image':
         return {name: item[name] for name in FIELDS['image']}
     result = copy.deepcopy(item['fields'])
+    if 'heroImages' in result:
+        images = []
+        for entry in result['heroImages']:
+            ref = entry['imageRef']
+            require(placeholders or ref in mapping, 'Missing saved image: '+ref)
+            url = '/api/site/images/'+str(mapping[ref]) if ref in mapping else {'ref':ref}
+            images.append({'url':url,'title':entry['title'],'description':entry['description']})
+        result['heroImages'] = images
+        result['heroImageUrls'] = [entry['url'] for entry in images]
+        result['heroImageUrl'] = images[0]['url'] if images else ''
+        result['siteName'] = current.get('siteName') if current else None
+        return result
     for name, value in result.items():
         if isinstance(value, dict):
             ref = value['ref']
@@ -184,6 +224,7 @@ def ordered_items(package):
         for item in pending:
             f = item.get('fields', {})
             dependencies = {v['ref'] for v in f.values() if isinstance(v,dict)}
+            dependencies.update(entry['imageRef'] for entry in f.get('heroImages',[]))
             dependencies.update(re.findall(r'\{\{([^{}]+)\}\}', f.get('body','')))
             if item['kind'] == 'post':
                 dependencies.add(item['boardRef'])
@@ -204,9 +245,11 @@ def ordered_items(package):
     return result
 
 
-def build_plan(package, package_hash, snapshot, protected, bindings, journal):
+def build_plan(package, package_hash, snapshot, protected, bindings, journal, template_sites=()):
     by_key = {i['key']:i for i in package['items']}
     require(set(bindings) <= set(by_key), 'Bindings contain an unknown package key.')
+    require(not template_sites or package['schemaVersion']==2, 'Site impact acknowledgment is for template image packages only.')
+    require(set(template_sites)<={s['key'] for s in snapshot['site']}, 'Unknown site impact acknowledgment.')
     mapping = dict(journal.get('mapping', {}))
     require(set(mapping) <= set(by_key), 'Journal contains an unknown package key.')
     actions, blockers, claimed = [], [], {}
@@ -261,8 +304,8 @@ def build_plan(package, package_hash, snapshot, protected, bindings, journal):
                 blockers.append('CODE_IDENTITY_CHANGED: '+key)
             if kind == 'image' and project(kind,current) != resolved_fields(item,mapping):
                 blockers.append('IMAGE_IDENTITY_CHANGED: '+key)
-        desired = resolved_fields(item,mapping)
-        action = 'SKIP' if current and project(kind,current)==desired else 'UPDATE' if current else 'CREATE'
+        desired = resolved_fields(item,mapping,current=current)
+        action = 'SKIP' if current and project(kind,current,desired)==desired else 'UPDATE' if current else 'CREATE'
         if not current and kind == 'template':
             blockers.append('TEMPLATE_MUST_ALREADY_EXIST: '+key)
         if kind == 'site' and current and not current.get('_default',False):
@@ -280,7 +323,8 @@ def build_plan(package, package_hash, snapshot, protected, bindings, journal):
         if a['kind'] in ('content','board'):
             if any(m['targetType']==a['kind'].upper() and m['targetId']==a['id'] and m['id'] not in selected_menus for m in snapshot['menu']):
                 blockers.append('UNSELECTED_MENU_REFERENCES_TARGET: '+a['key'])
-        if a['kind']=='template' and any(s['templateKey']==a['id'] and s['key'] not in selected_sites for s in snapshot['site']):
+        if a['kind']=='template' and any(s['templateKey']==a['id'] and s['key'] not in selected_sites
+                                       and s['key'] not in template_sites for s in snapshot['site']):
             blockers.append('UNSELECTED_SITE_REFERENCES_TEMPLATE: '+a['key'])
     for kind in ('group','code'):
         # Code labels are shared with local posts; do not change an existing meaning globally.
@@ -292,6 +336,11 @@ def build_plan(package, package_hash, snapshot, protected, bindings, journal):
             'journalHash':digest(journal),'mapping':mapping,'actions':actions,'blockers':sorted(set(blockers))}
     if snapshot['_jobs']:
         plan['blockers'].append('NONTERMINAL_NATURAL_CMS_JOBS: '+str(len(snapshot['_jobs'])))
+    if package['schemaVersion']==2:
+        targets = {a['id'] for a in actions if a['kind']=='template'}
+        plan['templateSiteImpacts'] = [dict(s,settingsAction='PRESERVE',acknowledged=s['key'] in template_sites)
+                                       for s in snapshot['site'] if s['templateKey'] in targets]
+        plan['acknowledgedTemplateSites'] = sorted(set(template_sites))
     plan['planHash'] = digest(plan)
     return plan
 
@@ -302,13 +351,13 @@ def assert_only_change(before, after, kind, ident, desired, is_create):
         new = [r for r in after[other] if other!=kind or identity(other,r)!=ident]
         require(old==new, 'CONCURRENT_OR_UNEXPECTED_CMS_CHANGE: '+other)
     matches = [r for r in after[kind] if identity(kind,r)==ident]
-    require(len(matches)==1 and project(kind,matches[0])==desired, 'CMS_READBACK_MISMATCH: '+kind)
+    require(len(matches)==1 and project(kind,matches[0],desired)==desired, 'CMS_READBACK_MISMATCH: '+kind)
     old = [r for r in before[kind] if identity(kind,r)==ident]
     if is_create:
         require(not old, 'API_REUSED_EXISTING_ID: '+kind)
     else:
         require(len(old)==1, 'UPDATE_TARGET_DISAPPEARED: '+kind)
-        stable = set(old[0]) - set(FIELDS[kind]) - {'_updatedAt'}
+        stable = set(old[0]) - set(desired) - {'_updatedAt'}
         require(all(old[0].get(k)==matches[0].get(k) for k in stable), 'AUTHOR_OR_METADATA_CHANGED: '+kind)
     require(before['_target']==after['_target'], 'TARGET_DATABASE_CHANGED')
     require(before['_jobs']==after['_jobs'], 'NATURAL_CMS_JOB_CHANGED_DURING_IMPORT')
@@ -353,7 +402,7 @@ def apply_plan(client, package, package_dir, plan, journal, journal_path):
         # enforce quiescence: a third-party writer can race this check and the HTTP call.
         fresh = client.snapshot()
         require(fresh==current and not fresh['_jobs'], 'CONCURRENT_CHANGE_BEFORE_WRITE; no further request sent.')
-        desired = resolved_fields(item,mapping,placeholders=False)
+        desired = resolved_fields(item,mapping,placeholders=False,current=action['before'])
         ident = action['id']
         journal['inflight'] = {'key':item['key'],'kind':item['kind'],'id':ident,'desired':desired,
                                'beforeIds':[identity(item['kind'],r) for r in current[item['kind']]],
@@ -393,7 +442,7 @@ def recover(client, journal, journal_path):
     now = client.snapshot()
     require(not now['_jobs'] and now['_target']==journal['target'], 'Recovery target/jobs changed.')
     kind = pending['kind']
-    candidates = [r for r in now[kind] if project(kind,r)==pending['desired'] and
+    candidates = [r for r in now[kind] if project(kind,r,pending['desired'])==pending['desired'] and
                   (identity(kind,r)==pending['id'] if pending['id'] is not None else identity(kind,r) not in pending['beforeIds'])]
     require(len(candidates)==1, 'RECOVERY_AMBIGUOUS_OR_NOT_COMMITTED: preserve journal; owner must inspect the pending request.')
     ident = identity(kind,candidates[0])
@@ -480,6 +529,8 @@ class LocalClient:
     def snapshot(self):
         pairs = []
         for kind, select in SELECTS.items():
+            if kind=='template' and getattr(self,'template_images',False):
+                select += ',hero_image_urls "heroImageUrls",hero_images "heroImages"'
             order = KEY_FIELD.get(kind,'id')
             pairs.append("'"+kind+"',(SELECT coalesce(json_agg(t ORDER BY t."+order+"),'[]'::json) FROM (SELECT "+select+' FROM app.'+TABLES[kind]+') t)')
         pairs.append("'_jobs',(SELECT coalesce(json_agg(t ORDER BY t.job_id),'[]'::json) FROM (SELECT job_id,status,resource_type,resource_id FROM app.natural_cms_job WHERE status NOT IN ('COMPLETED','REJECTED')) t)")
@@ -572,6 +623,8 @@ def main(argv=None):
     parser.add_argument('--project',default='axms-spring-dev')
     parser.add_argument('--database',default='ax_module_studio')
     parser.add_argument('--bindings',type=Path)
+    parser.add_argument('--allow-template-site',action='append',default=[],metavar='SITE_KEY',
+                        help='Include this existing site in the template appearance impact review; keep its settings unchanged.')
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--approve-plan')
     parser.add_argument('--confirm-quiescent',action='store_true')
@@ -588,6 +641,7 @@ def main(argv=None):
     with exclusive(state_dir):
         client = LocalClient(args.base_url,args.project,args.database,ROOT)
         client.prerequisites(package)
+        client.template_images = package['schemaVersion']==2
         snapshot = client.snapshot()
         journal_path = state_dir/'journal.json'
         journal = read_json(journal_path,{'mapping':{},'inflight':None})
@@ -599,7 +653,7 @@ def main(argv=None):
             return 0
         require(not journal.get('inflight'), 'INFLIGHT_REQUEST: inspect --recover; do not delete the journal.')
         protected = client.protected()
-        plan = build_plan(package,package_hash,snapshot,protected,bindings,journal)
+        plan = build_plan(package,package_hash,snapshot,protected,bindings,journal,args.allow_template_site)
         plan_path = state_dir/'plan.json'
         if args.apply:
             approved = read_json(plan_path,{})

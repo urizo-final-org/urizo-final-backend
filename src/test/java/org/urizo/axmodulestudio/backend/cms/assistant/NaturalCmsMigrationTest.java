@@ -91,4 +91,72 @@ class NaturalCmsMigrationTest {
                 .contains("GRANT SELECT (event_key) ON app.transactional_outbox TO ai_workspace;")
                 .doesNotContain("GRANT SELECT ON app.transactional_outbox TO ai_workspace;");
     }
+
+    /**
+     * 필드 선택 표는 울타리가 관리하는 넷으로 닫힌다.
+     *
+     * <p>TEMPLATE이 들어오면 저장 한 번에 템플릿이 통째로 닫힌다. 코드의 관리 대상 집합과
+     * 이 CHECK가 같은 넷이어야 두 겹으로 막힌다.
+     */
+    @Test
+    void fieldSelectionAllowsOnlyTheFourGuardedResources() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260911052249613__create_natural_cms_field_selection.sql"));
+
+        assertThat(migration)
+                .contains("CREATE TABLE app.natural_cms_field_selection")
+                .contains("resource_type IN ('MENU', 'BOARD', 'BOARD_POST', 'CONTENT')")
+                .contains("UNIQUE (resource_type, field_name)")
+                .doesNotContain("TEMPLATE");
+    }
+
+    /** 판정하는 연결이 판정 기준을 고칠 수 없어야 울타리가 울타리로 남는다. */
+    @Test
+    void fieldSelectionLetsTheJudgingConnectionReadButNotWrite() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260911052249613__create_natural_cms_field_selection.sql"));
+
+        assertThat(migration)
+                .contains("GRANT SELECT, INSERT, UPDATE, DELETE "
+                        + "ON app.natural_cms_field_selection TO ai_workspace;")
+                .contains("GRANT SELECT ON app.natural_cms_field_selection TO cms_app;")
+                .doesNotContain("UPDATE ON app.natural_cms_field_selection TO cms_app");
+    }
+
+    /**
+     * 규칙 행은 사라지거나 늘어날 수 없다.
+     *
+     * <p>비어 있을 수 있는 설정 표는 "규칙 없음"과 "표가 깨짐"을 같은 상태로 만든다.
+     * 기본키가 상수라 두 번째 행이 들어가지 않고, INSERT·DELETE를 아무에게도 주지 않는다.
+     */
+    @Test
+    void ruleKeepsExactlyOneRowThatNobodyCanInsertOrDelete() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260911052301375__create_natural_cms_rule.sql"));
+
+        assertThat(migration)
+                .contains("CREATE TABLE app.natural_cms_rule")
+                .contains("natural_cms_rule_id BOOLEAN PRIMARY KEY DEFAULT TRUE")
+                .contains("CONSTRAINT ck_natural_cms_rule_single_row CHECK (natural_cms_rule_id)")
+                .contains("INSERT INTO app.natural_cms_rule (natural_cms_rule_id) VALUES (TRUE);")
+                .contains("GRANT SELECT, UPDATE ON app.natural_cms_rule TO ai_workspace;")
+                .contains("GRANT SELECT ON app.natural_cms_rule TO cms_app;")
+                .doesNotContain("INSERT ON app.natural_cms_rule TO")
+                .doesNotContain("DELETE ON app.natural_cms_rule TO");
+    }
+
+    /** 저장 전후를 가르는 값이 있어야 설치 직후 기능이 멎지 않는다. */
+    @Test
+    void ruleCarriesTheConfiguredFlagThatSeparatesDefaultsFromChoices() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260911052301375__create_natural_cms_rule.sql"));
+
+        assertThat(migration)
+                .contains("allow_delete BOOLEAN NOT NULL DEFAULT TRUE")
+                .contains("configured BOOLEAN NOT NULL DEFAULT FALSE");
+    }
 }

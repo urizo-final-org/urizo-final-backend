@@ -50,7 +50,7 @@ class FixtureClient:
             if kind=='code':
                 row['groupKey']=path.split('/')[4]
             rows.append(row)
-        row.update(payload)
+        row.update(copy.deepcopy(payload))
         if kind in ('content','board','post','template','site'):
             row['_updatedAt']='updated-'+str(len(self.calls))
         rows.sort(key=lambda r:demo.identity(kind,r))

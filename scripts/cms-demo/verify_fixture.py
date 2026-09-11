@@ -5,6 +5,7 @@ recipient records in the named, labelled, tmpfs-only test container.
 """
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -153,6 +154,76 @@ def main():
                 'activeAndWaitingApprovalWriteBlock':'PASS','accountsAiProfilesCodingJobsRagDocumentsEmbeddings':'PRESERVED',
                 'existingCmsRowsAndHistory':'PRESERVED','auth':'TEST_PRINCIPAL_NOT_LOGIN_FILTER_E2E'}
         demo.save_json(demo.ROOT/'.local/cms-demo-share/fixture-verification.json',result)
+        print(demo.canonical(result))
+    verify_templates(client)
+
+
+def verify_templates(client):
+    directory = demo.ROOT/'demo/cms-template-v1'
+    package,package_hash = demo.load_package(directory)
+    client.template_images = True
+    client.prerequisites(package)
+    # Synthetic recipient settings: require explicit impact acknowledgment without changing them.
+    client.fixture_sql("UPDATE app.cms_site SET template_key='BOLD',site_name='Recipient site keep' WHERE site_key='main';")
+    original = client.snapshot()
+    protected = client.protected()
+    with tempfile.TemporaryDirectory(prefix='cms-template-fixture-') as folder:
+        journal = {'mapping':{},'inflight':None}
+        path = Path(folder)/'journal.json'
+        def plan(sites=('main',)):
+            return demo.build_plan(package,package_hash,client.snapshot(),client.protected(),{},journal,sites)
+        def apply(candidate):
+            return demo.apply_plan(client,package,directory,candidate,journal,path)
+        assert 'UNSELECTED_SITE_REFERENCES_TEMPLATE: template:BOLD' in plan(())['blockers']
+        assert not plan()['blockers']
+        # Real HTTP success followed by client-side response loss at the first template update.
+        request = client.request
+        dropped = False
+        def lost_template_response(method,route,payload=None):
+            nonlocal dropped
+            result = request(method,route,payload)
+            if route.startswith('/api/cms/templates/') and not dropped:
+                dropped = True
+                raise demo.Blocked('FIXTURE_LOST_TEMPLATE_RESPONSE_AFTER_REAL_COMMIT')
+            return result
+        client.request = lost_template_response
+        try:
+            apply(plan())
+            raise AssertionError('Template response-loss injection did not execute.')
+        except demo.Blocked as error:
+            assert 'FIXTURE_LOST_TEMPLATE_RESPONSE' in str(error)
+        finally:
+            client.request = request
+        assert journal['inflight']['kind']=='template'
+        calls = client.calls
+        assert demo.recover(client,journal,path)['cmsWrites']==0 and client.calls==calls
+        assert apply(plan())['cmsWrites']==1
+        after = client.snapshot()
+        for kind in demo.FIELDS:
+            if kind not in ('image','template'):
+                assert after[kind]==original[kind],kind
+        assert next(r for r in after['template'] if r['key']=='MINIMAL')==next(r for r in original['template'] if r['key']=='MINIMAL')
+        assert all(r in after['image'] for r in original['image'])
+        assert client.protected()==protected
+        for item in package['items']:
+            if item['kind']=='template':
+                row = next(r for r in after['template'] if r['key']==item['fields']['key'])
+                before = next(r for r in original['template'] if r['key']==row['key'])
+                assert row['siteName']==before['siteName'] and len(row['heroImages'])==5
+                assert demo.project('template',row,demo.resolved_fields(item,journal['mapping'],False,before))==demo.resolved_fields(item,journal['mapping'],False,before)
+            else:
+                ident = journal['mapping'][item['key']]
+                row = next(r for r in after['image'] if r['id']==ident)
+                assert ident>1000 and row['sha256']==item['sha256']
+                data,content_type = client.http('GET','/api/site/images/'+str(ident),raw=True)
+                assert hashlib.sha256(data).hexdigest()==item['sha256'] and content_type.startswith(item['contentType'])
+        assert dict(demo.Counter(a['action'] for a in plan()['actions']))=={'SKIP':7}
+        calls = client.calls
+        assert apply(plan())['cmsWrites']==0 and client.calls==calls and client.snapshot()==after
+        result = {'status':'POSTGRES_REAL_TEMPLATE_IMPORT_PASS','packageItems':7,'templates':2,'images':5,
+                  'secondRunCmsWrites':0,'siteSettingsAndOtherCms':'PRESERVED','protectedData':'PRESERVED',
+                  'imageGetHash':'PASS','lostTemplateResponseRecovery':'PASS','auth':'TEST_PRINCIPAL_NOT_LOGIN_FILTER_E2E'}
+        demo.save_json(demo.ROOT/'.local/cms-demo-share/template-fixture-verification.json',result)
         print(demo.canonical(result))
 
 

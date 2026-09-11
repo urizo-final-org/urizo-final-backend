@@ -229,7 +229,19 @@ python scripts/cms-demo/import_demo.py --package demo/cms-template-v1 --recover 
 미리보기를 확인하고 승인한다. 승인은 선택한 템플릿을 저장하며 메인 사이트 적용은 별도다.
 대기 중 템플릿을 다른 화면에서 변경했다면 기존 제안은 저장하지 않고 새 요청으로 다시 확인한다.
 
-실제 로컬 Job 검증 결과와 전달 PR은 검증 완료 후 이 문서에 기록한다.
+AI05-020 전달 후보 검증 상태:
+
+- Frontend 525/525와 타입 검사·production build, Backend 98/98, MCP 10/10,
+  Orchestrator Natural CMS 22/22 PASS.
+- 실제 요청은 분석까지 통과했다. 첫 미리보기에서 동적 Tool 스키마와 등록된 Provider 계약의
+  불일치가 발견되어 기존 스키마·digest를 유지하도록 수정했다. 실제 preview 노드가 만드는
+  요청을 ProviderToolDefinition으로 읽고 사진 배열 인수를 정규화하는 회귀 검사도 통과했다.
+- 첫 full 재빌드의 서비스 건강 검사와 Flyway 46개/pending 0은 통과했다. 기존 호스트
+  Coding Runner의 경로 바인딩이 달라 마지막 Gate는 PARTIAL이며 기존 프로세스는 보존했다.
+- 재빌드 전후 기존 CMS·Job·사진·Volume·Flyway 이력은 보존했다. 첫 검증 Job은 미리보기
+  실패 기록으로 남겼고 템플릿 저장은 발생하지 않았다.
+- **수정 후 full 재검증, 실제 미리보기→승인→저장과 dev 병합은 아직 완료되지 않았다.**
+  이 확인 전에는 자연어 기능의 최종 배포 완료로 안내하지 않는다.
 
 ## 개발 검증
 

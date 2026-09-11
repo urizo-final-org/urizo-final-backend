@@ -65,6 +65,14 @@ public final class CodingHandlerStageService {
      */
     private static final int MAX_MODEL_TURNS = 24;
     /**
+     * How many target files the code stage outlines before its first answer. Every outline
+     * rides along on every answer - up to 60 declaration lines, about 350 tokens each - so
+     * the analyst's "one file too many" is not outlined without end.
+     */
+    private static final int MAX_OUTLINED_TARGET_FILES = 3;
+    /** Tool sequence numbers of those reads, clear of the answers' own 1 to 24. */
+    private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
+    /**
      * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
      * of it, so a request of ten thousand characters or a change touching a thousand files is
      * summarised rather than pasted whole. What was cut is always stated.
@@ -336,7 +344,9 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate, false),
+                1, List.of(),
+                initialMessages(request.handlerKey(), aggregate, false,
+                        objectMapper.createArrayNode()),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -426,8 +436,12 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         boolean foldHistory = foldsToolHistory(modelBindings);
-        List<JsonNode> messages = new ArrayList<>(
-                initialMessages(request.handlerKey(), aggregate, foldHistory));
+        ArrayNode targetOutlines = "coding.code".equals(request.handlerKey())
+                && allowedTools.contains("read_file")
+                ? targetFileOutlines(authorization, jobId, request, authority, aggregate, resultId)
+                : objectMapper.createArrayNode();
+        List<JsonNode> messages = new ArrayList<>(initialMessages(
+                request.handlerKey(), aggregate, foldHistory, targetOutlines));
         JsonNode latestDiff = null;
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
@@ -1466,7 +1480,8 @@ public final class CodingHandlerStageService {
     private List<JsonNode> initialMessages(
             String handlerKey,
             CodingHandlerContract.AttemptAggregateResponse aggregate,
-            boolean foldHistory) {
+            boolean foldHistory,
+            ArrayNode targetFileOutlines) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1541,6 +1556,11 @@ public final class CodingHandlerStageService {
                         item.set("payload", result.payload().deepCopy());
                     }
                 });
+        // The code stage's map of its target files: line counts and declaration lines only.
+        // Left out when there is nothing to show, so every other stage's context is unchanged.
+        if (!targetFileOutlines.isEmpty()) {
+            context.set("targetFileOutlines", targetFileOutlines);
+        }
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
                 .filter(decision -> decision.feedback() != null)
@@ -1670,8 +1690,15 @@ public final class CodingHandlerStageService {
                         // tokens were re-sent on each of the eight answers that followed,
                         // 46k tokens for a file no edit touched. Every read is permanent
                         // conversation weight, so files are opened one at a time.
-                        + "this change from the guardrail's own list: open the first "
-                        + "targetFile with read_file and start editing. Open a later "
+                        + "this change from the guardrail's own list: start with the first "
+                        + "targetFile. "
+                        // Measured on Job 45593ba8: refused a whole 558-line screen file, the
+                        // model read lines 1-130 and 130-300 to land two edits at 162 and 230,
+                        // and both reads rode along on fifteen later answers.
+                        + "targetFileOutlines, when present, gives each target file's line "
+                        + "count and the line numbers of its declarations: pick the declaration "
+                        + "the change belongs to and read_file only that range with startLine "
+                        + "and endLine, not the whole file. Open a later "
                         + "targetFile only when the requested change does not belong in the "
                         + "files already read - every file you read is re-sent with every "
                         + "later answer, so an unneeded read keeps costing until the stage "
@@ -1858,6 +1885,67 @@ public final class CodingHandlerStageService {
         return objectMapper.createObjectNode()
                 .put("role", "assistant")
                 .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
+    }
+
+    /**
+     * An outline of each target file the analyst named, read by the server before the code
+     * stage's first answer: the line count and the declaration lines, never the text.
+     *
+     * <p>The analyst has no tools, so it names files but not lines, and the model used to open
+     * the first file whole to find its place - a read that then rides along on every later
+     * answer. This read goes through the same tool gateway as the model's own, so the fence
+     * and the execution record apply unchanged, and it sits in the first user message, which
+     * is never rewritten.
+     *
+     * <p>A file within the whole-read limit comes back as text and is outlined here; a larger
+     * one is refused, and that refusal already carries the line count and the outline. Any
+     * other refusal - a file the change will create, or one past the workspace's 48 KiB read
+     * limit - leaves that file out rather than failing the stage: the outline is a head start,
+     * not a precondition.
+     */
+    private ArrayNode targetFileOutlines(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId) {
+        ArrayNode outlines = objectMapper.createArrayNode();
+        CodingHandlerContract.HandlerResultResponse analysis =
+                latestResultOrNull(aggregate, "coding.analyze", "feasible");
+        if (analysis == null || analysis.payload() == null) {
+            return outlines;
+        }
+        List<String> targets = new ArrayList<>();
+        for (JsonNode target : analysis.payload().path("targetFiles")) {
+            if (target.isTextual() && !target.asText().isBlank()
+                    && targets.size() < MAX_OUTLINED_TARGET_FILES) {
+                targets.add(target.asText());
+            }
+        }
+        for (int index = 0; index < targets.size(); index++) {
+            String path = targets.get(index);
+            String outline;
+            try {
+                JsonNode read = executeDeterministicTool(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        TARGET_OUTLINE_SEQUENCE_BASE + index, "read_file",
+                        objectMapper.createObjectNode().put("path", path));
+                // Counted the way read_file counts, so a later ranged read lands on these lines.
+                String[] lines = read.path("content").asText("").split("\n", -1);
+                outline = lines.length + " lines." + CodingToolService.fileOutline(path, lines);
+            }
+            catch (CodingToolException refused) {
+                if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
+                        || !String.valueOf(refused.getMessage())
+                                .contains("too large to read whole")) {
+                    continue;
+                }
+                outline = refused.getMessage();
+            }
+            outlines.addObject().put("path", path).put("outline", outline);
+        }
+        return outlines;
     }
 
     /**

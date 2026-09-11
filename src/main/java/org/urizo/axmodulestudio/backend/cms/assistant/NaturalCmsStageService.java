@@ -367,15 +367,13 @@ public final class NaturalCmsStageService {
         String emptyDelete =
                 " DELETE carries no fields and its fields object stays empty.";
         if (NaturalCmsResourceService.isPost(resource)) {
-            return "Create one POST command with operation CREATE, UPDATE or DELETE. "
-                    + "Call validate_cms_command exactly once with that command. "
-                    + "fields may use only names from editableFields."
-                    + changedFieldsOnly
-                    + " CREATE sends title and body."
-                    + emptyDelete
-                    + " The post stays in the board it is already in, so never send a board"
-                    + " field. A body may use headings (##), emphasis (**text**) and list"
-                    + " items (-) only.";
+            return commandInstruction(new NaturalCmsContract.ResourceRef("CONTENT", "new"))
+                    .replace("Create one CONTENT command", "Create one POST command")
+                    + " The post stays in its board; never send a board field."
+                    + " thumbnailImageId is a separate CMS image id, not a body image."
+                    + " Take thumbnail ids only from the current thumbnail, body images or attached image URLs."
+                    + " regionCodeId and categoryCodeId come only from reference.codes in the board's matching group."
+                    + " Never invent ids or create codes. Null explicitly clears an optional image or classification.";
         }
         if ("BOARD".equals(resourceType)) {
             return "Create one BOARD command with operation CREATE, UPDATE or DELETE. "
@@ -385,7 +383,9 @@ public final class NaturalCmsStageService {
                     + " CREATE sends at least name and leaves description out when the request"
                     + " does not give one."
                     + emptyDelete
-                    + " A board that still has posts cannot be deleted.";
+                    + " A board that still has posts cannot be deleted."
+                    + " displayType is LIST or CARD. regionGroupKey and categoryGroupKey are optional"
+                    + " keys from reference.codeGroups only. Never create or invent groups.";
         }
         if ("CONTENT".equals(resourceType)) {
             // 본문이 Tiptap Document(JSON)다. 모델이 트리를 지어내지 않도록 현재 문서를 고쳐
@@ -461,12 +461,16 @@ public final class NaturalCmsStageService {
         else if (NaturalCmsResourceService.isPost(resource)) {
             // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
             scope = "the posts of the selected board: writing a new post and changing or "
-                    + "deleting a post's title and body";
+                    + "deleting a post's title and rich-text body, using supported headings, lists,"
+                    + " quotes, dividers, bold, italic, strike, underline, colours and links;"
+                    + " placing, moving or removing already uploaded body images and a separate thumbnail,"
+                    + " and choosing region/category codes from reference.codes."
+                    + " Attached images are already uploaded, so asking to upload or add them is included";
             excluded = "changing the board itself, menus, static content pages, templates "
-                    + "and members";
+                    + "and members, finding unattached images, inventing or creating codes";
         }
         else if ("BOARD".equals(resource.type())) {
-            scope = "boards only: creating a board, changing a board's name or description, "
+            scope = "boards only: creating a board, changing a board's name, description, LIST/CARD display type or existing code group bindings, "
                     + "and deleting a board";
             excluded = "writing or editing posts, menus, static content pages, templates "
                     + "and members";

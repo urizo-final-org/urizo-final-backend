@@ -4,6 +4,7 @@ import static org.urizo.axmodulestudio.backend.cms.service.CmsServiceException.i
 import static org.urizo.axmodulestudio.backend.cms.service.CmsServiceException.notFound;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.UUID;
 
 import org.slf4j.Logger;
@@ -20,6 +21,8 @@ import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.PostView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.TemplateView;
 import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.BoardRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.PostRequest;
 
 @Service
 @Profile("local-full")
@@ -31,9 +34,11 @@ public class CmsService {
     private static final int MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
     private final CmsRepository repository;
+    private final CmsCodeService codes;
 
-    public CmsService(CmsRepository repository) {
+    public CmsService(CmsRepository repository, CmsCodeService codes) {
         this.repository = repository;
+        this.codes = codes;
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
@@ -142,7 +147,7 @@ public class CmsService {
     /**
      * 컨텐츠 본문은 편집기가 만든 문서만 받는다. 마크다운 3문법 제한을 대신하는 가드레일이다.
      *
-     * <p>게시물은 이 검사를 타지 않는다. 마크다운을 그대로 쓴다.
+     * <p>게시물도 같은 문서 형식과 검사 경로를 사용한다.
      */
     private static void validateContentBody(String body) {
         String problem = ContentBody.problem(body);
@@ -244,6 +249,41 @@ public class CmsService {
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
+    public BoardView createBoard(BoardRequest request) {
+        validateBoardOptions(request, null);
+        var created = createBoard(request.name(), request.description());
+        repository.updateBoardOptions(created.id(), displayType(request), request.regionGroupKey(), request.categoryGroupKey());
+        return board(created.id());
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public BoardView updateBoard(long id, BoardRequest request) {
+        var previous = board(id);
+        validateBoardOptions(request, previous);
+        // A group switch cannot silently strand classifications already used by posts.
+        for (var post : posts(id)) {
+            if ((!Objects.equals(previous.regionGroupKey(), request.regionGroupKey()) && post.regionCodeId() != null)
+                    || (!Objects.equals(previous.categoryGroupKey(), request.categoryGroupKey()) && post.categoryCodeId() != null)) {
+                throw invalidRequest("게시글에서 사용 중인 분류를 먼저 해제한 뒤 코드 그룹을 변경해 주세요.");
+            }
+        }
+        updateBoard(id, request.name(), request.description());
+        repository.updateBoardOptions(id, displayType(request), request.regionGroupKey(), request.categoryGroupKey());
+        return board(id);
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
+    public void validateBoardOptions(BoardRequest request, BoardView previous) {
+        if (!List.of("LIST", "CARD").contains(displayType(request))) throw invalidRequest("게시판 유형은 LIST 또는 CARD여야 합니다.");
+        codes.validateGroup(request.regionGroupKey(), previous == null ? null : previous.regionGroupKey());
+        codes.validateGroup(request.categoryGroupKey(), previous == null ? null : previous.categoryGroupKey());
+    }
+
+    private static String displayType(BoardRequest request) {
+        return request.displayType() == null ? "LIST" : request.displayType();
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager")
     public void deleteBoard(long id) {
         board(id);
         repository.softDeletePostsByBoard(id);
@@ -256,28 +296,74 @@ public class CmsService {
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
     public List<PostView> posts(long boardId) {
         board(boardId);
-        return repository.findPosts(boardId);
+        return repository.findPosts(boardId).stream().map(CmsService::asDocument).toList();
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
     public PostView post(long id) {
-        return repository.findPost(id).orElseThrow(() -> notFound("게시물을 찾을 수 없습니다."));
+        return repository.findPost(id).map(CmsService::asDocument).orElseThrow(() -> notFound("게시물을 찾을 수 없습니다."));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public PostView createPost(UUID authorId, long boardId, String title, String body) {
-        board(boardId);
-        validateArticle(title, body);
-        return post(repository.insertPost(authorId, boardId, title.trim(), body));
+        return createPost(authorId, boardId, new PostRequest(title, ContentBody.toDocument(body), null, "", null, null));
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public PostView updatePost(long id, String title, String body) {
-        validateArticle(title, body);
-        if (repository.updatePost(id, title.trim(), body) == 0) {
+        var previous = post(id);
+        return updatePost(id, new PostRequest(title, ContentBody.toDocument(body), previous.thumbnailImageId(),
+                previous.thumbnailAlt(), previous.regionCodeId(), previous.categoryCodeId()));
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public PostView createPost(UUID authorId, long boardId, PostRequest request) {
+        var board = board(boardId);
+        String document = validatePost(request, board, null);
+        long id = repository.insertPost(authorId, boardId, request.title().trim(), document);
+        repository.updatePostOptions(id, request.thumbnailImageId(), text(request.thumbnailAlt()), request.regionCodeId(), request.categoryCodeId());
+        return post(id);
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager")
+    public PostView updatePost(long id, PostRequest request) {
+        var previous = post(id);
+        String document = validatePost(request, board(previous.boardId()), previous);
+        if (repository.updatePost(id, request.title().trim(), document) == 0) {
             throw notFound("게시물을 찾을 수 없습니다.");
         }
+        repository.updatePostOptions(id, request.thumbnailImageId(), text(request.thumbnailAlt()), request.regionCodeId(), request.categoryCodeId());
         return post(id);
+    }
+
+    @Transactional(transactionManager = "authJpaTransactionManager", readOnly = true)
+    public String validatePost(PostRequest request, BoardView board, PostView previous) {
+        validateArticle(request.title(), request.body());
+        String document = ContentBody.normalize(request.body());
+        validateContentBody(document);
+        for (long imageId : ContentBody.imageIds(document)) {
+            if (!repository.contentImageExists(imageId)) throw invalidRequest("본문 이미지를 찾을 수 없습니다.");
+        }
+        if (request.thumbnailImageId() != null && !repository.contentImageExists(request.thumbnailImageId())) {
+            throw invalidRequest("대표 이미지를 찾을 수 없습니다.");
+        }
+        codes.validateCode(request.regionCodeId(), board.regionGroupKey(), previous == null ? null : previous.regionCodeId());
+        codes.validateCode(request.categoryCodeId(), board.categoryGroupKey(), previous == null ? null : previous.categoryCodeId());
+        return document;
+    }
+
+    private static PostView asDocument(PostView view) {
+        return new PostView(view.id(), view.boardId(), view.authorId(), view.authorName(), view.title(),
+                ContentBody.toDocument(view.body()), view.createdAt(), view.updatedAt(), view.thumbnailImageId(),
+                view.thumbnailAlt(), view.regionCodeId(), view.categoryCodeId());
+    }
+
+    public List<org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.CodeGroupView> codeGroups() {
+        return codes.groups();
+    }
+
+    public List<org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.CodeView> codeValues() {
+        return codes.codes();
     }
 
     @Transactional(transactionManager = "authJpaTransactionManager")
@@ -311,6 +397,8 @@ public class CmsService {
 
     @Transactional(transactionManager = "authJpaTransactionManager")
     public void ensureDemoData() {
+        // Bootstrap only an empty CMS. Edited titles and menu bindings belong to the administrator.
+        if (repository.hasContentOrBoards()) return;
         repository.findSuperAdminAuthor().ifPresent(this::ensureDemoData);
     }
 

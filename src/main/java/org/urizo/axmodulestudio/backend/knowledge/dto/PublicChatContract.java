@@ -37,11 +37,17 @@ public final class PublicChatContract {
      * 이력 전체가 아니라 직전 한 건만 받는다: 대명사를 푸는 데 필요한 것은 직전 턴이고,
      * 목록으로 열어 두면 익명 호출자가 임베딩 입력 길이를 마음대로 늘릴 수 있다.
      */
+    /**
+     * {@code projectId}는 어느 도메인 포털에서 물었는지다. 프로젝트마다 공개 챗봇이 하나이므로
+     * 이 값으로 챗봇이 정해진다. 비우면 {@code ax.knowledge.public-chatbot-id} 설정으로 떨어진다 —
+     * 포털이 하나뿐이던 경로를 그대로 둔다.
+     */
     public record PublicChatQueryRequest(
             @NotBlank @Size(max = 4000) String query,
             UUID conversationId,
             @Size(max = 8) List<@Size(max = 40) String> category,
-            @Size(max = 4000) String previousQuery) {
+            @Size(max = 4000) String previousQuery,
+            UUID projectId) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

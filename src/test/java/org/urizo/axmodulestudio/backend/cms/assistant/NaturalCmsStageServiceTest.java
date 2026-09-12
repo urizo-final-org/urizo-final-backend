@@ -533,6 +533,39 @@ class NaturalCmsStageServiceTest {
     }
 
     /**
+     * 메뉴 대상도 나머지 세 대상을 제외한다.
+     *
+     * <p>메뉴만 공통 제외 문구를 그대로 써서 게시판과 컨텐츠가 빠져 있었다. 메뉴 화면에서
+     * 게시판을 만들어 달라는 요청이 판정에서 걸러지지 않고 명령 단계까지 내려갔다.
+     *
+     * <p>제외에 `themselves`가 붙어 있는지도 본다. 메뉴 범위에 `어느 컨텐츠나 게시판에
+     * 연결하는지`가 있어서, 목적어 없이 제외하면 연결 변경까지 범위 밖으로 읽힌다.
+     */
+    @Test
+    void feasibilityPromptKeepsOtherResourcesOutsideTheMenuTarget() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("menus only")
+                .contains("writing or editing posts")
+                .contains("creating or changing boards and static content pages themselves")
+                .contains("templates and members")
+                // 연결 대상 변경은 메뉴 범위 안이다. 제외 문구가 그것까지 덮으면 안 된다.
+                .contains("content or board it links to");
+    }
+
+    /**
      * 게시판 대상은 게시물 작성이 범위 밖이고, 삭제 조건의 근거를 함께 준다.
      *
      * <p>조건만 알리고 근거를 주지 않으면 모델이 확인할 수단이 없어 같은 요청이 문장에 따라

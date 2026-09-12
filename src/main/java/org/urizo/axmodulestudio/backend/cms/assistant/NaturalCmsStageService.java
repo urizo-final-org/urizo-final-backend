@@ -457,6 +457,15 @@ public final class NaturalCmsStageService {
         if ("MENU".equals(resource.type())) {
             scope = "menus only: a menu's name, path, parent, order among siblings, and which "
                     + "content or board it links to. Creating and deleting a menu is included";
+            // 다른 세 화면은 나머지 대상을 하나씩 제외하는데 메뉴만 기본값을 써서 게시판과
+            // 컨텐츠가 빠져 있었다. 메뉴 화면에서 게시판을 만들어 달라는 요청이 판정에서
+            // 걸러지지 않고 명령 단계까지 내려갔다.
+            //
+            // `themselves`가 필요하다. 메뉴 범위에 `어느 컨텐츠나 게시판에 연결하는지`가
+            // 있어서, 목적어 없이 제외하면 모델이 연결 변경까지 범위 밖으로 읽는다.
+            // 게시판 분기가 삭제 조건을 문장에 섞었다가 이름 변경까지 막았던 것과 같은 함정이다.
+            excluded = "writing or editing posts, creating or changing boards and static "
+                    + "content pages themselves, templates and members";
         }
         else if (NaturalCmsResourceService.isPost(resource)) {
             // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
@@ -503,7 +512,8 @@ public final class NaturalCmsStageService {
             excluded = "finding an image that was neither attached nor already in the body, "
                     + "writing posts, boards, menus, templates and members";
         }
-        // 남은 기본값은 이제 템플릿 전용이다. 컨텐츠 분기를 새로 만들었으므로 여기는 건드리지 않는다.
+        // 네 화면이 각자 제외 목록을 갖게 됐으므로 남은 기본값은 템플릿 전용이다.
+        // 템플릿은 아직 자연어 어시스턴트가 열려 있지 않아 이 경로로 오지 않는다.
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "

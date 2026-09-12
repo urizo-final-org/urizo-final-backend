@@ -141,6 +141,19 @@ public final class NaturalCmsContract {
         }
     }
 
+    /**
+     * 화면이 Job에 대해 알 수 있는 전부.
+     *
+     * <p>{@code refusalCode}와 {@code refusalReason}은 파이프라인이 막았을 때만 채워진다.
+     * 그전까지 판정 사유는 {@code natural_cms_handler_result.payload}에만 남았고 그 표를 읽는
+     * API가 없어, 화면이 요청 문장의 낱말을 보고 어느 화면 일인지 추측해 안내했다. 그 추측은
+     * 가드레일이 닫은 동작에서 반드시 틀린다 — 요청문은 이 화면에서 되는 일처럼 보이는데
+     * 실제로는 관리자가 끈 것이기 때문이다.
+     *
+     * <p>코드와 문장을 함께 싣는 이유가 다르다. 가드레일이 막은 것은 <b>우리가 정한 고정
+     * 문장</b>을 화면이 써야 하므로 분류가 필요하고, 범위 밖 요청은 모델이 쓴 한글 문장이
+     * 이미 정확하므로 그대로 보낸다. 둘 다 없으면 화면은 예전 추측으로 되돌아간다.
+     */
     public record JobResponse(
             String schemaVersion,
             UUID jobId,
@@ -157,6 +170,8 @@ public final class NaturalCmsContract {
             boolean previewValid,
             String approvalDecision,
             String approvalFeedback,
+            String refusalCode,
+            String refusalReason,
             Instant createdAt,
             Instant updatedAt) {
         public JobResponse {

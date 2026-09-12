@@ -424,7 +424,8 @@ public final class NaturalCmsStore {
                         new NaturalCmsContract.ResourceRef(rs.getString(8), rs.getString(9)),
                         parse(rs.getString(10)), rs.getObject(11, UUID.class),
                         rs.getString(12), rs.getBoolean(13), rs.getString(14),
-                        rs.getString(15), rs.getTimestamp(16).toInstant(),
+                        rs.getString(15), null, null,
+                        rs.getTimestamp(16).toInstant(),
                         rs.getTimestamp(17).toInstant()),
                 jobId);
         if (rows.size() != 1) {
@@ -432,7 +433,42 @@ public final class NaturalCmsStore {
                     "NATURAL_CMS_JOB_NOT_FOUND", "Natural CMS Job was not found.",
                     HttpStatus.NOT_FOUND);
         }
-        return rows.get(0);
+        return withRefusal(database, rows.get(0));
+    }
+
+    /**
+     * 파이프라인이 막았으면 그 사유를 함께 싣는다.
+     *
+     * <p>판정 사유는 Handler 결과에만 남고 그 표를 읽는 API가 없어 화면이 읽을 수 없었다.
+     * 여기서 같은 시도의 마지막 {@code infeasible} 결과를 붙여 준다.
+     *
+     * <p>사람이 반려한 것은 대상이 아니다. 그때는 {@code approvalFeedback}이 이미 사유이고,
+     * 화면도 「반영하지 않았습니다」로 다르게 안내한다.
+     */
+    private static NaturalCmsContract.JobResponse withRefusal(
+            JdbcTemplate database, NaturalCmsContract.JobResponse job) {
+        if (!"REJECTED".equals(job.status()) || job.approvalDecision() != null) {
+            return job;
+        }
+        List<String[]> refusals = database.query("""
+                SELECT payload ->> 'refusalCode', payload ->> 'reason'
+                FROM app.natural_cms_handler_result
+                WHERE job_id = ? AND pipeline_attempt = ? AND result_port = 'infeasible'
+                ORDER BY recorded_at DESC
+                LIMIT 1
+                """,
+                (rs, row) -> new String[] { rs.getString(1), rs.getString(2) },
+                job.jobId(), job.pipelineAttempt());
+        if (refusals.isEmpty()) {
+            return job;
+        }
+        return new NaturalCmsContract.JobResponse(
+                job.schemaVersion(), job.jobId(), job.traceId(), job.profileVersionId(),
+                job.pipelineAttempt(), job.stateVersion(), job.status(), job.requestText(),
+                job.resource(), job.structuredCommand(), job.previewId(), job.previewHash(),
+                job.previewValid(), job.approvalDecision(), job.approvalFeedback(),
+                refusals.get(0)[0], refusals.get(0)[1],
+                job.createdAt(), job.updatedAt());
     }
 
     private void enqueue(NaturalCmsContract.JobResponse job, Instant availableAt) {

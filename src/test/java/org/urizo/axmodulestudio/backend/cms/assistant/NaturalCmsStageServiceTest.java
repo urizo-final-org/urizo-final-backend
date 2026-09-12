@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.Clock;
@@ -533,6 +534,77 @@ class NaturalCmsStageServiceTest {
     }
 
     /**
+     * 가드레일이 닫은 동작은 판정 단계에서 걸러야 관리자가 이유를 본다.
+     *
+     * <p>명령 단계 검증도 막지만 그쪽은 예외를 던질 뿐이라 Job이 {@code ACTIVE}로 남고 화면은
+     * 「미리보기를 받지 못했습니다」로 끝난다. 판정 단계는 {@code infeasible} 포트가 있어
+     * 사유를 남기고 정상 반려된다.
+     */
+    @Test
+    void feasibilityPromptSaysWhichOperationsTheAdministratorSwitchedOff() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.resources.openedOperations(menu))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(menu)).thenReturn(Set.of("CREATE", "UPDATE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("switched off deleting")
+                .contains("guardrail setting turned it off")
+                // 켜져 있는 동작까지 껐다고 말하면 되는 요청이 반려된다.
+                .doesNotContain("switched off creating");
+    }
+
+    /** 코드가 열지 않은 동작은 「관리자가 껐다」가 아니다. 켤 수 있는 것처럼 들린다. */
+    @Test
+    void feasibilityPromptStaysSilentWhenTheAdministratorClosedNothing() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.resources.openedOperations(menu)).thenReturn(Set.of("UPDATE"));
+        when(harness.resources.operations(menu)).thenReturn(Set.of("UPDATE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue())).doesNotContain("switched off");
+    }
+
+    /** 모든 동작이 꺼졌으면 물어볼 것이 없다. 모델을 부르면 토큰만 쓰고 같은 답이 온다. */
+    @Test
+    void refusesWithoutCallingTheModelWhenEveryOperationIsClosed() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.operations(menu)).thenReturn(Set.of());
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        // 화면이 「요청을 고치세요」와 「관리자에게 문의하세요」를 가려 말하려면 분류가 필요하다.
+        assertThat(response.payload().path("refusalCode").asText())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        assertThat(response.payload().path("reason").asText()).contains("가드레일 설정");
+        verifyNoInteractions(harness.models);
+    }
+
+    /**
      * 메뉴 대상도 나머지 세 대상을 제외한다.
      *
      * <p>메뉴만 공통 제외 문구를 그대로 써서 게시판과 컨텐츠가 빠져 있었다. 메뉴 화면에서
@@ -670,6 +742,8 @@ class NaturalCmsStageServiceTest {
                 previewValid,
                 "WAITING_APPROVAL".equals(status) ? "APPROVED" : null,
                 null,
+                null,
+                null,
                 NOW,
                 NOW);
     }
@@ -745,6 +819,12 @@ class NaturalCmsStageServiceTest {
         private final NaturalCmsStageService service;
 
         private Harness(NaturalCmsContract.JobResponse job) {
+            // Mockito 기본값은 빈 Set이라 「모든 동작이 꺼짐」으로 읽힌다. 그러면 판정 단계가
+            // 모델을 부르지 않고 바로 반려해, 지시문을 보는 테스트가 전부 헛돈다.
+            when(resources.openedOperations(any()))
+                    .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+            when(resources.operations(any()))
+                    .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
             when(store.get("Bearer worker", JOB, 1)).thenReturn(job);
             when(store.actorId("Bearer worker", JOB)).thenReturn(ACTOR);
             when(store.findResult("Bearer worker", JOB, 1, RESULT))

@@ -4,9 +4,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -127,6 +130,11 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId) {
         requireStatus(job, "ACTIVE");
+        if (resources.operations(job.resource()).isEmpty()) {
+            // 물어볼 것이 없다. 모델을 부르면 토큰만 쓰고 같은 답이 온다.
+            return refused(job, stage, resultId,
+                    "이 화면은 가드레일 설정에서 모든 동작이 꺼져 있어 AI 가 바꿀 수 있는 것이 없습니다.");
+        }
         ObjectNode currentState = resources.snapshot(job.resource());
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(job, stage, ModelUseCase.CHAT);
@@ -144,6 +152,33 @@ public final class NaturalCmsStageService {
                 null,
                 null,
                 outcome.value());
+    }
+
+    /**
+     * 가드레일이 막았다고 판정한다.
+     *
+     * <p>모델이 쓴 사유와 자리는 같지만 {@code refusalCode}가 붙는다. 화면이 「지금 코드로도
+     * 안 되는 것」과 「관리자가 끈 것」을 가려 말해야 하기 때문이다. 앞쪽은 요청을 고치면
+     * 되지만 뒤쪽은 최고 관리자에게 문의할 일이다.
+     */
+    private NaturalCmsContract.StageExecutionResponse refused(
+            NaturalCmsContract.JobResponse job,
+            NaturalCmsContract.StageExecutionRequest stage,
+            UUID resultId,
+            String reason) {
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("refusalCode", NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        payload.put("reason", reason);
+        return new NaturalCmsContract.StageExecutionResponse(
+                NaturalCmsContract.SCHEMA_VERSION,
+                resultId,
+                stage.handlerKey(),
+                "infeasible",
+                job.resource(),
+                null,
+                null,
+                null,
+                payload);
     }
 
     private NaturalCmsContract.StageExecutionResponse preview(
@@ -342,7 +377,9 @@ public final class NaturalCmsStageService {
         }
         String instruction = commandStage
                 ? commandInstruction(job.resource())
-                : feasibilityInstruction(job.resource());
+                : feasibilityInstruction(job.resource(),
+                        resources.openedOperations(job.resource()),
+                        resources.operations(job.resource()));
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
@@ -449,7 +486,38 @@ public final class NaturalCmsStageService {
      * <p>실제로 메뉴 화면에서 게시글 등록 요청이 통과해 명령 단계에서 계약 밖 형식으로 멈췄다.
      * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
      */
-    private static String feasibilityInstruction(NaturalCmsContract.ResourceRef resource) {
+    /**
+     * 관리자가 끈 동작을 범위 밖으로 덧붙인다.
+     *
+     * <p>막는 것은 명령서 검증이다. 다만 그 층은 예외를 던질 뿐이라 Job이 {@code ACTIVE}로 남고
+     * 화면은 「미리보기를 받지 못했습니다」로 끝난다. 판정 단계는 {@code infeasible} 포트가 있어
+     * 사유를 남기고 정상 반려되므로, 닫힌 동작은 여기서 걸러야 관리자가 이유를 본다.
+     *
+     * <p>코드가 애초에 열지 않은 동작은 적지 않는다. 템플릿은 등록·삭제가 없는데 「관리자가
+     * 껐다」고 말하면 켤 수 있는 것처럼 들린다.
+     */
+    private static String guardrailNote(Set<String> opened, Set<String> open) {
+        List<String> closed = new ArrayList<>();
+        for (String operation : new TreeSet<>(opened)) {
+            if (!open.contains(operation)) {
+                closed.add(switch (operation) {
+                    case "CREATE" -> "creating";
+                    case "UPDATE" -> "changing";
+                    case "DELETE" -> "deleting";
+                    default -> operation.toLowerCase(Locale.ROOT);
+                });
+            }
+        }
+        if (closed.isEmpty()) {
+            return "";
+        }
+        return " The administrator has switched off " + String.join(" and ", closed)
+                + " on this screen, so a request that needs it is infeasible; say in"
+                + " payload.reason that the guardrail setting turned it off.";
+    }
+
+    private static String feasibilityInstruction(
+            NaturalCmsContract.ResourceRef resource, Set<String> opened, Set<String> open) {
         String scope = "the selected content's title and body only";
         String excluded = "writing posts, editing article bodies, templates and members";
         /** 리소스별로 덧붙이는 단서. 범위 문장에 섞으면 조건이 전체로 번진다. */
@@ -518,7 +586,7 @@ public final class NaturalCmsStageService {
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "
                 + "Anything else is infeasible even when it sounds related, including "
-                + excluded + ". When the port is "
+                + excluded + "." + guardrailNote(opened, open) + " When the port is "
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation."

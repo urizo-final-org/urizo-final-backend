@@ -133,6 +133,28 @@ public final class NaturalCmsResourceService {
     }
 
     /**
+     * 이 대상에서 지금 실행할 수 있는 동작.
+     *
+     * <p>판정 단계가 범위 문장을 만들 때 쓴다. 닫힌 동작을 범위에 넣어 두면 모델이 가능하다고
+     * 판정했다가 명령 단계에서 막혀, 관리자는 「미리보기를 받지 못했습니다」만 보게 된다.
+     * 막는 것은 검증이고 이 목록은 <b>왜 안 되는지 말할 수 있게</b> 하는 쪽이다.
+     */
+    public Set<String> operations(NaturalCmsContract.ResourceRef resource) {
+        ResourceHandler<?> handler = handler(resource);
+        return guardrails.current().operations(resourceKey(resource), handler.operations());
+    }
+
+    /**
+     * 코드가 이 대상에 연 동작. 가드레일을 거치지 않는다.
+     *
+     * <p>「관리자가 껐다」와 「코드가 애초에 열지 않았다」를 가르는 데 쓴다. 템플릿은 등록·삭제가
+     * 없는데 껐다고 말하면 켤 수 있는 것처럼 들린다. 목록을 따로 적지 않고 Handler 에게 묻는다.
+     */
+    public Set<String> openedOperations(NaturalCmsContract.ResourceRef resource) {
+        return Set.copyOf(handler(resource).operations());
+    }
+
+    /**
      * 모델이 번호·경로를 지어내지 않도록 서버가 붙이는 참고 목록.
      *
      * <p>사용자에게는 보이지 않는다. 참고할 것이 없는 리소스는 {@code null}을 준다.

@@ -264,6 +264,8 @@ class NaturalCmsStoreTest {
                 "WAITING_APPROVAL".equals(status),
                 decision,
                 feedback,
+                null,
+                null,
                 NOW.minusSeconds(60),
                 NOW);
     }

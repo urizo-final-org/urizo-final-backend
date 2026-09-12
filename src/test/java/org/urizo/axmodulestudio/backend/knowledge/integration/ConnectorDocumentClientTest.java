@@ -164,6 +164,20 @@ class ConnectorDocumentClientTest {
     }
 
     @Test
+    void restoresNumericReferences() {
+        assertThat(ConnectorDocumentClient.clean("&#x41;&#66;")).isEqualTo("AB");
+    }
+
+    @Test
+    void keepsUnparsableNumericReferencesAsWrittenInsteadOfFailingTheJob() {
+        // 원천 한 건의 이상한 참조가 수집 전체를 죽이면 안 된다. 셋 다 정규식에는 걸린다.
+        assertThat(ConnectorDocumentClient.clean("A &#abc; B")).isEqualTo("A &#abc; B");
+        assertThat(ConnectorDocumentClient.clean("A &#99999999999; B"))
+                .isEqualTo("A &#99999999999; B");
+        assertThat(ConnectorDocumentClient.clean("A &#x110000; B")).isEqualTo("A &#x110000; B");
+    }
+
+    @Test
     void appendsMappedMetadataAsLabelledLinesInMappingOrder() {
         String mapping = """
                 {

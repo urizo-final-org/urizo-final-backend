@@ -307,21 +307,33 @@ public class ConnectorDocumentClient {
         StringBuilder result = new StringBuilder();
         while (matcher.find()) {
             String name = matcher.group(1);
-            String replacement;
-            if (name.startsWith("#")) {
-                int code = name.charAt(1) == 'x' || name.charAt(1) == 'X'
-                        ? Integer.parseInt(name.substring(2), 16)
-                        : Integer.parseInt(name.substring(1));
-                replacement = Character.toString(code);
-            }
-            else {
-                replacement = NAMED_ENTITIES.get(name);
-            }
+            String replacement = name.startsWith("#")
+                    ? codePoint(name)
+                    : NAMED_ENTITIES.get(name);
             matcher.appendReplacement(result,
                     replacement == null ? Matcher.quoteReplacement(matcher.group())
                             : Matcher.quoteReplacement(replacement));
         }
         return matcher.appendTail(result).toString();
+    }
+
+    /**
+     * 숫자 참조를 문자로 바꾼다. 풀 수 없으면 {@code null}을 돌려 명명 엔티티와 같이 원문을
+     * 그대로 남긴다. 원천 응답 한 건의 이상한 참조로 수집 Job 전체가 죽으면 안 된다.
+     *
+     * <p>{@code &#abc;}는 정규식의 16진수 문자 집합에 걸리지만 접두사 {@code x}가 없어
+     * 10진수로 파싱된다. {@code &#99999999999;}는 int 범위를 넘는다.
+     */
+    private static String codePoint(String name) {
+        try {
+            int code = name.charAt(1) == 'x' || name.charAt(1) == 'X'
+                    ? Integer.parseInt(name.substring(2), 16)
+                    : Integer.parseInt(name.substring(1));
+            return Character.isValidCodePoint(code) ? Character.toString(code) : null;
+        }
+        catch (NumberFormatException unparsable) {
+            return null;
+        }
     }
 
     private static String required(JsonNode item, JsonNode mapping, String field) {

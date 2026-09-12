@@ -57,12 +57,13 @@ public class KnowledgeStore {
                 blankToNull(request.description()), Timestamp.from(now), Timestamp.from(now));
         return new ProductApiContract.KnowledgeBaseResponse(
                 version(), traceId, knowledgeBaseId, request.projectId(),
-                request.name().trim(), blankToNull(request.description()), null, now);
+                request.name().trim(), blankToNull(request.description()), null, null, now);
     }
 
     public ProductApiContract.KnowledgeBaseResponse getKnowledgeBase(UUID id, UUID traceId) {
         return one(jdbc.query(
-                "SELECT knowledge_base_id, project_id, name, description, active_version_id, created_at "
+                "SELECT knowledge_base_id, project_id, name, description, active_version_id, created_at, "
+                        + "source_change_summary::text "
                         + "FROM app.knowledge_base WHERE knowledge_base_id = ?",
                 (rs, row) -> knowledgeBase(rs, traceId), id),
                 "KNOWLEDGE_BASE_NOT_FOUND", "Knowledge base not found.");
@@ -72,7 +73,8 @@ public class KnowledgeStore {
             UUID projectId, UUID traceId) {
         projects.requireProject(projectId);
         return jdbc.query(
-                "SELECT knowledge_base_id, project_id, name, description, active_version_id, created_at "
+                "SELECT knowledge_base_id, project_id, name, description, active_version_id, created_at, "
+                        + "source_change_summary::text "
                         + "FROM app.knowledge_base WHERE project_id = ? "
                         + "ORDER BY created_at, knowledge_base_id",
                 (rs, row) -> knowledgeBase(rs, traceId), projectId);
@@ -260,7 +262,8 @@ public class KnowledgeStore {
             throws SQLException {
         return new ProductApiContract.KnowledgeBaseResponse(
                 version(), traceId, rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
-                rs.getString(3), rs.getString(4), rs.getObject(5, UUID.class), instant(rs, 6));
+                rs.getString(3), rs.getString(4), rs.getObject(5, UUID.class),
+                json(rs, 7), instant(rs, 6));
     }
 
     private ProductApiContract.KnowledgeVersionResponse knowledgeVersion(

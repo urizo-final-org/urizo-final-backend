@@ -210,6 +210,8 @@ public final class ProductApiContract {
             String name,
             String description,
             @JsonInclude(JsonInclude.Include.ALWAYS) UUID activeVersionId,
+            /** AI02-022. 원천 변경 점검 요약. null이면 아직 점검된 적 없는 지식베이스다. */
+            JsonNode sourceChangeSummary,
             Instant createdAt) {
     }
 

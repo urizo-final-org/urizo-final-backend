@@ -9,12 +9,18 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,16 +39,22 @@ final class ProductBatchService {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final EmbeddingClient embeddings;
+    private final ChunkingStrategyPlanner planner;
+    private final ObjectMapper objectMapper;
 
     ProductBatchService(
             JdbcTemplate productJdbcTemplate,
             TransactionTemplate productTransactionTemplate,
             Clock clock,
-            EmbeddingClient embeddings) {
+            EmbeddingClient embeddings,
+            ChunkingStrategyPlanner planner,
+            ObjectMapper objectMapper) {
         this.jdbc = productJdbcTemplate;
         this.transactions = productTransactionTemplate;
         this.clock = clock;
         this.embeddings = embeddings;
+        this.planner = planner;
+        this.objectMapper = objectMapper;
     }
 
     boolean claim(UUID jobId, String workerId) {
@@ -189,26 +201,126 @@ final class ProductBatchService {
         });
     }
 
+    /**
+     * 전략 결정은 트랜잭션 밖에서 한다. LLM 호출을 트랜잭션 안에 두면 응답을 기다리는 동안
+     * 연결을 붙잡는다(COLLECT가 HTTP 수집을 밖에 둔 것과 같은 이유).
+     *
+     * <p>이미 전략이 저장된 버전은 다시 묻지 않는다. 재빌드가 매번 다른 값을 받으면 같은
+     * 버전을 재현할 수 없고, 무엇이 바뀌어 결과가 달라졌는지도 말할 수 없다.
+     */
     private void chunk(UUID jobId) {
+        UUID versionId = transactions.execute(status -> knowledgeVersion(jobId));
+        List<DocumentRow> documents = jdbc.query(
+                "SELECT source_document_id, content FROM app.source_document "
+                        + "WHERE knowledge_version_id = ? ORDER BY external_document_id",
+                (rs, row) -> new DocumentRow(
+                        rs.getObject(1, UUID.class), rs.getString(2)), versionId);
+        ChunkingStrategy strategy = storedStrategy(versionId)
+                .orElseGet(() -> planner.plan(documents.stream().map(DocumentRow::content).toList()));
+
         transactions.executeWithoutResult(status -> {
-            UUID versionId = knowledgeVersion(jobId);
-            List<DocumentRow> documents = jdbc.query(
-                    "SELECT source_document_id, content FROM app.source_document "
-                            + "WHERE knowledge_version_id = ? ORDER BY external_document_id",
-                    (rs, row) -> new DocumentRow(
-                            rs.getObject(1, UUID.class), rs.getString(2)), versionId);
+            int chunks = 0;
             for (DocumentRow document : documents) {
-                UUID chunkId = stableId(document.documentId() + ":chunk:0");
-                jdbc.update("INSERT INTO app.document_chunk "
-                                + "(document_chunk_id, source_document_id, knowledge_version_id, chunk_index, "
-                                + "content, content_digest) VALUES (?, ?, ?, 0, ?, ?) "
-                                + "ON CONFLICT (source_document_id, chunk_index) DO UPDATE SET "
-                                + "content = EXCLUDED.content, content_digest = EXCLUDED.content_digest",
-                        chunkId, document.documentId(), versionId,
-                        document.content(), sha256(document.content()));
+                List<String> pieces = split(document.content(), strategy);
+                for (int index = 0; index < pieces.size(); index++) {
+                    String piece = pieces.get(index);
+                    UUID chunkId = stableId(document.documentId() + ":chunk:" + index);
+                    jdbc.update("INSERT INTO app.document_chunk "
+                                    + "(document_chunk_id, source_document_id, knowledge_version_id, chunk_index, "
+                                    + "content, content_digest) VALUES (?, ?, ?, ?, ?, ?) "
+                                    + "ON CONFLICT (source_document_id, chunk_index) DO UPDATE SET "
+                                    + "content = EXCLUDED.content, content_digest = EXCLUDED.content_digest",
+                            chunkId, document.documentId(), versionId, index,
+                            piece, sha256(piece));
+                }
+                chunks += pieces.size();
             }
-            updateProgress(jobId, "CHUNK", 45, documents.size(), documents.size());
+            // 이전 빌드가 더 잘게 쪼갰다면 남은 꼬리 청크를 지운다. 남겨 두면 사라진 전략의
+            // 청크가 검색에 계속 걸린다.
+            jdbc.update("DELETE FROM app.document_chunk dc USING app.source_document sd "
+                            + "WHERE dc.source_document_id = sd.source_document_id "
+                            + "AND sd.knowledge_version_id = ? AND dc.chunk_index >= ?",
+                    versionId, maxChunkIndex(documents, strategy) + 1);
+            saveStrategy(versionId, strategy);
+            updateProgress(jobId, "CHUNK", 45, chunks, chunks);
         });
+    }
+
+    private static int maxChunkIndex(List<DocumentRow> documents, ChunkingStrategy strategy) {
+        return documents.stream()
+                .mapToInt(document -> split(document.content(), strategy).size() - 1)
+                .max().orElse(0);
+    }
+
+    /**
+     * 문단 경계 우선으로 자른다. 상한에서 기계적으로 끊으면 문장이 반토막 나 근거 인용이
+     * 어색해진다. 문단이 상한보다 길면 그때만 상한에서 끊는다.
+     *
+     * <p>겹침은 앞 조각의 꼬리를 다음 조각 머리에 붙인다 — 경계에 걸친 문장이 어느 쪽에서도
+     * 온전하지 않게 되는 것을 막는다.
+     */
+    static List<String> split(String content, ChunkingStrategy strategy) {
+        if (strategy.splitsNothing() || content.length() <= strategy.maxCharacters()) {
+            return List.of(content);
+        }
+        List<String> pieces = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (String paragraph : content.split("\n{2,}")) {
+            if (!current.isEmpty()
+                    && current.length() + paragraph.length() + 2 > strategy.maxCharacters()) {
+                pieces.add(current.toString().strip());
+                current = new StringBuilder(tail(pieces.get(pieces.size() - 1), strategy));
+            }
+            if (!current.isEmpty()) {
+                current.append("\n\n");
+            }
+            current.append(paragraph);
+            while (current.length() > strategy.maxCharacters()) {
+                pieces.add(current.substring(0, strategy.maxCharacters()).strip());
+                current = new StringBuilder(tail(pieces.get(pieces.size() - 1), strategy))
+                        .append(current.substring(strategy.maxCharacters()));
+            }
+        }
+        if (!current.toString().isBlank()) {
+            pieces.add(current.toString().strip());
+        }
+        return pieces.isEmpty() ? List.of(content) : List.copyOf(pieces);
+    }
+
+    private static String tail(String piece, ChunkingStrategy strategy) {
+        int overlap = Math.min(strategy.overlapCharacters(), piece.length());
+        return overlap <= 0 ? "" : piece.substring(piece.length() - overlap);
+    }
+
+    private Optional<ChunkingStrategy> storedStrategy(UUID versionId) {
+        return jdbc.query(
+                "SELECT chunking_strategy::text FROM app.knowledge_version "
+                        + "WHERE knowledge_version_id = ? AND chunking_strategy IS NOT NULL",
+                (rs, row) -> rs.getString(1), versionId).stream()
+                .findFirst()
+                .map(json -> {
+                    try {
+                        JsonNode node = objectMapper.readTree(json);
+                        return new ChunkingStrategy(
+                                node.path("maxCharacters").asInt(0),
+                                node.path("overlapCharacters").asInt(0),
+                                node.path("reason").asText("저장된 전략."));
+                    }
+                    catch (JsonProcessingException invalid) {
+                        throw new IllegalStateException("Stored chunking strategy is invalid.", invalid);
+                    }
+                });
+    }
+
+    private void saveStrategy(UUID versionId, ChunkingStrategy strategy) {
+        try {
+            jdbc.update("UPDATE app.knowledge_version SET chunking_strategy = ?::jsonb "
+                            + "WHERE knowledge_version_id = ?",
+                    objectMapper.writeValueAsString(strategy), versionId);
+        }
+        catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("Chunking strategy could not be encoded.", impossible);
+        }
     }
 
     private void embed(UUID jobId) {

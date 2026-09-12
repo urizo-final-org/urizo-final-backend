@@ -235,6 +235,8 @@ public final class ProductApiContract {
             int documentCount,
             int chunkCount,
             Double score,
+            /** AI02-018. 이 버전이 쓴 청킹 규칙. null이면 문서당 1청크로 만든 버전이다. */
+            JsonNode chunkingStrategy,
             Instant createdAt,
             Instant readyAt,
             Instant activatedAt) {

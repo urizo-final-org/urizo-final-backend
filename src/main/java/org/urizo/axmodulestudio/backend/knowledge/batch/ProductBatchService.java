@@ -21,12 +21,14 @@ import java.util.regex.Pattern;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
+import org.urizo.axmodulestudio.backend.knowledge.integration.ConnectorDocumentClient;
+import org.urizo.axmodulestudio.backend.knowledge.integration.ConnectorSecretResolver;
 import org.urizo.axmodulestudio.backend.knowledge.integration.DeterministicConnectorFixture;
 import org.urizo.axmodulestudio.backend.knowledge.integration.EmbeddingClient;
 import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocumentLoader;
@@ -44,22 +46,31 @@ final class ProductBatchService {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final EmbeddingClient embeddings;
+    private final ConnectorDocumentClient connectors;
+    private final ConnectorSecretResolver secrets;
     private final ChunkingStrategyPlanner planner;
     private final ObjectMapper objectMapper;
+    private final int maxDocuments;
 
     ProductBatchService(
             JdbcTemplate productJdbcTemplate,
             TransactionTemplate productTransactionTemplate,
             Clock clock,
             EmbeddingClient embeddings,
+            ConnectorDocumentClient connectors,
+            ConnectorSecretResolver secrets,
             ChunkingStrategyPlanner planner,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            @Value("${ax.knowledge.connector.max-documents:500}") int maxDocuments) {
         this.jdbc = productJdbcTemplate;
         this.transactions = productTransactionTemplate;
         this.clock = clock;
         this.embeddings = embeddings;
+        this.connectors = connectors;
+        this.secrets = secrets;
         this.planner = planner;
         this.objectMapper = objectMapper;
+        this.maxDocuments = maxDocuments;
     }
 
     boolean claim(UUID jobId, String workerId) {
@@ -174,14 +185,21 @@ final class ProductBatchService {
     }
 
     private void collect(UUID jobId) {
-        transactions.executeWithoutResult(status -> {
-            UUID versionId = knowledgeVersion(jobId);
-            Instant now = Instant.now(clock);
+        UUID versionId = transactions.execute(status -> {
+            UUID target = knowledgeVersion(jobId);
             jdbc.update("UPDATE app.knowledge_version SET status = 'BUILDING' "
                     + "WHERE knowledge_version_id = ? AND status IN ('BUILD_REQUESTED', 'FAILED', 'BUILDING')",
-                    versionId);
-            for (ProductApiContract.PreviewDocument document
-                    : TourismSampleDocumentLoader.documents()) {
+                    target);
+            return target;
+        });
+
+        // 원천 조회는 500건에 HTTP 여러 번이라 트랜잭션 밖에서 한다. 안에 두면 수집이 끝날
+        // 때까지 트랜잭션이 열려 있게 된다(EMBED가 배치 커밋을 쓰는 것과 같은 이유).
+        List<ProductApiContract.PreviewDocument> documents = source(versionId);
+
+        transactions.executeWithoutResult(status -> {
+            Instant now = Instant.now(clock);
+            for (ProductApiContract.PreviewDocument document : documents) {
                 UUID documentId = stableId(versionId + ":document:" + document.documentId());
                 EventPeriod period = eventPeriod(document.content());
                 jdbc.update("INSERT INTO app.source_document "
@@ -201,9 +219,43 @@ final class ProductBatchService {
                         Timestamp.from(document.sourceUpdatedAt()), sha256(document.content()), Timestamp.from(now),
                         period.start(), period.end(), document.imageUrl());
             }
-            updateProgress(jobId, "COLLECT", 15, TourismSampleDocumentLoader.totalCount(),
-                    TourismSampleDocumentLoader.totalCount());
+            updateProgress(jobId, "COLLECT", 15, documents.size(), documents.size());
         });
+    }
+
+    /**
+     * 이 Version에 고정된 커넥터로 원천 문서를 가져온다.
+     *
+     * <p>{@code fixture.invalid} 커넥터는 기존 표본 로더를 그대로 쓴다. 1호(관광) 코퍼스가
+     * 그 경로로 적재돼 있어, 실수집으로 한번에 갈아타면 이미 활성화된 Version을 다시 만들 수
+     * 없게 된다. 1호를 커넥터로 재수집할 수 있음이 확인되면 그때 이 분기와 로더를 함께 지운다.
+     */
+    private List<ProductApiContract.PreviewDocument> source(UUID versionId) {
+        JsonNode config = connectorConfig(versionId);
+        if (DeterministicConnectorFixture.supports(config.path("baseUrl").asText())) {
+            return TourismSampleDocumentLoader.documents();
+        }
+        String key = secrets.resolve(
+                config.path("authentication").path("secretRef").asText());
+        return connectors.fetch(config, key, maxDocuments);
+    }
+
+    private JsonNode connectorConfig(UUID versionId) {
+        List<String> values = jdbc.query(
+                "SELECT cv.config_json::text FROM app.knowledge_version kv "
+                        + "JOIN app.connector_version cv "
+                        + "ON cv.connector_version_id = kv.connector_version_id "
+                        + "WHERE kv.knowledge_version_id = ?",
+                (rs, row) -> rs.getString(1), versionId);
+        if (values.isEmpty()) {
+            throw new IllegalStateException("Knowledge version has no pinned connector version.");
+        }
+        try {
+            return objectMapper.readTree(values.get(0));
+        }
+        catch (JsonProcessingException failure) {
+            throw new IllegalStateException("Stored connector configuration is invalid.", failure);
+        }
     }
 
     /**

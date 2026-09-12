@@ -63,7 +63,7 @@ public class ProductJobStore {
             throw conflict(
                     "CONNECTOR_VERSION_NOT_ACTIVE", "An ACTIVE connector version is required.");
         }
-        connectors.requireFixture(config.config().path("baseUrl").asText());
+        connectors.requireSupportedSource(config.config().path("baseUrl").asText());
         UUID jobId = UUID.randomUUID();
         Instant now = Instant.now(clock);
         List<ProductApiContract.ResourceRef> refs = List.of(
@@ -103,7 +103,7 @@ public class ProductJobStore {
             throw conflict(
                     "CONNECTOR_VERSION_NOT_ACTIVE", "An ACTIVE connector version is required.");
         }
-        connectors.requireFixture(context.config().path("baseUrl").asText());
+        connectors.requireSupportedSource(context.config().path("baseUrl").asText());
         Integer nextVersion = jdbc.queryForObject(
                 "SELECT COALESCE(MAX(version_number), 0) + 1 FROM app.knowledge_version "
                         + "WHERE knowledge_base_id = ?",

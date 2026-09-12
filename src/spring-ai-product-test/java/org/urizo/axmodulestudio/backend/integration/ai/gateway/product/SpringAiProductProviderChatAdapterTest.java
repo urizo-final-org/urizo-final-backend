@@ -284,6 +284,159 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     @Test
+    void restoresEveryGeminiSignatureAfterAnEarlierToolResultIsFolded() throws Exception {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(geminiReadFileCall("README.md", new byte[] { 1 }))
+                .thenReturn(geminiReadFileCall("docs/guide.md", new byte[] { 2 }))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String modelId = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, modelId);
+        ProviderChatMessage user = ProviderChatMessage.plain(
+                ProviderChatMessage.Role.USER, "Read the approved file.");
+
+        ProviderChatMessage.ToolCall firstCall = adapter.chat(
+                registration, geminiFollowUp(modelId, user)).toolCalls().get(0);
+        ProviderChatMessage.ToolCall secondCall = adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(firstCall)),
+                ProviderChatMessage.tool(
+                        firstCall.id(), firstCall.name(), "{\"content\":\"first file\"}")))
+                .toolCalls().get(0);
+        // The coding stage folds an old tool body once newer results arrive. Only the body
+        // changes; the call ids stay, so the later call must still carry its own signature.
+        adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(firstCall)),
+                ProviderChatMessage.tool(
+                        firstCall.id(), firstCall.name(), "{\"content\":\"[folded]\"}"),
+                ProviderChatMessage.assistant("", List.of(secondCall)),
+                ProviderChatMessage.tool(
+                        secondCall.id(), secondCall.name(), "{\"content\":\"second file\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(3)).call(prompts.capture());
+        List<com.google.genai.types.Part> nativeCalls =
+                createGeminiProviderRequest(prompts.getAllValues().get(2)).contents().stream()
+                        .flatMap(content -> content.parts().orElse(List.of()).stream())
+                        .filter(part -> part.functionCall().isPresent())
+                        .toList();
+        assertThat(nativeCalls).hasSize(2);
+        assertThat(nativeCalls.get(0).thoughtSignature())
+                .hasValueSatisfying(value -> assertThat(value).containsExactly(1));
+        assertThat(nativeCalls.get(1).thoughtSignature())
+                .hasValueSatisfying(value -> assertThat(value).containsExactly(2));
+    }
+
+    @Test
+    void leavesGeminiToolCallsUnsignedWhenTheStoredNameOrArgumentsDiffer() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(geminiReadFileCall("README.md", new byte[] { 1 }))
+                .thenReturn(response())
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String modelId = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, modelId);
+        ProviderChatMessage user = ProviderChatMessage.plain(
+                ProviderChatMessage.Role.USER, "Read the approved file.");
+        ProviderChatMessage.ToolCall issued = adapter.chat(
+                registration, geminiFollowUp(modelId, user)).toolCalls().get(0);
+
+        adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(new ProviderChatMessage.ToolCall(
+                        issued.id(), issued.name(), "{\"path\":\"other.md\"}"))),
+                ProviderChatMessage.tool(
+                        issued.id(), issued.name(), "{\"content\":\"fixture\"}")));
+        adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(new ProviderChatMessage.ToolCall(
+                        issued.id(), "search_code", issued.arguments()))),
+                ProviderChatMessage.tool(
+                        issued.id(), "search_code", "{\"content\":\"fixture\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(3)).call(prompts.capture());
+        assertThat(assistantMetadata(prompts.getAllValues().get(1)))
+                .doesNotContainKey("thoughtSignatures");
+        assertThat(assistantMetadata(prompts.getAllValues().get(2)))
+                .doesNotContainKey("thoughtSignatures");
+    }
+
+    @Test
+    void leavesGeminiToolCallsUnsignedWhenTheIssuedCallOrderChanged() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(geminiParallelReadFileCalls())
+                .thenReturn(response())
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String modelId = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, modelId);
+        ProviderChatMessage user = ProviderChatMessage.plain(
+                ProviderChatMessage.Role.USER, "Read the approved file.");
+        List<ProviderChatMessage.ToolCall> issued = adapter.chat(
+                registration, geminiFollowUp(modelId, user)).toolCalls();
+        ProviderChatMessage.ToolCall first = issued.get(0);
+        ProviderChatMessage.ToolCall second = issued.get(1);
+
+        adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(first, second)),
+                ProviderChatMessage.tool(first.id(), first.name(), "{\"content\":\"one\"}"),
+                ProviderChatMessage.tool(second.id(), second.name(), "{\"content\":\"two\"}")));
+        adapter.chat(registration, geminiFollowUp(
+                modelId,
+                user,
+                ProviderChatMessage.assistant("", List.of(second, first)),
+                ProviderChatMessage.tool(second.id(), second.name(), "{\"content\":\"two\"}"),
+                ProviderChatMessage.tool(first.id(), first.name(), "{\"content\":\"one\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(3)).call(prompts.capture());
+        assertThat(assistantMetadata(prompts.getAllValues().get(1)))
+                .containsKey("thoughtSignatures");
+        assertThat(assistantMetadata(prompts.getAllValues().get(2)))
+                .doesNotContainKey("thoughtSignatures");
+    }
+
+    @Test
+    void keepsGeminiSignaturesSeparatePerModel() {
+        ChatModel chatModel = mock(ChatModel.class);
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(geminiReadFileCall("README.md", new byte[] { 1 }))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        ProviderChatMessage user = ProviderChatMessage.plain(
+                ProviderChatMessage.Role.USER, "Read the approved file.");
+        ProviderChatMessage.ToolCall issued = adapter.chat(
+                toolRegistration(ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_CHAT),
+                geminiFollowUp(Stage2ProviderModels.GOOGLE_GENAI_CHAT, user)).toolCalls().get(0);
+
+        adapter.chat(
+                toolRegistration(
+                        ModelProvider.GOOGLE_GENAI, Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6),
+                geminiFollowUp(
+                        Stage2ProviderModels.GOOGLE_GENAI_FLASH_3_6,
+                        user,
+                        ProviderChatMessage.assistant("", List.of(issued)),
+                        ProviderChatMessage.tool(
+                                issued.id(), issued.name(), "{\"content\":\"fixture\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(2)).call(prompts.capture());
+        assertThat(assistantMetadata(prompts.getAllValues().get(1)))
+                .doesNotContainKey("thoughtSignatures");
+    }
+
+    @Test
     void constructsConcreteProductLaneClientsWithoutMakingRemoteCalls() {
         try (ProductChatModelSession openAi = new OpenAiProductChatModelFactory(ObservationRegistry.NOOP)
                         .open(FIXTURE_CREDENTIAL, Stage2ProviderModels.OPENAI_CHAT, OUTPUT_BUDGET);
@@ -851,6 +1004,72 @@ class SpringAiProductProviderChatAdapterTest {
             assertThat(options.getThinkingLevel()).isEqualTo(GoogleGenAiThinkingLevel.HIGH);
             assertThat(options.getThinkingBudget()).isEqualTo(settings.reasoningBudgetTokens());
         }
+    }
+
+    private static SpringAiProductProviderChatAdapter geminiAdapter(ChatModel chatModel) {
+        ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        when(resolver.resolve(ModelProvider.GOOGLE_GENAI)).thenAnswer(ignored ->
+                ProviderCredentialLease.fromBytes(
+                        ModelProvider.GOOGLE_GENAI,
+                        FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
+        when(factory.provider()).thenReturn(ModelProvider.GOOGLE_GENAI);
+        when(factory.open(
+                org.mockito.ArgumentMatchers.eq(FIXTURE_CREDENTIAL),
+                org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq(ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS)))
+                .thenAnswer(ignored -> new ProductChatModelSession(chatModel, () -> { }));
+        return new SpringAiProductProviderChatAdapter(
+                resolver, List.of(factory), Clock.fixed(NOW, ZoneOffset.UTC));
+    }
+
+    private static ChatResponse geminiReadFileCall(String path, byte[] signature) {
+        AssistantMessage call = AssistantMessage.builder()
+                .content("")
+                .toolCalls(List.of(new AssistantMessage.ToolCall(
+                        "provider-id", "function", "read_file",
+                        "{\"path\":\"" + path + "\"}")))
+                .properties(Map.of("thoughtSignatures", List.of(signature)))
+                .build();
+        return new ChatResponse(List.of(new Generation(call)));
+    }
+
+    private static ChatResponse geminiParallelReadFileCalls() {
+        AssistantMessage calls = AssistantMessage.builder()
+                .content("")
+                .toolCalls(List.of(
+                        new AssistantMessage.ToolCall(
+                                "provider-id-1", "function", "read_file",
+                                "{\"path\":\"README.md\"}"),
+                        new AssistantMessage.ToolCall(
+                                "provider-id-2", "function", "read_file",
+                                "{\"path\":\"docs/guide.md\"}")))
+                .properties(Map.of("thoughtSignatures",
+                        List.of(new byte[] { 1 }, new byte[] { 2 })))
+                .build();
+        return new ChatResponse(List.of(new Generation(calls)));
+    }
+
+    private static Map<String, Object> assistantMetadata(Prompt prompt) {
+        return ((AssistantMessage) prompt.getInstructions().get(1)).getMetadata();
+    }
+
+    private static ProviderChatRequest geminiFollowUp(
+            String modelId, ProviderChatMessage... messages) {
+        return new ProviderChatRequest(
+                ModelProvider.GOOGLE_GENAI,
+                modelId,
+                List.of(messages),
+                List.of(
+                        new ProviderToolDefinition(
+                                "read_file", "Read one approved file.", readFileSchema()),
+                        // A second approved name carrying the same fixture input shape, so a
+                        // history can differ in the tool name alone: ProviderChatRequest validates
+                        // every call against its declared tool and that tool's schema.
+                        new ProviderToolDefinition(
+                                "search_code", "Fixture twin input of read_file.",
+                                readFileSchema())),
+                NOW.plusSeconds(30));
     }
 
     private static ProviderChatRequest nativeRequest(ModelProvider provider, String modelId) {

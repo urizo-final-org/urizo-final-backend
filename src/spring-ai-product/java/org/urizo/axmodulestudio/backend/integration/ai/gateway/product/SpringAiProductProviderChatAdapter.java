@@ -128,10 +128,9 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     }
 
     private Prompt prompt(ProviderModelRegistration registration, ProviderChatRequest request) {
-        List<ProviderChatMessage> providerMessages = request.providerMessages();
         List<Message> messages = new ArrayList<>();
-        for (int index = 0; index < providerMessages.size(); index++) {
-            messages.add(springMessage(request, providerMessages.get(index), index));
+        for (ProviderChatMessage providerMessage : request.providerMessages()) {
+            messages.add(springMessage(request, providerMessage));
         }
         if (request.tools().isEmpty() && !request.responseFormat().structured()) {
             return new Prompt(messages, chatOptions(registration, request));
@@ -256,12 +255,11 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
 
     private Message springMessage(
             ProviderChatRequest request,
-            ProviderChatMessage message,
-            int messageIndex) {
+            ProviderChatMessage message) {
         return switch (message.role()) {
             case SYSTEM -> new SystemMessage(message.content());
             case USER -> new UserMessage(message.content());
-            case ASSISTANT -> assistantMessage(request, message, messageIndex);
+            case ASSISTANT -> assistantMessage(request, message);
             case TOOL -> ToolResponseMessage.builder()
                     .responses(List.of(new ToolResponseMessage.ToolResponse(
                             message.toolCallId(), message.toolName(), message.content())))
@@ -271,15 +269,14 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
 
     private AssistantMessage assistantMessage(
             ProviderChatRequest request,
-            ProviderChatMessage message,
-            int messageIndex) {
+            ProviderChatMessage message) {
         AssistantMessage.Builder builder = AssistantMessage.builder()
                 .content(message.content())
                 .toolCalls(message.toolCalls().stream()
                         .map(call -> new AssistantMessage.ToolCall(
                                 call.id(), "function", call.name(), call.arguments()))
                         .toList());
-        List<byte[]> restored = restoreThoughtSignatures(request, message, messageIndex);
+        List<byte[]> restored = restoreThoughtSignatures(request, message);
         if (!restored.isEmpty()) {
             builder.properties(Map.of("thoughtSignatures", restored));
         }
@@ -465,30 +462,32 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             validated.add(Arrays.copyOf(signature, signature.length));
         }
         Instant expiresAt = clock.instant().plus(THOUGHT_SIGNATURE_TTL);
-        String assistantContent = output.getText() == null ? "" : output.getText();
         synchronized (thoughtSignatures) {
             for (int index = 0; index < validated.size(); index++) {
                 ProviderChatMessage.ToolCall call = normalizedCalls.get(index);
                 thoughtSignatures.put(
                         new ThoughtSignatureKey(
-                                request.provider(), request.modelId(),
-                                correlationId(
-                                        request,
-                                        request.providerMessages().size(),
-                                        assistantContent,
-                                        index,
-                                        call.name(),
-                                        call.arguments())),
+                                request.provider(), request.modelId(), call.id()),
                         new StoredThoughtSignature(
-                                validated.get(index), expiresAt));
+                                validated.get(index), expiresAt, call.name(),
+                                argumentsDigest(call.arguments()), index));
             }
         }
     }
 
+    /**
+     * The signature is looked up by the tool call id the provider answer was issued with,
+     * because that id travels through the stored conversation unchanged. A key built from the
+     * preceding messages would miss as soon as an older tool body is folded or elided, and the
+     * follow-up would be sent without the signature Gemini requires.
+     *
+     * <p>An id alone is not proof of the same call, so the name, arguments and position the
+     * signature was issued with must still match. Anything else leaves the message unsigned
+     * rather than attaching a signature that belongs to a different call.
+     */
     private List<byte[]> restoreThoughtSignatures(
             ProviderChatRequest request,
-            ProviderChatMessage message,
-            int messageIndex) {
+            ProviderChatMessage message) {
         List<ProviderChatMessage.ToolCall> calls = message.toolCalls();
         if (request.provider() != ModelProvider.GOOGLE_GENAI || calls.isEmpty()) {
             return List.of();
@@ -498,23 +497,32 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             for (int callIndex = 0; callIndex < calls.size(); callIndex++) {
                 ProviderChatMessage.ToolCall call = calls.get(callIndex);
                 ThoughtSignatureKey key = new ThoughtSignatureKey(
-                        request.provider(), request.modelId(),
-                        correlationId(
-                                request,
-                                messageIndex,
-                                message.content(),
-                                callIndex,
-                                call.name(),
-                                call.arguments()));
+                        request.provider(), request.modelId(), call.id());
                 StoredThoughtSignature stored = thoughtSignatures.get(key);
                 if (stored == null || !clock.instant().isBefore(stored.expiresAt())) {
                     thoughtSignatures.remove(key);
+                    return List.of();
+                }
+                if (!stored.toolName().equals(call.name())
+                        || !stored.argumentsDigest().equals(argumentsDigest(call.arguments()))
+                        || stored.callIndex() != callIndex) {
                     return List.of();
                 }
                 restored.add(Arrays.copyOf(stored.value(), stored.value().length));
             }
         }
         return List.copyOf(restored);
+    }
+
+    private static String argumentsDigest(String arguments) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            update(digest, arguments);
+            return java.util.HexFormat.of().formatHex(digest.digest());
+        }
+        catch (NoSuchAlgorithmException failure) {
+            throw new IllegalStateException("SHA-256 is unavailable.", failure);
+        }
     }
 
     private static String legacyEnvelope(
@@ -545,7 +553,9 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     }
 
     private record ThoughtSignatureKey(
-            ModelProvider provider, String modelId, String correlationId) { }
+            ModelProvider provider, String modelId, String toolCallId) { }
 
-    private record StoredThoughtSignature(byte[] value, Instant expiresAt) { }
+    private record StoredThoughtSignature(
+            byte[] value, Instant expiresAt,
+            String toolName, String argumentsDigest, int callIndex) { }
 }

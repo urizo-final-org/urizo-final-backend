@@ -19,6 +19,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.context.annotation.Profile;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -78,11 +79,20 @@ public class ConnectorStore {
         config.set("documentMapping", request.documentMapping());
         String configJson = encode(config);
         String configDigest = sha256(configJson);
-        jdbc.update(
-                "INSERT INTO app.connector "
-                        + "(connector_id, project_id, name, status, created_at, updated_at) "
-                        + "VALUES (?, ?, ?, 'DRAFT', ?, ?)",
-                connectorId, projectId, request.name(), Timestamp.from(now), Timestamp.from(now));
+        try {
+            jdbc.update(
+                    "INSERT INTO app.connector "
+                            + "(connector_id, project_id, name, status, created_at, updated_at) "
+                            + "VALUES (?, ?, ?, 'DRAFT', ?, ?)",
+                    connectorId, projectId, request.name(), Timestamp.from(now), Timestamp.from(now));
+        }
+        catch (DuplicateKeyException taken) {
+            // uq_connector_project_name. 사전 SELECT는 경합에 지므로 제약이 판정하게 두고
+            // 번역만 한다. 번역하지 않으면 "제품 저장소를 쓸 수 없음"(503)으로 나가 이름이
+            // 겹쳤다는 사실이 화면에서 사라진다.
+            throw conflict("CONNECTOR_NAME_TAKEN",
+                    "A connector with this name already exists in the project.");
+        }
         jdbc.update(
                 "INSERT INTO app.connector_version "
                         + "(connector_version_id, connector_id, version_number, status, "

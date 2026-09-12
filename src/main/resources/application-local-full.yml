@@ -84,6 +84,15 @@ ax:
       timeout: ${AXMS_CHUNKING_LLM_TIMEOUT:30s}
       provider: ${AXMS_CHUNKING_LLM_PROVIDER:ANTHROPIC}
       model: ${AXMS_CHUNKING_LLM_MODEL:}
+    evaluation-llm:
+      # 골든 질문 평가셋 생성(AI02-020). 빌드가 아니라 관리자의 명시적 생성 요청에서만,
+      # 지식베이스당 한 번 호출된다. 검수·동결(CONFIRMED) 전의 세트는 어떤 점수에도
+      # 쓰이지 않는다. 꺼 두면 생성이 거절되고 평가는 기존 제목 자가검색 그대로다.
+      enabled: ${AXMS_EVAL_LLM:false}
+      # 호출 한 번의 벽시계 상한. 생성은 빌드 밖에서 돌므로 빌드 시간과 무관하다.
+      timeout: ${AXMS_EVAL_LLM_TIMEOUT:30s}
+      provider: ${AXMS_EVAL_LLM_PROVIDER:ANTHROPIC}
+      model: ${AXMS_EVAL_LLM_MODEL:}
     embedding:
       # 임베딩 서비스는 컨테이너 밖 호스트에서 동작한다. Compose를 바꾸지 않고
       # 컨테이너가 호스트에 닿도록 host.docker.internal을 기본값으로 둔다.

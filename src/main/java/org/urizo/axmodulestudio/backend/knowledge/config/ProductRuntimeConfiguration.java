@@ -30,7 +30,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @EnableScheduling
 @EnableConfigurationProperties({
         ProductRuntimeProperties.class, EmbeddingProperties.class, PublicChatLlmProperties.class,
-        ChunkingLlmProperties.class})
+        ChunkingLlmProperties.class, EvaluationLlmProperties.class})
 public class ProductRuntimeConfiguration {
 
     @Bean(destroyMethod = "close")

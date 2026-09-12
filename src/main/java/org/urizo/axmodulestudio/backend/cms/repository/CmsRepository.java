@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.repository;
 
+import org.urizo.axmodulestudio.backend.cms.dto.TemplateHeroImage;
+
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -230,6 +232,10 @@ public class CmsRepository {
         return templateRepository.findById(key).map(CmsRepository::template);
     }
 
+    public Optional<TemplateView> findTemplateForUpdate(String key) {
+        return templateRepository.findForUpdate(key).map(CmsRepository::template);
+    }
+
     public boolean templateExists(String key) {
         return templateRepository.existsById(key);
     }
@@ -237,11 +243,11 @@ public class CmsRepository {
     public int updateTemplate(
             String key, String layout, String color, String siteName, String header, String footer,
             String heroImageUrl, String heroTitle, String heroSubtitle,
-            String heroButtonLabel, String heroButtonUrl) {
+            String heroButtonLabel, String heroButtonUrl, List<TemplateHeroImage> heroImages) {
         return templateRepository.findById(key).map(template -> {
             template.changePresentation(layout, color, siteName, header, footer,
                     heroImageUrl, heroTitle,
-                    heroSubtitle, heroButtonLabel, heroButtonUrl, Instant.now());
+                    heroSubtitle, heroButtonLabel, heroButtonUrl, heroImages, Instant.now());
             return 1;
         }).orElse(0);
     }
@@ -347,6 +353,7 @@ public class CmsRepository {
                 template.getPrimaryColor(), template.getSiteName(), template.getHeaderText(),
                 template.getFooterText(), template.getHeroImageUrl(), template.getHeroTitle(),
                 template.getHeroSubtitle(), template.getHeroButtonLabel(),
-                template.getHeroButtonUrl(), template.isActive(), template.getUpdatedAt());
+                template.getHeroButtonUrl(), template.isActive(), template.getUpdatedAt(),
+                template.getHeroImageUrls(), template.getHeroImages());
     }
 }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
@@ -83,7 +84,6 @@ class CmsServiceTest {
                 "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
                 "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
                 "자세히 보기", "/about", false, Instant.now());
-        when(repository.templateExists("MINIMAL")).thenReturn(true);
         when(repository.findTemplate("MINIMAL")).thenReturn(Optional.of(saved));
 
         TemplateView result = service.saveTemplate(
@@ -92,12 +92,11 @@ class CmsServiceTest {
                 "자세히 보기", "/about");
 
         assertThat(result).isEqualTo(saved);
-        verify(repository).templateExists("MINIMAL");
         verify(repository).updateTemplate(
                 "MINIMAL", "MINIMAL", "#0E9F76", "AX Studio", "간결한 콘텐츠",
                 "Local Demo", "/images/cms/hero-bio.svg", "Technology", "소개",
-                "자세히 보기", "/about");
-        verify(repository).findTemplate("MINIMAL");
+                "자세히 보기", "/about", List.of(new org.urizo.axmodulestudio.backend.cms.dto.TemplateHeroImage("/images/cms/hero-bio.svg", "", "")));
+        verify(repository, times(2)).findTemplate("MINIMAL");
         verifyNoMoreInteractions(repository);
         verifyNoInteractions(siteSettings);
     }

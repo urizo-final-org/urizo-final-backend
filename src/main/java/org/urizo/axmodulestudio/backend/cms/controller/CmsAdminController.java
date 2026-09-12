@@ -240,7 +240,7 @@ public class CmsAdminController {
         var result = cms.saveTemplate(key, request.layout(), request.primaryColor(), request.siteName(),
                 request.headerText(), request.footerText(), request.heroImageUrl(),
                 request.heroTitle(), request.heroSubtitle(), request.heroButtonLabel(),
-                request.heroButtonUrl());
+                request.heroButtonUrl(), request.heroImageUrls(), request.heroImages());
         history.record(actor, "TEMPLATE", key, "SAVE", request.siteName());
         return result;
     }

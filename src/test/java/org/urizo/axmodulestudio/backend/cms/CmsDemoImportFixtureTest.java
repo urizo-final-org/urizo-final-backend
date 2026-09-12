@@ -44,6 +44,7 @@ import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.cms.controller.CmsAdminController;
 import org.urizo.axmodulestudio.backend.cms.controller.CmsCodeController;
 import org.urizo.axmodulestudio.backend.cms.controller.CmsSiteSettingsController;
+import org.urizo.axmodulestudio.backend.cms.controller.CmsSiteController;
 import org.urizo.axmodulestudio.backend.cms.repository.CmsRepository;
 import org.urizo.axmodulestudio.backend.cms.repository.CmsSiteRepository;
 import org.urizo.axmodulestudio.backend.cms.service.CmsCodeService;
@@ -67,7 +68,7 @@ class CmsDemoImportFixtureTest {
             transactionManagerRef = "authJpaTransactionManager")
     @Import({CmsRepository.class, CmsSiteRepository.class, CmsService.class,
             CmsCodeService.class, CmsSiteSettingsService.class, CmsChangeRecorder.class,
-            CmsAdminController.class, CmsCodeController.class, CmsSiteSettingsController.class})
+            CmsAdminController.class, CmsCodeController.class, CmsSiteSettingsController.class, CmsSiteController.class})
     static class FixtureConfig {
         @Bean DataSource productDataSource() {
             String url = System.getenv("AXMS_CMS_IMPORT_FIXTURE_JDBC");

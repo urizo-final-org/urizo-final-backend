@@ -1,6 +1,9 @@
 package org.urizo.axmodulestudio.backend.cms.entity;
 
+import org.urizo.axmodulestudio.backend.cms.dto.TemplateHeroImage;
+
 import java.time.Instant;
+import java.util.List;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -34,6 +37,20 @@ public class CmsTemplateEntity {
 
     @Column(name = "hero_image_url", nullable = false, length = 500)
     private String heroImageUrl;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "hero_image_urls", columnDefinition = "jsonb")
+    private List<String> heroImageUrls;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "hero_images", columnDefinition = "jsonb")
+    private List<TemplateHeroImage> heroImages;
+
+    public List<TemplateHeroImage> getHeroImages() {
+        return heroImages == null
+                ? getHeroImageUrls().stream().map(url -> new TemplateHeroImage(url, "", "")).toList()
+                : List.copyOf(heroImages);
+    }
 
     @Column(name = "hero_title", nullable = false, length = 160)
     private String heroTitle;
@@ -85,6 +102,12 @@ public class CmsTemplateEntity {
         return heroImageUrl;
     }
 
+    public List<String> getHeroImageUrls() {
+        return heroImageUrls == null
+                ? (heroImageUrl == null || heroImageUrl.isBlank() ? List.of() : List.of(heroImageUrl))
+                : List.copyOf(heroImageUrls);
+    }
+
     public String getHeroTitle() {
         return heroTitle;
     }
@@ -120,6 +143,7 @@ public class CmsTemplateEntity {
             String heroSubtitle,
             String heroButtonLabel,
             String heroButtonUrl,
+            List<TemplateHeroImage> heroImages,
             Instant changedAt) {
         this.layout = layout;
         this.primaryColor = primaryColor;
@@ -127,6 +151,8 @@ public class CmsTemplateEntity {
         this.headerText = headerText;
         this.footerText = footerText;
         this.heroImageUrl = heroImageUrl;
+        this.heroImages = List.copyOf(heroImages);
+        this.heroImageUrls = heroImages.stream().map(TemplateHeroImage::url).toList();
         this.heroTitle = heroTitle;
         this.heroSubtitle = heroSubtitle;
         this.heroButtonLabel = heroButtonLabel;

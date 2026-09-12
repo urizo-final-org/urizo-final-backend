@@ -220,7 +220,7 @@ class NaturalCmsResourceServiceTest {
                 new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.templates()).thenReturn(java.util.List.of(template()));
         JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"siteName":"새 사이트"}}
+                {"operation":"UPDATE","fields":{"heroTitle":"새 대표 문구"}}
                 """);
 
         NaturalCmsContract.ResourceRef resource =
@@ -229,8 +229,8 @@ class NaturalCmsResourceServiceTest {
         resources.apply(resource, command, AUTHOR);
 
         verify(cms).saveTemplate(
-                "classic", "wide", "#112233", "새 사이트", "머리말", "꼬리말",
-                "/hero.png", "환영합니다", "부제", "자세히", "/about");
+                "classic", "wide", "#112233", template().siteName(), "머리말", "꼬리말",
+                "/hero.png", "새 대표 문구", "부제", "자세히", "/about", java.util.List.of("/hero.png"), template().heroImages());
     }
 
     @Test

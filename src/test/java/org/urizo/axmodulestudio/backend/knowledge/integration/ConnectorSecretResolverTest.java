@@ -35,6 +35,18 @@ class ConnectorSecretResolverTest {
     }
 
     @Test
+    void wellFormedAppliesTheSameNameRuleAtRegistrationTime() {
+        assertThat(ConnectorSecretResolver.wellFormed("cms-secret://sme-support-api")).isTrue();
+        // 아래는 전부 resolve()에서 죽는 참조다. 등록이 통과시키면 "등록 성공한 커넥터"가
+        // 미리보기·수집에서야 터진다 — 그래서 같은 규칙을 등록 검증이 미리 적용한다.
+        assertThat(ConnectorSecretResolver.wellFormed("cms-secret://data-go-kr/service-key")).isFalse();
+        assertThat(ConnectorSecretResolver.wellFormed("cms-secret://Upper-Case")).isFalse();
+        assertThat(ConnectorSecretResolver.wellFormed("cms-secret://")).isFalse();
+        assertThat(ConnectorSecretResolver.wellFormed("fixture://public-data/local-v1")).isFalse();
+        assertThat(ConnectorSecretResolver.wellFormed(null)).isFalse();
+    }
+
+    @Test
     void cannotReachSecretsOutsideTheConnectorPrefix() {
         // connector_ 접두사가 없으면 이 참조가 DB 비밀번호를 그대로 읽어낸다.
         assertThatThrownBy(() -> resolver.resolve("cms-secret://cms-app-password"))

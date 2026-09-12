@@ -37,6 +37,16 @@ public class ConnectorSecretResolver {
         this.directory = Path.of(directory);
     }
 
+    /**
+     * 참조가 이 해석기의 이름 규칙까지 맞는지. 등록 검증이 같은 규칙을 미리 적용해
+     * "등록은 되는데 수집에서 실패하는" 참조를 등록 시점에 막는다 — 스킴만 보면
+     * 그 의도가 절반만 지켜진다.
+     */
+    public static boolean wellFormed(String secretRef) {
+        return secretRef != null && secretRef.startsWith(SCHEME)
+                && NAME.matcher(secretRef.substring(SCHEME.length())).matches();
+    }
+
     public String resolve(String secretRef) {
         if (secretRef == null || !secretRef.startsWith(SCHEME)) {
             throw new IllegalStateException(

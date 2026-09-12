@@ -258,6 +258,9 @@ public class ConnectorStore {
         if (!value.startsWith("cms-secret://")) {
             throw validation("A live connector source requires a cms-secret:// reference.");
         }
+        if (!ConnectorSecretResolver.wellFormed(value)) {
+            throw validation("Connector secret reference name is invalid.");
+        }
     }
 
     private static void validateAuthentication(JsonNode value) {

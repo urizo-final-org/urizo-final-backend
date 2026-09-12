@@ -108,6 +108,32 @@ class CodingRunnerLivenessTest {
                 .doesNotContain("::uuid");
     }
 
+    /**
+     * Job 99748158 was cancelled at 07:28:46 and the runner still finished TEST at 07:29:29 and
+     * PREVIEW_UP at 07:30:58, so six preview containers came up two minutes after the person
+     * asked the request to stop. Those three Docker steps carry the Job's workspaceId, and an
+     * abandoned Job has no use for any of them.
+     *
+     * <p>CREATE_PR carries a workspaceId too and is deliberately not listed: the stage that
+     * queues it waits for it in place, so skipping it would spend that wait's whole budget
+     * before failing. COMPLETED is not listed either - a Job that ended well may still have a
+     * preview on the way, and this is a cancel fix.
+     */
+    @Test
+    void theDockerStepsOfAnAbandonedJobAreExcludedButItsPullRequestIsNot() {
+        runnerAuthenticates();
+
+        ArgumentCaptor<String> claimQuery = ArgumentCaptor.forClass(String.class);
+        verify(jdbc).query(claimQuery.capture(), any(RowMapper.class));
+
+        assertThat(claimQuery.getValue())
+                .contains("task.kind IN ('BUILD', 'TEST', 'PREVIEW_UP')")
+                .contains("job.status IN ('CANCELLED', 'FAILED', 'EXPIRED')");
+        assertThat(claimQuery.getValue())
+                .doesNotContain("'CREATE_PR'")
+                .doesNotContain("'PREVIEW_DOWN'");
+    }
+
     @Test
     void twoMinutesOfSilenceIsJudgedAsOff() {
         runnerAuthenticates();

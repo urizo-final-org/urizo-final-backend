@@ -83,6 +83,25 @@ public class CodingRunnerService {
                             + "SELECT 1 FROM app.coding_job job "
                             + "WHERE job.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED') "
                             + "AND LOWER(task.payload ->> 'workspaceId') = job.job_id::text)) "
+                            // Measured on Job 99748158: the cancel landed at 07:28:46 and the
+                            // runner still finished TEST at 07:29:29 and PREVIEW_UP at 07:30:58,
+                            // raising six preview containers two minutes after the person asked
+                            // for the request to stop. Those containers then compete with the
+                            // next Job's check for the same CPU, which is how a candidate that
+                            // passes 311/311 with the preview down fails it twice with the
+                            // preview up (Jobs 73f7c6ef and 4bc3160f).
+                            //
+                            // Only the three Docker steps of an abandoned Job are skipped.
+                            // CREATE_PR also carries a workspaceId but is awaited in place by
+                            // the stage that queued it, so skipping it would turn a dead Job's
+                            // pull request into a poll that exhausts its budget rather than a
+                            // task that simply never mattered. COMPLETED is left out for the
+                            // same reason: a Job that ends well may still have a preview on the
+                            // way, and this is a cancel fix, not a change to the happy path.
+                            + "AND NOT (task.kind IN ('BUILD', 'TEST', 'PREVIEW_UP') AND EXISTS ("
+                            + "SELECT 1 FROM app.coding_job job "
+                            + "WHERE job.status IN ('CANCELLED', 'FAILED', 'EXPIRED') "
+                            + "AND LOWER(task.payload ->> 'workspaceId') = job.job_id::text)) "
                             + "ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1",
                     (rs, row) -> new TaskRow(rs.getObject(1, UUID.class), rs.getString(2),
                             rs.getString(3), rs.getInt(4), rs.getInt(5)));

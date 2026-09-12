@@ -10,10 +10,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.util.List;
 import java.util.UUID;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -43,8 +45,9 @@ class CodingConsoleCancelTest {
 
     private final JdbcTemplate jdbc = mock(JdbcTemplate.class);
     private final CodingJobLifecycleService lifecycle = mock(CodingJobLifecycleService.class);
+    private final CodingRunnerService runner = mock(CodingRunnerService.class);
     private final CodingConsoleService service =
-            new CodingConsoleService(jdbc, new ObjectMapper(), lifecycle);
+            new CodingConsoleService(jdbc, new ObjectMapper(), lifecycle, runner);
 
     /** Answers the cancel lookup with one row in the given state; every other query is empty. */
     private void jobIs(String status, int stateVersion) {
@@ -96,6 +99,43 @@ class CodingConsoleCancelTest {
         service.cancel(JOB, "cancel-key-0002", AdminRole.GENERAL_ADMIN);
 
         verify(lifecycle).transition(eq(JOB), eq(TRACE), eq("cancel-key-0002"), any());
+    }
+
+    /**
+     * The claim query keeps an abandoned Job's BUILD, TEST and PREVIEW_UP away from the runner,
+     * so nothing new comes up. A preview raised before the cancel is already running, and until
+     * this the only thing that ever took one down was the next Job's check - measured on Job
+     * 99748158, whose six containers were still up long after it was cancelled.
+     */
+    @Test
+    @DisplayName("취소하면 이미 떠 있는 미리보기를 내리라고 실행기에 알린다")
+    void asksTheRunnerToTakeTheRunningPreviewDown() {
+        jobIs("WAITING_APPROVAL", 6);
+
+        service.cancel(JOB, "cancel-key-0010", AdminRole.SUPER_ADMIN);
+
+        ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
+        verify(runner).enqueue(
+                eq(UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down-on-cancel:" + JOB)
+                                .getBytes(StandardCharsets.UTF_8))),
+                eq("PREVIEW_DOWN"),
+                payload.capture());
+        // Empty on purpose: PREVIEW_DOWN carries no workspaceId, which is what keeps it out of
+        // the claim query's skip - the one command an abandoned Job still needs to run.
+        assertThat(payload.getValue().isObject()).isTrue();
+        assertThat(payload.getValue().isEmpty()).isTrue();
+    }
+
+    @Test
+    @DisplayName("취소가 거절되면 미리보기를 내리지 않는다")
+    void leavesThePreviewAloneWhenTheCancelIsRefused() {
+        jobIs("RUNNING", 4);
+
+        assertThatThrownBy(() -> service.cancel(JOB, "cancel-key-0011", AdminRole.SUPER_ADMIN))
+                .isInstanceOf(CodingJobLifecycleException.class);
+
+        verify(runner, never()).enqueue(any(UUID.class), anyString(), any());
     }
 
     @Test

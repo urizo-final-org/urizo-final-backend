@@ -19,6 +19,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests;
+import org.urizo.axmodulestudio.backend.cms.dto.TemplateHeroImage;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.ContentView;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.MenuView;
@@ -102,14 +103,44 @@ public final class NaturalCmsResourceService {
      */
     public JsonNode validateCommand(
             NaturalCmsContract.ResourceRef resource, JsonNode command) {
+        return validateCommand(resource, command, "");
+    }
+
+    public JsonNode validateCommand(
+            NaturalCmsContract.ResourceRef resource, JsonNode command, String requestText) {
         ResourceHandler<?> handler = handler(resource);
         // 다듬은 뒤 검사한다. 검사한 것과 기록에 남는 것이 같아야 승인한 것이 반영된다.
         JsonNode recorded = command.deepCopy();
         if (recorded.path("fields") instanceof ObjectNode fields) {
             handler.normalize(fields);
         }
-        validated(handler, resource.id(), parse(resource.type(), handler, recorded, null));
+        validated(handler, resource.id(), parse(resource.type(), handler, recorded, null, requestText));
         return recorded;
+    }
+
+    public ObjectNode templateReference(NaturalCmsContract.ResourceRef resource, String requestText) {
+        TemplateView current = ((TemplateHandler) handler(resource)).template(resource.id());
+        ObjectNode reference = objectMapper.createObjectNode();
+        reference.set("availableImageUrls", objectMapper.valueToTree(
+                TemplateCommandPolicy.imageUrls(current, requestText, cmsService)));
+        reference.set("buttonPaths", objectMapper.valueToTree(TemplateCommandPolicy.buttonPaths(cmsService)));
+        return reference;
+    }
+
+    /** MCP 재검증 뒤에도 변경이 없는지 행 잠금을 잡고 확인한 후 기존 저장 서비스로 반영한다. */
+    public JsonNode applyApprovedTemplate(NaturalCmsContract.ResourceRef resource, JsonNode command,
+            UUID actorId, String requestText, JsonNode approvedBefore) {
+        if (!"TEMPLATE".equals(resource.type()) || approvedBefore == null || !approvedBefore.isObject()) {
+            throw invalidCommand("승인한 템플릿 미리보기가 없습니다.");
+        }
+        TemplateHandler template = (TemplateHandler) handler(resource);
+        TemplateView locked = cmsService.templateForUpdate(resource.id());
+        if (!template.state(locked).equals(approvedBefore)) {
+            throw new NaturalCmsException("CMS_PREVIEW_STALE",
+                    "미리보기 이후 템플릿이 변경됐습니다. 다시 요청해 주세요.", HttpStatus.CONFLICT);
+        }
+        return saveChecked(template, resource.id(), parse(resource.type(), template,
+                command, Objects.requireNonNull(actorId), requestText));
     }
 
     /**
@@ -122,7 +153,7 @@ public final class NaturalCmsResourceService {
         Objects.requireNonNull(actorId, "actorId is required");
         ResourceHandler<?> handler = handler(resource);
         return saveChecked(
-                handler, resource.id(), parse(resource.type(), handler, command, actorId));
+                handler, resource.id(), parse(resource.type(), handler, command, actorId, ""));
     }
 
     private <R> JsonNode saveChecked(ResourceHandler<R> handler, String id, Command command) {
@@ -158,7 +189,7 @@ public final class NaturalCmsResourceService {
      * <p>리소스마다 열린 operation이 다르다. 열리지 않은 종류는 여기서 끊는다.
      */
     private static Command parse(
-            String type, ResourceHandler<?> handler, JsonNode command, UUID actorId) {
+            String type, ResourceHandler<?> handler, JsonNode command, UUID actorId, String requestText) {
         if (command == null
                 || !command.isObject()
                 || !names(command).equals(Set.of("operation", "fields"))
@@ -177,7 +208,7 @@ public final class NaturalCmsResourceService {
             if (!given.isEmpty()) {
                 throw invalidCommand("A " + type + " DELETE command carries no fields.");
             }
-            return new Command(operation, fields, actorId);
+            return new Command(operation, fields, actorId, requestText);
         }
         if (given.isEmpty() || !handler.fields().keySet().containsAll(given)) {
             throw invalidCommand(type + " " + operation + " accepts these fields only: "
@@ -188,7 +219,7 @@ public final class NaturalCmsResourceService {
                 throw invalidCommand("The " + name + " field type is invalid.");
             }
         }
-        return new Command(operation, fields, actorId);
+        return new Command(operation, fields, actorId, requestText);
     }
 
     private static NaturalCmsException invalidCommand(String message) {
@@ -240,7 +271,8 @@ public final class NaturalCmsResourceService {
         TEXT,
         TEXT_OR_NULL,
         NUMBER,
-        NUMBER_OR_NULL;
+        NUMBER_OR_NULL,
+        TEMPLATE_IMAGES;
 
         boolean accepts(JsonNode value) {
             return switch (this) {
@@ -248,6 +280,7 @@ public final class NaturalCmsResourceService {
                 case TEXT_OR_NULL -> value.isTextual() || value.isNull();
                 case NUMBER -> value.isIntegralNumber();
                 case NUMBER_OR_NULL -> value.isIntegralNumber() || value.isNull();
+                case TEMPLATE_IMAGES -> TemplateCommandPolicy.imageList(value);
             };
         }
     }
@@ -258,7 +291,7 @@ public final class NaturalCmsResourceService {
      * <p>{@code actorId}는 모델이 보낸 값이 아니라 Job이 이미 갖고 있는 요청자다.
      * 게시물 등록의 작성자로만 쓰이며 검증 경로에서는 {@code null}이다.
      */
-    private record Command(String operation, JsonNode fields, UUID actorId) {
+    private record Command(String operation, JsonNode fields, UUID actorId, String requestText) {
 
         boolean creates() {
             return "CREATE".equals(operation);
@@ -857,10 +890,9 @@ public final class NaturalCmsResourceService {
             return Map.ofEntries(
                     Map.entry("layout", FieldType.TEXT),
                     Map.entry("primaryColor", FieldType.TEXT),
-                    Map.entry("siteName", FieldType.TEXT),
                     Map.entry("headerText", FieldType.TEXT_OR_NULL),
                     Map.entry("footerText", FieldType.TEXT_OR_NULL),
-                    Map.entry("heroImageUrl", FieldType.TEXT),
+                    Map.entry("heroImages", FieldType.TEMPLATE_IMAGES),
                     Map.entry("heroTitle", FieldType.TEXT),
                     Map.entry("heroSubtitle", FieldType.TEXT_OR_NULL),
                     Map.entry("heroButtonLabel", FieldType.TEXT_OR_NULL),
@@ -869,7 +901,10 @@ public final class NaturalCmsResourceService {
 
         @Override
         public ObjectNode snapshot(String id) {
-            TemplateView view = template(id);
+            return state(template(id));
+        }
+
+        private ObjectNode state(TemplateView view) {
             ObjectNode state = objectMapper.createObjectNode();
             state.put("id", view.key());
             state.put("layout", view.layout());
@@ -877,7 +912,7 @@ public final class NaturalCmsResourceService {
             state.put("siteName", view.siteName());
             state.put("headerText", view.headerText());
             state.put("footerText", view.footerText());
-            state.put("heroImageUrl", view.heroImageUrl());
+            state.set("heroImages", objectMapper.valueToTree(view.heroImages()));
             state.put("heroTitle", view.heroTitle());
             state.put("heroSubtitle", view.heroSubtitle());
             state.put("heroButtonLabel", view.heroButtonLabel());
@@ -891,17 +926,21 @@ public final class NaturalCmsResourceService {
         public CmsRequests.TemplateRequest merged(Command command, String id) {
             TemplateView view = template(id);
             JsonNode fields = command.fields();
+            TemplateCommandPolicy.validate(fields, cmsService);
+            List<TemplateHeroImage> images = TemplateCommandPolicy.images(
+                    fields, view, command.requestText(), cmsService);
             return new CmsRequests.TemplateRequest(
                     text(fields, "layout", view.layout()),
                     text(fields, "primaryColor", view.primaryColor()),
-                    text(fields, "siteName", view.siteName()),
+                    view.siteName(),
                     text(fields, "headerText", view.headerText()),
                     text(fields, "footerText", view.footerText()),
-                    text(fields, "heroImageUrl", view.heroImageUrl()),
+                    images.isEmpty() ? "" : images.get(0).url(),
                     text(fields, "heroTitle", view.heroTitle()),
                     text(fields, "heroSubtitle", view.heroSubtitle()),
                     text(fields, "heroButtonLabel", view.heroButtonLabel()),
-                    text(fields, "heroButtonUrl", view.heroButtonUrl()));
+                    text(fields, "heroButtonUrl", view.heroButtonUrl()),
+                    images.stream().map(TemplateHeroImage::url).toList(), images);
         }
 
         @Override
@@ -917,7 +956,12 @@ public final class NaturalCmsResourceService {
                     request.heroTitle(),
                     request.heroSubtitle(),
                     request.heroButtonLabel(),
-                    request.heroButtonUrl()));
+                    request.heroButtonUrl(), request.heroImageUrls(), request.heroImages()));
+        }
+
+        @Override
+        public void normalize(ObjectNode fields) {
+            TemplateCommandPolicy.normalize(fields);
         }
 
         /** 템플릿은 숫자 id가 아니라 {@code key}로 찾는다. */

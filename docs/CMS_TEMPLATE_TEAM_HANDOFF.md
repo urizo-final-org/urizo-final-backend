@@ -1,19 +1,23 @@
-# CMS 템플릿 보완 — 팀원 LLM 적용 안내
+# CMS 여행 데모·템플릿 — 팀원 LLM 상태별 동기화 안내
 
-작업: `axms-template-banner-layouts` · 패키지: `cms-template-v1` · 2026-09-11
+작업: `axms-template-banner-layouts`, `AI05-020` · 패키지: `cms-tour-v1`, `cms-template-v1` · 2026-09-12
 
-템플릿 1(BOLD)·2(CLASSIC)의 디자인과 사진별 제목·설명·순서를 같은 데모로 맞춘다.
+이미 여행 데모를 적용한 PC와 아직 콘텐츠·게시판 데이터를 적용하지 않은 PC를 구분한다.
+필요한 공개 메뉴·콘텐츠·게시판 데이터를 먼저 준비하고, 템플릿 1(BOLD)·2(CLASSIC)의
+디자인과 사진별 제목·설명·순서를 같은 데모로 맞춘다. 판단은 팀원의 기억이나 Git Pull
+여부가 아니라 **그 PC의 현재 DB와 패키지별 dry-run**을 기준으로 한다.
 Git Pull, 실행 이미지/Schema 반영, CMS 업무 데이터 가져오기는 각각 별도 단계다.
 이 문서 전달은 네트워크·재빌드·마이그레이션·데이터 적용의 일괄 승인이 아니다.
 
 ## 팀원이 LLM에 전달할 요청
 
 ```text
-내 로컬 AX Module Studio에 최신 dev의 템플릿 보완과 템플릿 데모 데이터를 적용해줘.
+내 로컬 AX Module Studio의 공개 메뉴·콘텐츠·게시판 여행 데모와 템플릿 데이터를
+현재 DB 상태에 맞게 동기화해줘. 이전 여행 데모를 적용했는지는 직접 확인해라.
 
 1. 현재 Workspace/Master/Backend AGENTS.md와 Backend
-   docs/CMS_TEMPLATE_TEAM_HANDOFF.md를 끝까지 읽어라.
-   문서나 demo/cms-template-v1/manifest.json이 없으면 Git 상태부터 확인하고
+   docs/CMS_TEMPLATE_TEAM_HANDOFF.md와 docs/CMS_DEMO_TEAM_HANDOFF.md를 끝까지 읽어라.
+   문서나 두 demo 패키지의 manifest.json이 없으면 Git 상태부터 확인하고
    네트워크 최신화 승인을 요청하라. 구형 가져오기 도구로 대신 적용하지 마라.
 
 2. 먼저 Git·Docker·Runtime·Flyway·현재 템플릿·Natural CMS Job을 읽기 전용으로 점검하라.
@@ -25,7 +29,8 @@ Git Pull, 실행 이미지/Schema 반영, CMS 업무 데이터 가져오기는 �
 3. 승인된 Git 최신화는 공식 Master sync-workspace.ps1을 사용하라.
    기본 작업폴더의 clean dev를 동기화하고 dirty/diverged/local-only 작업을 보존하라.
    보호 브랜치 main 승격은 포함하지 않는다.
-   이 작업의 Frontend/Backend PR이 실제 dev에 병합됐는지 GitHub와 ancestry로 확인하라.
+   본문에 연결된 기본 Frontend/Backend PR과 AI05-020 네 Source PR의 실제 dev 병합을
+   GitHub와 ancestry로 확인하라. 각 PR의 실제 최신 Head를 사용하라.
    기존 Backend PR #96만 포함됐다고 이번 템플릿 보완 완료로 판단하지 마라.
 
 4. 필요한 재빌드/마이그레이션은 활성 SourceRoot·영향을 설명하고 승인 후 수행하라.
@@ -33,16 +38,23 @@ Git Pull, 실행 이미지/Schema 반영, CMS 업무 데이터 가져오기는 �
    본문의 두 Revision 성공과 현재 Source 기준 Flyway pending 0을 확인하라.
    Git 최신화와 실행 이미지/Schema/CMS 업무 데이터 반영을 구분해서 보고하라.
 
-5. 이 문서의 전용 템플릿 dry-run을 먼저 실행하라. 예전 cms-tour-v1 전체를 재적용하지 마라.
-   두 템플릿 before/after, 이미지 생성/재사용·ID 매핑, 제목/설명/순서,
-   이 템플릿을 사용하는 사이트 영향, 보존 목록, blockers와 planHash를 보여라.
+5. 두 패키지를 각각 독립 dry-run하고 아래 상태별 표로 필요한 적용만 판단하라.
+   이미 적용한 cms-tour-v1은 재적용하지 않는다. 누락된 콘텐츠·게시판·공개 메뉴가 있으면
+   해당 패키지의 기존/새 자료 매핑과 전체 변경 계획을 먼저 검토한다.
+   같은 이름이 있다는 이유로 적용 완료 또는 새 자료 생성으로 판단하지 마라.
+   여행 데모의 MINIMAL/main 변경과 템플릿의 BOLD/CLASSIC 변경을 구분해 보여라.
+   before/after, 이미지 ID 매핑, 메뉴·게시판 연결, 사이트 영향, 보호 목록,
+   blockers와 패키지별 planHash를 보고하라.
    사이트가 사용 중이면 그 영향에 대한 선택을 받은 뒤 --allow-template-site를 붙여 다시 계획하라.
    이 옵션은 사이트 설정 변경이나 데이터 적용 승인이 아니다.
    미종료 Natural CMS Job이 있으면 쓰지 말고 차단 사유를 보고하라.
 
-6. 내가 해당 planHash의 계획을 승인하고 CMS 동시 쓰기가 없음을 확인한 뒤에만 적용하라.
-   같은 조건의 dry-run에서 SKIP=7, CREATE=0, UPDATE=0을 확인하라.
-   MINIMAL, 메인 적용값, 사이트명/공개 경로/사용 여부, 기존 CMS/계정/AI/RAG를 보존하라.
+6. 내가 각 패키지의 planHash를 따로 승인하고 CMS 동시 쓰기가 없음을 확인한 뒤에만 적용하라.
+   둘 다 필요하면 tour 적용·검증 후 template을 새로 dry-run하고 별도 승인을 받아라.
+   각 패키지의 같은 조건 재 dry-run에서 CREATE=0, UPDATE=0을 확인하라.
+   전체 패키지와 일치하면 tour는 SKIP=142, template은 SKIP=7이다.
+   template 적용은 MINIMAL/사이트 설정을 보존하고, tour의 MINIMAL/main 변경은
+   승인된 계획에 명시된 경우에만 허용한다. 그 밖의 CMS/계정/AI/RAG는 보존하라.
    실패하면 자동 재시도하거나 journal을 삭제하지 말고 본문의 읽기 전용 복구를 따르라.
 
 7. 마지막에 상태 / 결과 / 변경 / 검증 / 남은 사항 / 승인 순서로 보고하라.
@@ -51,7 +63,80 @@ Git Pull, 실행 이미지/Schema 반영, CMS 업무 데이터 가져오기는 �
 CMS 데이터 적용을 일괄 승인한 것이 아니다. 필요한 승인 지점에서 확인해라.
 ```
 
-## 1. 공유 범위
+## 0. 현재 DB 상태에 따라 필요한 작업 결정
+
+Backend 루트에서 같은 대상 PC의 loopback URL/Compose project/DB를 확인한 뒤 실행한다.
+이미 사용 중인 패키지별 journal과 bindings가 있으면 같은 파일을 유지한다.
+
+```powershell
+python scripts/cms-demo/import_demo.py --package demo/cms-tour-v1
+python scripts/cms-demo/import_demo.py --package demo/cms-template-v1
+```
+
+기존 tour 적용에 bindings를 썼으면 첫 명령에 그 PC의 `--bindings <기존-bindings.json>`을
+추가한다. 두 명령은 읽기 전용 점검이며 각 패키지의 `plan.json`만 새로 기록한다.
+현재 상태를 읽지 못했거나 필요한 Schema/이미지가 없으면 먼저 Source·Runtime 준비를
+끝낸 뒤 재계획한다. 오래된 도구, 문서의 예전 출력, 다른 PC의 계획으로 대신 판단하지 않는다.
+
+| 현재 DB와 계획에서 확인한 상태 | LLM이 진행할 최소 작업 |
+|---|---|
+| tour `SKIP=142`, template `SKIP=7`, 둘 다 CREATE/UPDATE 0 | 데이터 적용 생략. 공개 메뉴·콘텐츠·게시판과 템플릿 화면/이미지를 조회하여 확인 |
+| 여행 데이터는 일치하고 template에 필요한 변경만 있음 | tour 적용 생략. template 계획만 검토·승인·적용 |
+| 콘텐츠·게시판·게시글·공개 메뉴 중 필요한 데모가 없거나 일부만 있음 | 기존 자료 매핑을 확인한 tour 계획부터 승인·적용·검증. 이어 template **새 dry-run → 별도 승인 → 적용** |
+| 여행 데이터는 갖춰졌지만 MINIMAL/main만 개인 설정으로 다름 | 콘텐츠 미적용으로 판단하지 않는다. 그 차이를 보고하고 tour 재적용을 생략한다. template은 MINIMAL/main을 보존하며 별도 처리 |
+| 같은 제목/경로의 개인 자료, 매핑 충돌, 기존 코드 차이, 삭제된 대상, 진행 중 Job 등이 있음 | 상태를 불명확/차단으로 보고한다. 자동 덮어쓰기·`new` 일괄 지정·Job 강제 종료로 진행하지 않는다 |
+
+전체 건수만으로 판별하지 않는다. `plan.json`의 항목별 `kind/key/action/before/after`와
+실제 메뉴 대상 연결, 콘텐츠 본문, 게시판/게시글·분류를 확인한다. 예전 데이터는 직접
+SQL이나 다른 도구로 가져와 journal이 없을 수도 있다. 콘텐츠·게시판의 동일 제목은
+`EXPLICIT_BINDING_REQUIRED`가 될 수 있으므로 `CMS_DEMO_TEAM_HANDOFF.md`의 매핑 절차로
+대상 PC의 실제 ID와 내용을 확인하고 새 계획을 제시한다. 이미 같은 자료가 있을 때
+무조건 `"new"`를 지정하면 중복이 생긴다.
+
+도구는 패키지 단위 계획 안에서 일치 항목을 SKIP한다. 임의 항목만 적용하는 `--only`나
+`--skip` 옵션은 없다. 누락 항목과 함께 원치 않는 UPDATE가 포함되면 **전체 계획을
+승인하지 말고** 매핑/현지 자료의 의미를 먼저 확인한다. 패키지 manifest를 편집하거나
+plan/journal을 조작하여 부분 적용을 흉내 내지 않는다. 해소할 수 없는 개인 설정 충돌은
+별도 승인 방향이 정해질 때까지 보존한다.
+
+`cms-tour-v1`은 콘텐츠 8개, 게시판 3개와 샘플 게시글 90개, 공개 메뉴 15개,
+코드 그룹 4개/코드 17개, 이미지 3개, **MINIMAL 1개와 main 사이트 1개**의 142항목이다.
+따라서 tour는 단순 콘텐츠 추가만 하는 패키지가 아니다. MINIMAL의 표시 값과 main의
+사이트명·공개 경로·templateKey·사용 여부가 바뀌는 계획이면 그 영향을 명시적으로
+검토·승인받아야 한다. template 패키지는 BOLD/CLASSIC과 이미지 5개뿐이며 해당 사이트
+설정과 MINIMAL을 보존한다. 두 패키지의 보호 범위를 혼동하지 않는다.
+
+### 두 패키지가 필요한 PC의 실행 순서
+
+1. 두 dry-run으로 누락·충돌·영향을 확인한다. tour의 전체 변경과 필요한 bindings를 정리한다.
+2. tour를 같은 bindings로 다시 dry-run하고 **그 tour planHash**를 승인받는다.
+   blockers가 없고 CMS 동시 쓰기가 없을 때만 다음을 실행한다.
+
+   ```powershell
+   python scripts/cms-demo/import_demo.py --package demo/cms-tour-v1 --apply --approve-plan <tour-planHash> --confirm-quiescent
+   ```
+
+   계획에 bindings/대상 옵션이 있으면 같은 옵션을 붙인다. 인증·복구·보호 조건은
+   `CMS_DEMO_TEAM_HANDOFF.md`를 따른다. 그 명령의 기본 패키지에 의존하지 않고 명시한다.
+3. tour의 같은 조건 재 dry-run에서 `SKIP=142, CREATE=0, UPDATE=0`, `CMS_IMPORT_PASS`,
+   `protectedData=PRESERVED`, 실제 공개 메뉴/콘텐츠/게시판 연결과 이미지 GET을 확인한다.
+4. tour가 DB를 바꿨으므로 처음 만든 template 계획은 폐기 대상으로 보고 **다시 dry-run**한다.
+   파일을 직접 삭제/수정한다는 뜻이 아니라 도구가 새 계획을 생성하게 한다는 뜻이다.
+   BOLD/CLASSIC 사용 사이트 영향까지 반영한 새 template planHash를 별도로 승인받는다.
+5. 아래 3~4절의 template 적용·검증을 수행한다. 같은 조건에서 `SKIP=7, CREATE=0, UPDATE=0`을
+   확인한다. tour를 다시 적용하거나 두 번째 패키지에 tour planHash를 전달하지 않는다.
+
+두 패키지를 무조건 연속 apply하는 한 줄 명령/스크립트를 만들지 않는다. 각각의
+`.local/cms-demo-share/cms-tour-v1/` 및 `.local/cms-demo-share/cms-template-v1/` 아래
+plan/journal/backup/verification은 독립이며 PC·DB·패키지에 귀속된다. 서로 복사·합치거나
+다른 PC의 ID/planHash를 재사용하지 않는다. 첫 패키지 실패 시 두 번째를 진행하지 않고
+해당 패키지의 읽기 전용 복구부터 확인한다.
+
+미종료 Job 때문에 dry-run 결과가 BLOCKED여도 **CREATE/UPDATE가 모두 0이면 데이터 쓰기는
+필요 없다.** 일치 확인 결과와 Job 차단을 구분하여 보고하고, SKIP 기록을 만들겠다는
+이유로 apply하거나 Job을 종료하지 않는다. CREATE/UPDATE가 있으면 차단 해소 전 쓰지 않는다.
+
+## 1. 템플릿 패키지 공유 범위
 
 | 포함 | 내용 |
 |---|---|
@@ -81,7 +166,8 @@ JSON을 정규화하여 계산한 packageHash는
 `templateSiteImpacts`와 승인 계획에 이 영향을 포함하며, 사이트 설정값 자체는 변경하지 않는다.
 메인에 적용 버튼은 수동 기능으로 제공한다. 패키지가 그 버튼을 대신 실행하지 않는다.
 
-후속 AI05-020의 템플릿 자연어 제어 기능은 별도 작업이며 이 배포의 완료 항목이 아니다.
+자연어 제어 Source와 검증 범위는 아래 AI05-020 절을 따른다. 데이터 패키지를 가져와도
+AI Profile·모델·Provider 자격증명이 다른 PC에 복사되거나 자동 설정되지는 않는다.
 
 ## 2. Source·Runtime 준비
 
@@ -89,6 +175,12 @@ JSON을 정규화하여 계산한 packageHash는
 |---|---|---|
 | Frontend | [#80](https://github.com/urizo-final-org/urizo-final-frontend/pull/80) | `b0bb05820bb4dc8e934808fe15ac11dc137995d9` |
 | Backend | [#97](https://github.com/urizo-final-org/urizo-final-backend/pull/97) | `666056f037701ad1dd6266ca2710f55afe079d94` |
+
+AI05-020의 자연어 템플릿 편집은 Frontend [#81](https://github.com/urizo-final-org/urizo-final-frontend/pull/81),
+Backend [#98](https://github.com/urizo-final-org/urizo-final-backend/pull/98),
+MCP [#9](https://github.com/urizo-final-org/urizo-final-mcp-server/pull/9),
+Orchestrator [#32](https://github.com/urizo-final-org/urizo-final-orchestrator/pull/32)를 함께 확인한다.
+문서 작성 후 병합 상태가 달라질 수 있으므로 실제 MERGED/Head/origin/dev ancestry로 판단한다.
 
 위 Commit은 코드 검증 기준이다. 해당 PR의 최신 Head에는 문서의 배포 정보 보완이 추가될 수 있다.
 팀원 적용 시 실제 PR의 MERGED 상태와 최신 Head의 origin/dev 조상 포함을 함께 확인한다.
@@ -212,12 +304,52 @@ python scripts/cms-demo/import_demo.py --package demo/cms-template-v1 --recover 
 
 ## 6. 이전 여행 데모와의 차이
 
-`cms-tour-v1`은 기존 메뉴/콘텐츠/게시판 등 **142개** 데모 항목이며 그대로 유지한다.
+`cms-tour-v1`은 기존 메뉴/콘텐츠/게시판 등 **142개** 데모 항목이다.
 그 manifest에는 MINIMAL과 main.templateKey=MINIMAL이 포함되어 있으므로 이번 작업을 이유로
-재적용하지 않는다. 이번 패키지에 `SKIP=142`를 요구하지 않는다.
+무조건 재적용하지 않는다. 미적용·일부 누락 PC는 0절에 따라 필요한 tour 계획을 먼저
+검토한다. template 패키지 자체에 `SKIP=142`를 요구하지 않는다.
 
 `cms-template-v1`은 템플릿 2개+이미지 5개만 동기화한다. 기존 여행 데모에 없는 자료를 자동
 생성하거나 사이트 적용값을 바꾸지 않는다. 두 패키지의 planHash/journal을 섞지 않는다.
+
+## 자연어 템플릿 편집 (AI05-020)
+
+관리자 템플릿 화면에서 저장된 템플릿을 선택하고 Natural CMS 도우미에 요청한다.
+활성 NATURAL_CMS 프로필이 필요하며, 수동 편집 중인 값은 먼저 저장하거나 취소한다.
+레이아웃·색상·헤더/푸터·메인 제목/설명·버튼 문구/기존 메뉴 경로와 사진 최대 5개의
+제목·설명·순서·연결을 수정할 수 있다. 사이트명은 사이트 설정에서 별도로 바꾼다.
+사진 추가/교체 요청에는 사진을 첨부한다. 저장 전 제안의 변경 전/후와 데스크톱·모바일
+미리보기를 확인하고 승인한다. 승인은 선택한 템플릿을 저장하며 메인 사이트 적용은 별도다.
+대기 중 템플릿을 다른 화면에서 변경했다면 기존 제안은 저장하지 않고 새 요청으로 다시 확인한다.
+
+AI05-020 전달 후보 검증 상태:
+
+- Frontend 525/525와 타입 검사·production build, Backend 98/98, MCP 10/10,
+  Orchestrator Natural CMS 22/22 PASS.
+- 첫 미리보기에서 동적 Tool 스키마와 등록된 Provider 계약의 불일치를 발견하여 기존
+  스키마·digest를 유지하도록 수정했다. 실제 preview 요청을 ProviderToolDefinition으로
+  읽고 사진 배열 인수를 정규화하는 회귀 검사와 수정 후 실제 미리보기 생성이 통과했다.
+- 두 번의 공식 full 재빌드에서 서비스 건강 검사와 Flyway 46개/pending 0을 확인했다.
+  기존 호스트 Coding Runner의 경로 바인딩이 달라 마지막 Gate는 PARTIAL이며 기존
+  프로세스는 보존했다. 전체 런타임 Gate가 통과했다고 보고하지 않는다.
+- BOLD 사진 5개의 제목·설명을 같은 검증 문구로 바꾸는 실제 요청에서 저장된 제안과
+  PC·390px 모바일 미리보기를 확인했다. 사용자 승인 후 정상 decision API → Job
+  `71cec51a-8108-46f7-a530-4e6581926ad1` COMPLETED → DB 저장값 일치를 확인했다.
+  이후 정상 CMS 저장 API로 원래 5개 사진의 제목·설명·URL·순서와 다른 설정을 복원했다.
+  브라우저 탭 재개 후 API로 승인했으므로 UI 승인 버튼까지 통과했다고 주장하지 않는다.
+- **사진 순서와 일부 캡션을 함께 바꾸는 요청은 부정확한 제안이 나와 반려했다.**
+  재제안에서도 사진·캡션 대응이 틀렸으며, 별도의 상세 요청은 analyze에서 실패했다.
+  후자의 세부 원인은 UNKNOWN이다. 복합 요청과 모든 사진 편집 동작이 실제 검증
+  완료됐다고 안내하지 않는다. 요청 외 변경이 보이면 승인하지 말고 반려한다.
+- 사진 1·2의 순서만 바꾸는 별도 요청은 사진 URL·제목·설명 전체가 정확히 함께 이동한
+  미리보기를 생성했다. 순서 변경의 실제 저장·복원은 별도 사용자 승인 대기다.
+- 기존 CMS 업무값·사진·사이트 적용값·Job·AI 설정·RAG·Volume·Flyway 이력은 보존했다.
+  정상 로그인/서비스 자격증명 갱신, 새 검증 Job과 실행 기록, 승인 저장·원상복원 이력은
+  별도다. 실패 검증 Job은 보존했으며 강제로 종료·삭제하지 않았다.
+- 위 실행 검증 당시에는 네 저장소 PR이 Draft였다. 병합 여부는 2절의 실제 PR과
+  origin/dev ancestry로 확인한다. 하나라도 미병합이면 자연어 기능 완료로 안내하지 않는다.
+  병합됐더라도 복합 요청의 부정확한 제안과 순서 저장
+  미검증을 해소된 것으로 안내하지 않는다. 팀원 PC의 실행·데이터 적용도 별도 확인한다.
 
 ## 개발 검증
 

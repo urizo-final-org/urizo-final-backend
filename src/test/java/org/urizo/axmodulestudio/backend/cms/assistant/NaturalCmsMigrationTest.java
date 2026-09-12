@@ -93,36 +93,67 @@ class NaturalCmsMigrationTest {
     }
 
     /**
-     * 필드 선택 표는 울타리가 관리하는 넷으로 닫힌다.
+     * 동작 선택 표는 가드레일이 관리하는 넷으로 닫힌다.
      *
      * <p>TEMPLATE이 들어오면 저장 한 번에 템플릿이 통째로 닫힌다. 코드의 관리 대상 집합과
      * 이 CHECK가 같은 넷이어야 두 겹으로 막힌다.
      */
     @Test
-    void fieldSelectionAllowsOnlyTheFourGuardedResources() throws IOException {
+    void operationSelectionAllowsOnlyTheFourGuardedResources() throws IOException {
         String migration = Files.readString(Path.of(
                 "src/main/resources/db/migration/"
-                        + "V20260911052249613__create_natural_cms_field_selection.sql"));
+                        + "V20260912090830717__create_natural_cms_operation_selection.sql"));
 
         assertThat(migration)
-                .contains("CREATE TABLE app.natural_cms_field_selection")
+                .contains("CREATE TABLE app.natural_cms_operation_selection")
                 .contains("resource_type IN ('MENU', 'BOARD', 'BOARD_POST', 'CONTENT')")
-                .contains("UNIQUE (resource_type, field_name)")
-                .doesNotContain("TEMPLATE");
+                .contains("operation IN ('CREATE', 'UPDATE', 'DELETE')")
+                .contains("UNIQUE (resource_type, operation)")
+                // 아래 DROP 문에만 TEMPLATE 이 없는지 보는 것이 아니라, CHECK 어디에도 없어야 한다.
+                .doesNotContain("'TEMPLATE'");
     }
 
-    /** 판정하는 연결이 판정 기준을 고칠 수 없어야 울타리가 울타리로 남는다. */
+    /** 판정하는 연결이 판정 기준을 고칠 수 없어야 가드레일이 가드레일로 남는다. */
     @Test
-    void fieldSelectionLetsTheJudgingConnectionReadButNotWrite() throws IOException {
+    void operationSelectionLetsTheJudgingConnectionReadButNotWrite() throws IOException {
         String migration = Files.readString(Path.of(
                 "src/main/resources/db/migration/"
-                        + "V20260911052249613__create_natural_cms_field_selection.sql"));
+                        + "V20260912090830717__create_natural_cms_operation_selection.sql"));
 
         assertThat(migration)
                 .contains("GRANT SELECT, INSERT, UPDATE, DELETE "
-                        + "ON app.natural_cms_field_selection TO ai_workspace;")
-                .contains("GRANT SELECT ON app.natural_cms_field_selection TO cms_app;")
-                .doesNotContain("UPDATE ON app.natural_cms_field_selection TO cms_app");
+                        + "ON app.natural_cms_operation_selection TO ai_workspace;")
+                .contains("GRANT SELECT ON app.natural_cms_operation_selection TO cms_app;")
+                .doesNotContain("UPDATE ON app.natural_cms_operation_selection TO cms_app");
+    }
+
+    /**
+     * 저장한 적 없는 설치에는 한 행도 넣지 않는다.
+     *
+     * <p>넣으면 "아직 정하지 않음"이 "이렇게 정함"으로 바뀌어, 설치 직후 상태가 관리자가
+     * 저장한 것처럼 읽힌다. 그때부터 코드가 새로 여는 동작이 조용히 닫힌 채로 남는다.
+     */
+    @Test
+    void operationSelectionMigratesOnlyWhenTheAdministratorHadSavedBefore() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260912090830717__create_natural_cms_operation_selection.sql"));
+
+        assertThat(migration)
+                .contains("INSERT INTO app.natural_cms_operation_selection")
+                .contains("WHERE rule.configured")
+                // 등록·수정은 끌 수단이 없었으므로 켜진 상태로 옮긴다.
+                .contains("CASE WHEN op.name = 'DELETE' THEN rule.allow_delete ELSE TRUE END");
+    }
+
+    /** 쓰이지 않게 된 필드 선택 표는 같은 리비전에서 지운다. 앞선 파일은 체크섬 때문에 못 고친다. */
+    @Test
+    void operationSelectionDropsTheFieldSelectionItReplaces() throws IOException {
+        String migration = Files.readString(Path.of(
+                "src/main/resources/db/migration/"
+                        + "V20260912090830717__create_natural_cms_operation_selection.sql"));
+
+        assertThat(migration).contains("DROP TABLE app.natural_cms_field_selection;");
     }
 
     /**

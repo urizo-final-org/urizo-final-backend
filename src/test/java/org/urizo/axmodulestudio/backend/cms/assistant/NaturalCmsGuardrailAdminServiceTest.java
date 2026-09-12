@@ -22,7 +22,7 @@ import org.springframework.transaction.support.TransactionTemplate;
  * 설정 화면이 읽고 쓰는 경로.
  *
  * <p>여기서 고정하는 것은 두 가지다. 화면이 그릴 목록은 저장된 선택이 아니라 Handler가 지금
- * 여는 것에서 나온다는 것, 그리고 저장이 코드가 열지 않은 필드를 받아들이지 않는다는 것이다.
+ * 여는 것에서 나온다는 것, 그리고 저장이 코드가 열지 않은 동작을 받아들이지 않는다는 것이다.
  */
 class NaturalCmsGuardrailAdminServiceTest {
 
@@ -69,15 +69,17 @@ class NaturalCmsGuardrailAdminServiceTest {
                 .extracting(NaturalCmsGuardrailContract.Resource::resourceKey)
                 .containsExactly(NaturalCmsGuardrail.MENU, NaturalCmsGuardrail.CONTENT);
         // 저장 전에는 코드가 연 것이 전부 켜진 것으로 보인다. 그것이 지금 동작이다.
-        assertThat(view.resources().get(0).fields())
-                .extracting(NaturalCmsGuardrailContract.Field::name)
-                .containsExactly("name", "path");
-        assertThat(view.resources().get(0).fields())
-                .allMatch(NaturalCmsGuardrailContract.Field::enabled);
+        assertThat(view.resources().get(0).operations())
+                .extracting(NaturalCmsGuardrailContract.Operation::name)
+                .containsExactly("CREATE", "DELETE", "UPDATE");
+        assertThat(view.resources().get(0).operations())
+                .allMatch(NaturalCmsGuardrailContract.Operation::enabled);
+        // 필드는 이름만 싣는다. 정하는 단위가 아니라 그 대상이 무엇을 다루는지 알려 주는 표시다.
+        assertThat(view.resources().get(0).fields()).containsExactly("name", "path");
     }
 
     @Test
-    void refusesToStoreAFieldTheHandlerDoesNotOpen() {
+    void refusesToStoreAnOperationTheHandlerDoesNotOpen() {
         JdbcTemplate jdbc = emptyDatabase();
         when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
         when(jdbc.update(anyString(), any(Object.class))).thenReturn(1);
@@ -85,21 +87,21 @@ class NaturalCmsGuardrailAdminServiceTest {
         NaturalCmsGuardrailAdminService service = new NaturalCmsGuardrailAdminService(
                 jdbc, directTransactions(), openResources());
 
-        service.save(new NaturalCmsGuardrailContract.SaveRequest(true, List.of(
-                new NaturalCmsGuardrailContract.FieldSelection(
-                        NaturalCmsGuardrail.MENU, "name", true),
-                new NaturalCmsGuardrailContract.FieldSelection(
-                        NaturalCmsGuardrail.MENU, "author", true))));
+        // PUBLISH 는 어떤 Handler 도 열지 않는다. 계약 검증을 지나와도 저장되면 안 된다.
+        service.save(new NaturalCmsGuardrailContract.SaveRequest(List.of(
+                new NaturalCmsGuardrailContract.OperationSelection(
+                        NaturalCmsGuardrail.MENU, "UPDATE", true),
+                new NaturalCmsGuardrailContract.OperationSelection(
+                        NaturalCmsGuardrail.MENU, "PUBLISH", true))));
 
-        ArgumentCaptor<Object> values = ArgumentCaptor.forClass(Object.class);
         verify(jdbc, never()).update(
-                org.mockito.ArgumentMatchers.contains("INSERT INTO app.natural_cms_field_selection"),
-                any(), any(), eq("author"), any());
-        assertThat(values.getAllValues()).doesNotContain("author");
+                org.mockito.ArgumentMatchers.contains(
+                        "INSERT INTO app.natural_cms_operation_selection"),
+                any(), any(), eq("PUBLISH"), any());
     }
 
     @Test
-    void clearsTheWholeChoiceBeforeWritingSoUncheckedFieldsDoNotSurvive() {
+    void clearsTheWholeChoiceBeforeWritingSoUncheckedOperationsDoNotSurvive() {
         JdbcTemplate jdbc = emptyDatabase();
         when(jdbc.update(anyString())).thenReturn(1);
         when(jdbc.update(anyString(), any(Object[].class))).thenReturn(1);
@@ -107,10 +109,10 @@ class NaturalCmsGuardrailAdminServiceTest {
         NaturalCmsGuardrailAdminService service = new NaturalCmsGuardrailAdminService(
                 jdbc, directTransactions(), openResources());
 
-        service.save(new NaturalCmsGuardrailContract.SaveRequest(false, List.of(
-                new NaturalCmsGuardrailContract.FieldSelection(
-                        NaturalCmsGuardrail.MENU, "name", true))));
+        service.save(new NaturalCmsGuardrailContract.SaveRequest(List.of(
+                new NaturalCmsGuardrailContract.OperationSelection(
+                        NaturalCmsGuardrail.MENU, "UPDATE", true))));
 
-        verify(jdbc).update("DELETE FROM app.natural_cms_field_selection");
+        verify(jdbc).update("DELETE FROM app.natural_cms_operation_selection");
     }
 }

@@ -916,7 +916,7 @@ class NaturalCmsResourceServiceTest {
 
     // ── 울타리 ───────────────────────────────────────────────────────────────
     //
-    // 울타리는 Handler가 연 것과 교집합으로만 동작한다. 아래 테스트는 그 교집합이
+    // 가드레일은 Handler가 연 것과 교집합으로만 동작한다. 아래 테스트는 그 교집합이
     // 좁히기만 하고 넓히지 못하는지, 그리고 저장 전에는 아무 영향이 없는지를 고정한다.
 
     /** {@code menuTree()}가 실제로 갖고 있는 대메뉴. 병합 단계가 현재 값을 읽는다. */
@@ -929,76 +929,73 @@ class NaturalCmsResourceServiceTest {
                 cms, mock(CmsRequestValidator.class), mapper, guardrails(guardrail));
     }
 
+    /** 대상 하나의 동작만 담은 가드레일. 나머지 대상은 목록에 없어 코드 기본값을 따른다. */
+    private static NaturalCmsGuardrail saved(String resourceKey, String... operations) {
+        return new NaturalCmsGuardrail(true, Map.of(resourceKey, Set.of(operations)));
+    }
+
     /** 저장 전에는 코드가 연 그대로다. 설치 직후 자연어 CMS가 멎으면 안 된다. */
     @Test
-    void keepsEveryOpenedFieldBeforeTheGuardrailIsSaved() throws Exception {
+    void keepsEveryOpenedOperationBeforeTheGuardrailIsSaved() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         NaturalCmsResourceService resources = fenced(
                 menuTree(), mapper, NaturalCmsGuardrail.unconfigured());
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"name":"새 이름","path":"/new"}}
-                """);
 
-        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE, command))
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
                 .doesNotThrowAnyException();
     }
 
-    /** 닫은 필드를 실은 명령은 거절되고, 화면이 가려 말할 수 있게 전용 코드가 붙는다. */
+    /** 닫은 동작을 실은 명령은 거절되고, 화면이 가려 말할 수 있게 전용 코드가 붙는다. */
     @Test
-    void refusesAFieldTheGuardrailClosed() throws Exception {
+    void refusesAnOperationTheGuardrailClosed() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         NaturalCmsResourceService resources = fenced(menuTree(), mapper,
-                new NaturalCmsGuardrail(true, true,
-                        Map.of(NaturalCmsGuardrail.MENU, Set.of("name"))));
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"path":"/new"}}
-                """);
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
 
-        assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE, command))
+        assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
                 .isInstanceOf(NaturalCmsException.class)
                 .extracting(failure -> ((NaturalCmsException) failure).code())
-                .isEqualTo(NaturalCmsRefusal.FIELD_NOT_ALLOWED.code());
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
     }
 
-    /** 열어 둔 필드만 쓰는 명령은 그대로 통과한다. */
+    /** 열어 둔 동작은 그대로 통과한다. 닫는 것은 그 대상의 그 동작뿐이다. */
     @Test
-    void acceptsAFieldTheGuardrailLeftOpen() throws Exception {
+    void acceptsAnOperationTheGuardrailLeftOpen() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         NaturalCmsResourceService resources = fenced(menuTree(), mapper,
-                new NaturalCmsGuardrail(true, true,
-                        Map.of(NaturalCmsGuardrail.MENU, Set.of("name"))));
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"name":"새 이름"}}
-                """);
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
 
-        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE, command))
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":{\"name\":\"새 이름\"}}")))
                 .doesNotThrowAnyException();
     }
 
-    /** 설정은 좁히기만 한다. 코드가 열지 않은 필드는 허용 목록에 넣어도 통과하지 못한다. */
+    /** 설정은 좁히기만 한다. 코드가 열지 않은 동작은 허용 목록에 넣어도 통과하지 못한다. */
     @Test
-    void cannotOpenAFieldTheHandlerDoesNotDeclare() throws Exception {
+    void cannotOpenAnOperationTheHandlerDoesNotDeclare() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
-                new NaturalCmsGuardrail(true, true,
-                        Map.of(NaturalCmsGuardrail.MENU, Set.of("name", "author"))));
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"author":"누군가"}}
-                """);
+        CmsService cms = mock(CmsService.class);
+        when(cms.templates()).thenReturn(List.of(template()));
+        // 템플릿 Handler는 UPDATE만 연다. 설정에 CREATE를 넣어도 열리지 않아야 한다.
+        NaturalCmsResourceService resources = fenced(cms, mapper,
+                saved("TEMPLATE", "CREATE", "UPDATE"));
 
-        assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE, command))
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"),
+                mapper.readTree("{\"operation\":\"CREATE\",\"fields\":{\"siteName\":\"새 이름\"}}")))
                 .isInstanceOf(NaturalCmsException.class)
                 .extracting(failure -> ((NaturalCmsException) failure).code())
                 .isEqualTo("CMS_COMMAND_INVALID");
     }
 
-    /** 삭제를 닫으면 삭제만 막히고 만들고 고치는 것은 남는다. */
+    /** 한 대상의 삭제를 닫아도 만들고 고치는 것은 남는다. */
     @Test
     void refusesDeleteWhileKeepingTheOtherOperations() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsGuardrail closed = new NaturalCmsGuardrail(true, false,
-                Map.of(NaturalCmsGuardrail.MENU, Set.of("name", "path", "targetType")));
-        NaturalCmsResourceService resources = fenced(menuTree(), mapper, closed);
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
 
         assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE,
                 mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
@@ -1012,29 +1009,27 @@ class NaturalCmsResourceServiceTest {
     }
 
     /**
-     * 닫은 필드는 Snapshot 키에서도 빠진다.
+     * Snapshot은 가드레일과 무관하다.
      *
-     * <p>명령 단계가 Snapshot의 필드 이름으로 쓸 수 있는 필드를 정하므로, 키가 없으면 모델이
-     * 애초에 그 필드를 쓰지 않는다. 검증만으로 막으면 매번 시도했다가 반려된다.
+     * <p>관리자가 정하는 단위가 대상별 동작이라 필드를 뺄 이유가 없다. 모델이 현재 값을
+     * 못 보면 바꾸지 않은 필드를 채울 수 없어 수정 자체가 어그러진다.
      */
     @Test
-    void hidesClosedFieldsFromTheSnapshotSoTheModelNeverTriesThem() {
+    void keepsEveryFieldInTheSnapshot() {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         NaturalCmsResourceService resources = fenced(menuTree(), mapper,
-                new NaturalCmsGuardrail(true, true,
-                        Map.of(NaturalCmsGuardrail.MENU, Set.of("name"))));
+                saved(NaturalCmsGuardrail.MENU, "UPDATE"));
 
         ObjectNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("MENU", "10"));
 
-        assertThat(state.has("name")).isTrue();
-        assertThat(state.has("path")).isFalse();
-        assertThat(state.has("parentId")).isFalse();
-        // 필드가 아닌 식별자는 울타리 대상이 아니다. 빼면 대상을 가리킬 수 없다.
         assertThat(state.has("id")).isTrue();
+        assertThat(state.has("name")).isTrue();
+        assertThat(state.has("path")).isTrue();
+        assertThat(state.has("parentId")).isTrue();
     }
 
     /**
-     * 울타리가 관리하지 않는 대상은 저장 뒤에도 코드가 연 그대로다.
+     * 가드레일이 관리하지 않는 대상은 저장 뒤에도 코드가 연 그대로다.
      *
      * <p>TEMPLATE은 선택 표의 CHECK에서도 빠져 있다. 관리 대상이 아닌 것을 "선택된 적 없음"으로
      * 읽으면 저장 한 번에 그 대상이 통째로 닫힌다.
@@ -1045,14 +1040,34 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.templates()).thenReturn(List.of(template()));
         NaturalCmsResourceService resources = fenced(cms, mapper,
-                new NaturalCmsGuardrail(true, true,
-                        Map.of(NaturalCmsGuardrail.MENU, Set.of("name"))));
+                saved(NaturalCmsGuardrail.MENU, "CREATE"));
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"siteName":"새 이름"}}
                 """);
 
         assertThatCode(() -> resources.validateCommand(
                 new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"), command))
+                .doesNotThrowAnyException();
+    }
+
+    /**
+     * 닫는 것은 대상 하나다. 컨텐츠 삭제를 닫아도 메뉴 삭제는 그대로다.
+     *
+     * <p>전역 스위치 하나였을 때는 한 대상을 잠그려다 넷이 함께 잠겼다. 이 테스트가 그 회귀를 막는다.
+     *
+     * <p>저장은 언제나 열두 칸을 통째로 보내므로 관리 대상은 모두 목록에 오른다. 목록에 없는
+     * 관리 대상은 "관리자가 전부 껐다"는 뜻이지 "기본값을 따른다"가 아니다.
+     */
+    @Test
+    void closesOneResourceWithoutTouchingAnother() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                new NaturalCmsGuardrail(true, Map.of(
+                        NaturalCmsGuardrail.MENU, Set.of("CREATE", "UPDATE", "DELETE"),
+                        NaturalCmsGuardrail.CONTENT, Set.of("CREATE", "UPDATE"))));
+
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
                 .doesNotThrowAnyException();
     }
 

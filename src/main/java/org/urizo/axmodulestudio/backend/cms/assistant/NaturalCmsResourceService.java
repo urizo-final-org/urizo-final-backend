@@ -101,10 +101,10 @@ public final class NaturalCmsResourceService {
     public record OpenResource(String resourceKey, Set<String> operations, Set<String> fields) { }
 
     /**
-     * 울타리가 관리하는 대상의 현재 열림 상태.
+     * 가드레일이 관리하는 대상의 현재 열림 상태.
      *
-     * <p>목록 자체는 저장하지 않는다. 저장하는 것은 선택뿐이므로 Handler가 필드를 늘리거나
-     * 줄이면 이 목록이 따라 바뀌고, 사라진 필드가 옛 목록에서 계속 제공되는 일이 없다.
+     * <p>목록 자체는 저장하지 않는다. 저장하는 것은 선택뿐이므로 Handler가 동작을 늘리거나
+     * 줄이면 이 목록이 따라 바뀌고, 사라진 동작이 옛 목록에서 계속 제공되는 일이 없다.
      */
     public List<OpenResource> openResources() {
         List<OpenResource> open = new ArrayList<>();
@@ -123,23 +123,13 @@ public final class NaturalCmsResourceService {
     }
 
     /**
-     * 모델에게 주는 현재 상태. 닫힌 필드는 키째로 빼고 준다.
+     * 모델에게 주는 현재 상태.
      *
-     * <p>명령 단계가 이 Snapshot의 필드 이름으로 쓸 수 있는 필드를 정하므로, 키가 없으면
-     * 모델은 그런 필드가 있는 줄도 모른다. 검증에서 막는 것만으로는 모델이 매번 시도했다가
-     * 반려되지만, 여기서 빼면 애초에 시도하지 않는다. 그래도 새어 나간 명령은 검증이 막는다.
+     * <p>가드레일은 여기서 걸리지 않는다. 관리자가 정하는 단위가 대상별 동작이라 필드를
+     * 빼야 할 이유가 없고, 동작은 명령서 검증이 막는다.
      */
     public ObjectNode snapshot(NaturalCmsContract.ResourceRef resource) {
-        ResourceHandler<?> handler = handler(resource);
-        ObjectNode state = handler.snapshot(resource.id());
-        Set<String> allowed = guardrails.current()
-                .fields(resourceKey(resource), handler.fields().keySet());
-        for (String name : handler.fields().keySet()) {
-            if (!allowed.contains(name)) {
-                state.remove(name);
-            }
-        }
-        return state;
+        return handler(resource).snapshot(resource.id());
     }
 
     /**
@@ -227,9 +217,9 @@ public final class NaturalCmsResourceService {
                     "The Natural CMS command is not an approved " + type + " command.");
         }
         // 코드가 연 것과 관리자가 허용한 것의 교집합. 설정은 좁히기만 하고 넓히지 못한다.
-        NaturalCmsGuardrail guardrail = guardrails.current();
         String operation = command.path("operation").asText();
-        Set<String> operations = guardrail.operations(handler.operations());
+        Set<String> operations = guardrails.current()
+                .operations(resourceKey(resource), handler.operations());
         if (!operations.contains(operation)) {
             if (handler.operations().contains(operation)) {
                 throw notAllowed(NaturalCmsRefusal.OPERATION_NOT_ALLOWED,
@@ -246,16 +236,8 @@ public final class NaturalCmsResourceService {
             }
             return new Command(operation, fields, actorId);
         }
-        Set<String> allowed = guardrail.fields(resourceKey(resource), handler.fields().keySet());
+        Set<String> allowed = handler.fields().keySet();
         if (given.isEmpty() || !allowed.containsAll(given)) {
-            Set<String> closed = new TreeSet<>(given);
-            closed.removeAll(allowed);
-            closed.retainAll(handler.fields().keySet());
-            if (!closed.isEmpty()) {
-                throw notAllowed(NaturalCmsRefusal.FIELD_NOT_ALLOWED,
-                        type + " " + String.join(", ", closed)
-                                + " is closed by the current guardrail.");
-            }
             throw invalidCommand(type + " " + operation + " accepts these fields only: "
                     + String.join(", ", new TreeSet<>(allowed)) + ".");
         }

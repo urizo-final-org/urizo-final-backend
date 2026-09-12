@@ -14,7 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
- * 울타리 설정을 읽고 바꾼다.
+ * 가드레일 설정을 읽고 바꾼다.
  *
  * <p>{@code ai_workspace} 연결을 쓴다. 명령을 판정하는 {@code cms_app} 연결에는 이 표의 쓰기
  * 권한이 없어, 판정하는 쪽이 판정 기준을 고칠 수 없다. 읽기는
@@ -45,30 +45,31 @@ public class NaturalCmsGuardrailAdminService {
     /**
      * 선택을 통째로 바꾼다.
      *
-     * <p>보낸 필드 중 지금 코드가 열지 않는 것은 버린다. 저장에 성공하면 {@code configured}가
-     * 켜지고, 그때부터 목록에 없는 필드는 꺼짐으로 읽힌다.
+     * <p>보낸 동작 중 지금 코드가 열지 않는 것은 버린다. 저장에 성공하면 {@code configured}가
+     * 켜지고, 그때부터 목록에 없는 동작은 꺼짐으로 읽힌다.
      */
     public NaturalCmsGuardrailContract.GuardrailView save(
             NaturalCmsGuardrailContract.SaveRequest request) {
         NaturalCmsGuardrail stored = transactions.execute(status -> {
-            jdbc.update("DELETE FROM app.natural_cms_field_selection");
-            for (NaturalCmsGuardrailContract.FieldSelection selection : request.fields()) {
-                if (!opened(selection.resourceKey(), selection.fieldName())) {
+            jdbc.update("DELETE FROM app.natural_cms_operation_selection");
+            for (NaturalCmsGuardrailContract.OperationSelection selection : request.operations()) {
+                if (!opened(selection.resourceKey(), selection.operation())) {
                     continue;
                 }
                 jdbc.update("""
-                        INSERT INTO app.natural_cms_field_selection (
-                            natural_cms_field_selection_id, resource_type, field_name, enabled)
+                        INSERT INTO app.natural_cms_operation_selection (
+                            natural_cms_operation_selection_id, resource_type, operation, enabled)
                         VALUES (?, ?, ?, ?)
                         """,
                         UUID.randomUUID(), selection.resourceKey(),
-                        selection.fieldName(), selection.enabled());
+                        selection.operation(), selection.enabled());
             }
+            // allow_delete 는 동작 표로 옮겼고 더 쓰지 않는다. configured 만 켠다.
             int updated = jdbc.update("""
                     UPDATE app.natural_cms_rule
-                    SET allow_delete = ?, configured = TRUE, updated_at = CURRENT_TIMESTAMP
+                    SET configured = TRUE, updated_at = CURRENT_TIMESTAMP
                     WHERE natural_cms_rule_id
-                    """, request.allowDelete());
+                    """);
             if (updated != 1) {
                 throw new NaturalCmsException(
                         "NATURAL_CMS_GUARDRAIL_UNAVAILABLE",
@@ -86,31 +87,38 @@ public class NaturalCmsGuardrailAdminService {
         return view(stored);
     }
 
-    private boolean opened(String resourceKey, String fieldName) {
+    private boolean opened(String resourceKey, String operation) {
         for (NaturalCmsResourceService.OpenResource open : resources.openResources()) {
             if (open.resourceKey().equals(resourceKey)) {
-                return open.fields().contains(fieldName);
+                return open.operations().contains(operation);
             }
         }
         return false;
     }
 
+    /**
+     * 화면이 그릴 목록.
+     *
+     * <p>동작은 코드가 연 것을 전부 싣고 각각에 저장된 선택을 표시한다. 켜진 것만 실으면
+     * 화면이 끌 대상을 그릴 수 없다. 필드는 이름만 싣는다 — 관리자가 정하는 단위가 아니라
+     * 그 대상이 무엇을 다루는지 알려 주는 표시다.
+     */
     private NaturalCmsGuardrailContract.GuardrailView view(NaturalCmsGuardrail guardrail) {
         List<NaturalCmsGuardrailContract.Resource> resourceViews = new ArrayList<>();
         for (NaturalCmsResourceService.OpenResource open : resources.openResources()) {
-            Set<String> allowed = guardrail.fields(open.resourceKey(), open.fields());
-            List<NaturalCmsGuardrailContract.Field> fields = new ArrayList<>();
-            for (String name : new LinkedHashSet<>(sorted(open.fields()))) {
-                fields.add(new NaturalCmsGuardrailContract.Field(
+            Set<String> allowed = guardrail.operations(open.resourceKey(), open.operations());
+            List<NaturalCmsGuardrailContract.Operation> operations = new ArrayList<>();
+            for (String name : sorted(open.operations())) {
+                operations.add(new NaturalCmsGuardrailContract.Operation(
                         name, allowed.contains(name)));
             }
             resourceViews.add(new NaturalCmsGuardrailContract.Resource(
                     open.resourceKey(),
-                    sorted(guardrail.operations(open.operations())),
-                    List.copyOf(fields)));
+                    List.copyOf(operations),
+                    sorted(open.fields())));
         }
         return new NaturalCmsGuardrailContract.GuardrailView(
-                guardrail.configured(), guardrail.allowDelete(), List.copyOf(resourceViews));
+                guardrail.configured(), List.copyOf(resourceViews));
     }
 
     private static List<String> sorted(Set<String> values) {

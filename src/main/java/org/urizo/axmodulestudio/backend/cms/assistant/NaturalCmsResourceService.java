@@ -110,7 +110,19 @@ public final class NaturalCmsResourceService {
             String resourceKey,
             Set<String> operations,
             Set<String> fields,
-            Set<String> excludes) { }
+            Set<String> excludes,
+            String handlerName,
+            String dataTable,
+            List<Lock> locks) { }
+
+    /**
+     * 그 대상에만 걸리는 잠금.
+     *
+     * <p>키만 내려주고 문구는 화면이 만든다. 서버가 한글을 들고 있으면 화면의 다른 라벨과 말이
+     * 어긋나고, 화면이 목록을 들고 있으면 코드가 바뀔 때 화면이 거짓말을 한다. 숫자가 붙는
+     * 잠금은 {@code value}로 실어 화면이 상한을 따로 적지 않게 한다.
+     */
+    public record Lock(String key, Integer value) { }
 
     /**
      * 자연어 CMS가 다루는 대상 전부.
@@ -121,6 +133,33 @@ public final class NaturalCmsResourceService {
     private static final List<String> ALL_RESOURCES = List.of(
             NaturalCmsGuardrail.MENU, NaturalCmsGuardrail.BOARD,
             NaturalCmsGuardrail.BOARD_POST, NaturalCmsGuardrail.CONTENT, "TEMPLATE");
+
+    /** 승인 뒤 값이 실제로 쓰이는 표. 다른 대상의 표에 닿을 코드 경로는 없다. */
+    private static final Map<String, String> DATA_TABLES = Map.of(
+            NaturalCmsGuardrail.MENU, "app.cms_menu",
+            NaturalCmsGuardrail.BOARD, "app.cms_board",
+            NaturalCmsGuardrail.BOARD_POST, "app.cms_post",
+            NaturalCmsGuardrail.CONTENT, "app.cms_content");
+
+    /**
+     * 그 대상의 Handler 안에만 있는 제약.
+     *
+     * <p>동작을 켜 두어도 여전히 걸리는 것들이라 체크박스와 성격이 다르다. 사람이 관리 화면에서
+     * 하는 것보다 AI 가 좁다는 사실이 여기서 드러난다 — 게시판 삭제가 그 예다.
+     */
+    private static final Map<String, List<Lock>> LOCKS = Map.of(
+            NaturalCmsGuardrail.MENU, List.of(
+                    new Lock("MENU_DELETE_CASCADE", MAX_COMMAND_ROWS),
+                    new Lock("MENU_POSITION_ORDINAL", null),
+                    new Lock("MENU_LINK_TARGET_ONLY", null)),
+            NaturalCmsGuardrail.BOARD, List.of(
+                    new Lock("BOARD_DELETE_EMPTY_ONLY", null)),
+            NaturalCmsGuardrail.BOARD_POST, List.of(
+                    new Lock("POST_BOARD_BOUND", null),
+                    new Lock("POST_NO_BOARD_MOVE", null)),
+            NaturalCmsGuardrail.CONTENT, List.of(
+                    new Lock("CONTENT_BODY_ALLOWLIST", null),
+                    new Lock("CONTENT_IMAGE_SOURCE", null)));
 
     /**
      * 가드레일이 관리하는 대상의 현재 열림 상태.
@@ -144,7 +183,11 @@ public final class NaturalCmsResourceService {
                 resourceKey,
                 Set.copyOf(handler.operations()),
                 Set.copyOf(handler.fields().keySet()),
-                Set.copyOf(others));
+                Set.copyOf(others),
+                // 목록을 따로 적지 않는다. Handler 를 바꾸면 이름이 따라 바뀐다.
+                handler.getClass().getSimpleName(),
+                DATA_TABLES.get(resourceKey),
+                LOCKS.getOrDefault(resourceKey, List.of()));
     }
 
     /**

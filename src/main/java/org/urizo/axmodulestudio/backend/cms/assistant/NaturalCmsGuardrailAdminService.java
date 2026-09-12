@@ -112,11 +112,17 @@ public class NaturalCmsGuardrailAdminService {
                 operations.add(new NaturalCmsGuardrailContract.Operation(
                         name, allowed.contains(name)));
             }
+            List<NaturalCmsGuardrailContract.Rule> rules = new ArrayList<>();
+            for (NaturalCmsResourceService.Lock lock : open.locks()) {
+                rules.add(new NaturalCmsGuardrailContract.Rule(lock.key(), lock.value()));
+            }
             resourceViews.add(new NaturalCmsGuardrailContract.Resource(
                     open.resourceKey(),
                     List.copyOf(operations),
                     sorted(open.fields()),
-                    sorted(open.excludes())));
+                    sorted(open.excludes()),
+                    new NaturalCmsGuardrailContract.Lock(
+                            open.handlerName(), open.dataTable(), List.copyOf(rules))));
         }
         return new NaturalCmsGuardrailContract.GuardrailView(
                 guardrail.configured(), List.copyOf(resourceViews));

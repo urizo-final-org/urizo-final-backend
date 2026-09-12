@@ -35,7 +35,20 @@ public final class NaturalCmsGuardrailContract {
             String resourceKey,
             List<Operation> operations,
             List<String> fields,
-            List<String> excludes) { }
+            List<String> excludes,
+            Lock lock) { }
+
+    /**
+     * 이 대상의 가드레일이 어디에 있는지와, 그 대상에만 걸리는 제약.
+     *
+     * @param handler 동작·필드·제약이 정의되고 실제로 막히는 클래스
+     * @param dataTable 승인 뒤 값이 쓰이는 표
+     * @param rules 동작을 켜 두어도 여전히 걸리는 것들. 키만 싣고 문구는 화면이 만든다
+     */
+    public record Lock(String handler, String dataTable, List<Rule> rules) { }
+
+    /** 숫자가 붙는 제약은 값을 함께 싣는다. 화면이 상한을 따로 적지 않게 한다. */
+    public record Rule(String key, Integer value) { }
 
     /**
      * 설정 화면이 읽는 전부.

@@ -33,12 +33,15 @@ class NaturalCmsGuardrailAdminServiceTest {
                         NaturalCmsGuardrail.MENU,
                         Set.of("CREATE", "UPDATE", "DELETE"),
                         Set.of("name", "path"),
-                        Set.of(NaturalCmsGuardrail.CONTENT, "TEMPLATE")),
+                        Set.of(NaturalCmsGuardrail.CONTENT, "TEMPLATE"),
+                        "MenuHandler", "app.cms_menu",
+                        List.of(new NaturalCmsResourceService.Lock("MENU_DELETE_CASCADE", 10))),
                 new NaturalCmsResourceService.OpenResource(
                         NaturalCmsGuardrail.CONTENT,
                         Set.of("CREATE", "UPDATE", "DELETE"),
                         Set.of("title", "body"),
-                        Set.of(NaturalCmsGuardrail.MENU, "TEMPLATE"))));
+                        Set.of(NaturalCmsGuardrail.MENU, "TEMPLATE"),
+                        "ContentHandler", "app.cms_content", List.of())));
         return resources;
     }
 

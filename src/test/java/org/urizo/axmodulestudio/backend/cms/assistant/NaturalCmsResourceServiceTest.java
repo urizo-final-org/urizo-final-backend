@@ -1113,4 +1113,33 @@ class NaturalCmsResourceServiceTest {
         // 자기 자신은 넣지 않는다.
         assertThat(open.get(3).excludes()).doesNotContain("CONTENT");
     }
+
+    /**
+     * 가드레일이 어디에 있는지와 그 대상에만 걸리는 제약.
+     *
+     * <p>Handler 이름은 클래스에서 읽는다. 목록을 따로 적어 두면 Handler 를 바꿀 때 화면이
+     * 옛 이름을 계속 보여준다. 숫자가 붙는 제약은 상한을 함께 실어 화면이 그 값을 적지 않게 한다.
+     */
+    @Test
+    void reportsWhereEachGuardrailLivesAndWhatOnlyItLocks() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                mock(CmsService.class), mapper, NaturalCmsGuardrail.unconfigured());
+
+        List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
+
+        assertThat(open.get(0).handlerName()).isEqualTo("MenuHandler");
+        assertThat(open.get(0).dataTable()).isEqualTo("app.cms_menu");
+        assertThat(open.get(0).locks())
+                .extracting(NaturalCmsResourceService.Lock::key)
+                .contains("MENU_DELETE_CASCADE");
+        assertThat(open.get(0).locks())
+                .filteredOn(lock -> "MENU_DELETE_CASCADE".equals(lock.key()))
+                .extracting(NaturalCmsResourceService.Lock::value)
+                .containsExactly(10);
+        // 게시판과 게시물은 한 화면이지만 Handler 도 표도 다르다.
+        assertThat(open.get(1).handlerName()).isEqualTo("BoardHandler");
+        assertThat(open.get(2).handlerName()).isEqualTo("PostHandler");
+        assertThat(open.get(2).dataTable()).isEqualTo("app.cms_post");
+    }
 }

@@ -237,7 +237,8 @@ public class ConnectorDocumentClient {
                 content(item, mapping, documentId),
                 category == null || category.isBlank() ? List.of() : List.of(category.strip()),
                 sourceUrl == null ? null : URI.create(sourceUrl),
-                updatedAt == null ? null : timestamp(updatedAt, documentId));
+                updatedAt == null ? null : timestamp(updatedAt, documentId),
+                optional(item, mapping, "imageUrl"));
     }
 
     /**

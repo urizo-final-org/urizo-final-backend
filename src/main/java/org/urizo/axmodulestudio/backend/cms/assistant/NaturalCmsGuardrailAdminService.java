@@ -115,7 +115,8 @@ public class NaturalCmsGuardrailAdminService {
             resourceViews.add(new NaturalCmsGuardrailContract.Resource(
                     open.resourceKey(),
                     List.copyOf(operations),
-                    sorted(open.fields())));
+                    sorted(open.fields()),
+                    sorted(open.excludes())));
         }
         return new NaturalCmsGuardrailContract.GuardrailView(
                 guardrail.configured(), List.copyOf(resourceViews));

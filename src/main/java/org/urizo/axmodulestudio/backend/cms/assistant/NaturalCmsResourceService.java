@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -97,8 +98,29 @@ public final class NaturalCmsResourceService {
         return isPost(resource) ? NaturalCmsGuardrail.BOARD_POST : resource.type();
     }
 
-    /** 지금 코드가 여는 대상·동작·필드. 설정 화면은 저장된 선택이 아니라 이 목록을 기준으로 그린다. */
-    public record OpenResource(String resourceKey, Set<String> operations, Set<String> fields) { }
+    /**
+     * 지금 코드가 여는 대상·동작·필드. 설정 화면은 저장된 선택이 아니라 이 목록을 기준으로 그린다.
+     *
+     * <p>{@code excludes}는 이 대상의 Job이 닿을 수 없는 나머지 대상이다. 판정 지시문의 제외
+     * 문장이 아니라 <b>Handler 고정</b>이 근거다 — 대상이 정해지면 그 Handler 하나만 쓰이므로
+     * 다른 대상의 표에 닿을 코드 경로가 없다. 지시문은 모델이 무시하면 지나가지만 이쪽은
+     * 모델과 무관하게 성립하므로, 설정 화면이 「할 수 없다」고 말해도 과장이 아니다.
+     */
+    public record OpenResource(
+            String resourceKey,
+            Set<String> operations,
+            Set<String> fields,
+            Set<String> excludes) { }
+
+    /**
+     * 자연어 CMS가 다루는 대상 전부.
+     *
+     * <p>가드레일이 관리하는 넷에 템플릿을 더한다. 템플릿은 설정 대상이 아니지만 「메뉴 화면에서
+     * 템플릿을 바꿀 수 있나」는 관리자가 실제로 하는 질문이라 목록에는 있어야 한다.
+     */
+    private static final List<String> ALL_RESOURCES = List.of(
+            NaturalCmsGuardrail.MENU, NaturalCmsGuardrail.BOARD,
+            NaturalCmsGuardrail.BOARD_POST, NaturalCmsGuardrail.CONTENT, "TEMPLATE");
 
     /**
      * 가드레일이 관리하는 대상의 현재 열림 상태.
@@ -116,10 +138,13 @@ public final class NaturalCmsResourceService {
     }
 
     private static OpenResource openResource(String resourceKey, ResourceHandler<?> handler) {
+        Set<String> others = new LinkedHashSet<>(ALL_RESOURCES);
+        others.remove(resourceKey);
         return new OpenResource(
                 resourceKey,
                 Set.copyOf(handler.operations()),
-                Set.copyOf(handler.fields().keySet()));
+                Set.copyOf(handler.fields().keySet()),
+                Set.copyOf(others));
     }
 
     /**

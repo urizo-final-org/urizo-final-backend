@@ -25,8 +25,17 @@ public final class NaturalCmsGuardrailContract {
     /** 한 동작의 현재 상태. {@code enabled}는 관리자가 정한 값이다. */
     public record Operation(String name, boolean enabled) { }
 
-    /** 한 대상이 지금 여는 동작과, 그 대상이 다루는 필드 이름. */
-    public record Resource(String resourceKey, List<Operation> operations, List<String> fields) { }
+    /**
+     * 한 대상이 지금 여는 동작과, 그 대상이 다루는 필드 이름, 그리고 닿을 수 없는 나머지 대상.
+     *
+     * <p>{@code excludes}의 근거는 판정 지시문이 아니라 Handler 고정이다. 지시문은 모델이
+     * 무시하면 지나가지만 Handler 는 모델과 무관하게 성립한다.
+     */
+    public record Resource(
+            String resourceKey,
+            List<Operation> operations,
+            List<String> fields,
+            List<String> excludes) { }
 
     /**
      * 설정 화면이 읽는 전부.

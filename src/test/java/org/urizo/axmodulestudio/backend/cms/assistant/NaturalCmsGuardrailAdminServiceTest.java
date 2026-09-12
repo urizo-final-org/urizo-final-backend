@@ -32,11 +32,13 @@ class NaturalCmsGuardrailAdminServiceTest {
                 new NaturalCmsResourceService.OpenResource(
                         NaturalCmsGuardrail.MENU,
                         Set.of("CREATE", "UPDATE", "DELETE"),
-                        Set.of("name", "path")),
+                        Set.of("name", "path"),
+                        Set.of(NaturalCmsGuardrail.CONTENT, "TEMPLATE")),
                 new NaturalCmsResourceService.OpenResource(
                         NaturalCmsGuardrail.CONTENT,
                         Set.of("CREATE", "UPDATE", "DELETE"),
-                        Set.of("title", "body"))));
+                        Set.of("title", "body"),
+                        Set.of(NaturalCmsGuardrail.MENU, "TEMPLATE"))));
         return resources;
     }
 

@@ -1087,4 +1087,30 @@ class NaturalCmsResourceServiceTest {
                         "targetType", "targetId");
         assertThat(open.get(3).fields()).containsExactlyInAnyOrder("title", "body");
     }
+
+    /**
+     * 닿을 수 없는 나머지 대상은 자기를 뺀 전부다.
+     *
+     * <p>근거는 판정 지시문이 아니라 Handler 고정이다. 대상이 정해지면 그 Handler 하나만
+     * 쓰이므로 다른 대상의 표에 닿을 코드 경로가 없다. 그래서 설정 화면이 「할 수 없다」고
+     * 말해도 과장이 아니다.
+     */
+    @Test
+    void reportsTheOtherResourcesEachTargetCannotReach() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                mock(CmsService.class), mapper, NaturalCmsGuardrail.unconfigured());
+
+        List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
+
+        assertThat(open.get(0).excludes())
+                .containsExactlyInAnyOrder("BOARD", "BOARD_POST", "CONTENT", "TEMPLATE");
+        // 게시판과 게시물은 서로를 뺀다. 한 화면이지만 Handler 가 다르다.
+        assertThat(open.get(1).excludes())
+                .containsExactlyInAnyOrder("MENU", "BOARD_POST", "CONTENT", "TEMPLATE");
+        assertThat(open.get(2).excludes())
+                .containsExactlyInAnyOrder("MENU", "BOARD", "CONTENT", "TEMPLATE");
+        // 자기 자신은 넣지 않는다.
+        assertThat(open.get(3).excludes()).doesNotContain("CONTENT");
+    }
 }

@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
@@ -55,8 +56,9 @@ public class LocalEvaluationSetController {
     private final Clock clock;
 
     LocalEvaluationSetController(
-            JdbcTemplate jdbc,
-            TransactionTemplate transactions,
+            @Qualifier("productJdbcTemplate") JdbcTemplate jdbc,
+            // coding 쪽 TransactionTemplate이 둘 더 있고 어느 것도 @Primary가 아니다.
+            @Qualifier("productTransactionTemplate") TransactionTemplate transactions,
             LocalDevRequestGuard requestGuard,
             EvaluationQuestionPlanner planner,
             ObjectMapper objectMapper,

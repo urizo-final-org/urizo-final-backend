@@ -742,8 +742,6 @@ class NaturalCmsStageServiceTest {
                 previewValid,
                 "WAITING_APPROVAL".equals(status) ? "APPROVED" : null,
                 null,
-                null,
-                null,
                 NOW,
                 NOW);
     }

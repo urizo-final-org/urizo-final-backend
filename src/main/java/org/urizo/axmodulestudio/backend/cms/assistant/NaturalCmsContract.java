@@ -39,6 +39,28 @@ public final class NaturalCmsContract {
         }
     }
 
+    /**
+     * 파이프라인이 막은 이유. 화면만 읽고 Orchestrator는 보지 않는다.
+     *
+     * <p>그전까지 판정 사유는 {@code natural_cms_handler_result.payload}에만 남았고 그 표를
+     * 읽는 API가 없어, 화면이 요청 문장의 낱말을 보고 어느 화면 일인지 추측해 안내했다. 그
+     * 추측은 가드레일이 닫은 동작에서 반드시 틀린다 — 요청문은 이 화면에서 되는 일처럼 보이는데
+     * 실제로는 관리자가 끈 것이기 때문이다.
+     *
+     * <p>{@link JobResponse}에 싣지 않고 따로 내는 이유는 Orchestrator가 그 응답을 허용
+     * 목록으로 검사하기 때문이다. 필드를 더하면 Job 전체가 {@code WORKER_RESPONSE_INVALID}로
+     * 거부돼 파이프라인이 통째로 멎는다.
+     *
+     * @param code 가드레일이 막았는지 지금 코드로 안 되는지. 화면이 「요청을 고치세요」와
+     *             「관리자에게 문의하세요」를 가려 말하려면 분류가 필요하다
+     * @param reason 모델이 쓴 한글 사유. 범위 밖 요청은 이 문장이 이미 정확하다
+     */
+    public record RefusalResponse(String schemaVersion, String code, String reason) {
+        public RefusalResponse {
+            requireVersion(schemaVersion);
+        }
+    }
+
     public record CreateJobRequest(
             String schemaVersion,
             @NotNull UUID profileVersionId,
@@ -144,15 +166,11 @@ public final class NaturalCmsContract {
     /**
      * 화면이 Job에 대해 알 수 있는 전부.
      *
-     * <p>{@code refusalCode}와 {@code refusalReason}은 파이프라인이 막았을 때만 채워진다.
-     * 그전까지 판정 사유는 {@code natural_cms_handler_result.payload}에만 남았고 그 표를 읽는
-     * API가 없어, 화면이 요청 문장의 낱말을 보고 어느 화면 일인지 추측해 안내했다. 그 추측은
-     * 가드레일이 닫은 동작에서 반드시 틀린다 — 요청문은 이 화면에서 되는 일처럼 보이는데
-     * 실제로는 관리자가 끈 것이기 때문이다.
+     * <p>여기에 필드를 더하지 않는다. Orchestrator가 이 응답을 허용 목록으로 검사해
+     * ({@code natural_cms_domain_client.NaturalCmsJob.from_dict}) 목록에 없는 키가 하나라도
+     * 있으면 {@code WORKER_RESPONSE_INVALID}로 Job 전체를 거부한다. 더하는 변경도 깨진다.
      *
-     * <p>코드와 문장을 함께 싣는 이유가 다르다. 가드레일이 막은 것은 <b>우리가 정한 고정
-     * 문장</b>을 화면이 써야 하므로 분류가 필요하고, 범위 밖 요청은 모델이 쓴 한글 문장이
-     * 이미 정확하므로 그대로 보낸다. 둘 다 없으면 화면은 예전 추측으로 되돌아간다.
+     * <p>화면에만 필요한 값은 {@link RefusalResponse}처럼 별도 경로로 낸다.
      */
     public record JobResponse(
             String schemaVersion,
@@ -170,8 +188,6 @@ public final class NaturalCmsContract {
             boolean previewValid,
             String approvalDecision,
             String approvalFeedback,
-            String refusalCode,
-            String refusalReason,
             Instant createdAt,
             Instant updatedAt) {
         public JobResponse {

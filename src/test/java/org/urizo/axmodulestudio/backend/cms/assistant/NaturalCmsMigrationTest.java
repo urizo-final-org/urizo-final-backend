@@ -146,6 +146,31 @@ class NaturalCmsMigrationTest {
                 .contains("CASE WHEN op.name = 'DELETE' THEN rule.allow_delete ELSE TRUE END");
     }
 
+    /**
+     * Job 응답에 필드를 더하면 파이프라인이 통째로 멎는다.
+     *
+     * <p>Orchestrator가 이 응답을 허용 목록으로 검사한다
+     * ({@code natural_cms_domain_client.NaturalCmsJob.from_dict}의 {@code allowed}).
+     * 목록에 없는 키가 하나라도 있으면 {@code WORKER_RESPONSE_INVALID}로 Job 전체를 거부하고,
+     * 새 요청은 전부 {@code ACTIVE}로 멈춘 채 화면은 「미리보기를 받지 못했습니다」만 띄운다.
+     * 실제로 겪었다 — 화면에만 필요한 값을 여기 실었다가 로컬 파이프라인이 멎었다.
+     *
+     * <p>화면에만 필요한 값은 {@code RefusalResponse}처럼 별도 경로로 낸다. 이 목록을 늘려야
+     * 하면 Orchestrator의 {@code allowed}를 같은 PR에서 함께 고쳐야 하고, 그것은 다른
+     * 저장소라 6번·팀장과의 협의가 먼저다.
+     */
+    @Test
+    void jobResponseKeepsTheShapeTheOrchestratorAccepts() {
+        assertThat(NaturalCmsContract.JobResponse.class.getRecordComponents())
+                .extracting(java.lang.reflect.RecordComponent::getName)
+                .containsExactly(
+                        "schemaVersion", "jobId", "traceId", "profileVersionId",
+                        "pipelineAttempt", "stateVersion", "status", "requestText",
+                        "resource", "structuredCommand", "previewId", "previewHash",
+                        "previewValid", "approvalDecision", "approvalFeedback",
+                        "createdAt", "updatedAt");
+    }
+
     /** 쓰이지 않게 된 필드 선택 표는 같은 리비전에서 지운다. 앞선 파일은 체크섬 때문에 못 고친다. */
     @Test
     void operationSelectionDropsTheFieldSelectionItReplaces() throws IOException {

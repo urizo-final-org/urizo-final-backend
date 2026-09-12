@@ -53,6 +53,18 @@ public final class NaturalCmsCommandController {
         return store.read(actor(authentication), jobId);
     }
 
+    /**
+     * 막힌 이유. Job 응답에 실을 수 없어 따로 낸다.
+     *
+     * <p>Orchestrator가 Job 응답을 허용 목록으로 검사하므로 거기에 필드를 더하면 파이프라인이
+     * 통째로 멎는다. 이 경로는 화면만 부르고 Orchestrator는 보지 않는다.
+     */
+    @GetMapping("/{jobId}/refusal")
+    NaturalCmsContract.RefusalResponse refusal(
+            @PathVariable UUID jobId, Authentication authentication) {
+        return store.refusal(actor(authentication), jobId);
+    }
+
     @PostMapping("/{jobId}/decisions")
     NaturalCmsContract.JobResponse decide(
             @PathVariable UUID jobId,

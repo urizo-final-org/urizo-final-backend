@@ -59,10 +59,11 @@ class ProductJobRecoveryTest {
                 jdbc,
                 new TransactionTemplate(manager),
                 Clock.fixed(Instant.parse("2026-08-11T12:00:00Z"), ZoneOffset.UTC),
-                // 이 테스트는 Job 복구만 확인한다. 임베딩·수집 경로는 호출되지 않는다.
+                // 이 테스트는 Job 복구만 확인한다. 임베딩·수집·청킹 경로는 호출되지 않는다.
                 mock(EmbeddingClient.class),
                 mock(ConnectorDocumentClient.class),
                 mock(ConnectorSecretResolver.class),
+                mock(ChunkingStrategyPlanner.class),
                 new ObjectMapper(),
                 500);
 

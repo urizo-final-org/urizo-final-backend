@@ -9,6 +9,10 @@ import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,16 +29,19 @@ public class KnowledgeStore {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final ProjectStore projects;
+    private final ObjectMapper objectMapper;
 
     KnowledgeStore(
             JdbcTemplate productJdbcTemplate,
             TransactionTemplate productTransactionTemplate,
             Clock clock,
-            ProjectStore projects) {
+            ProjectStore projects,
+            ObjectMapper objectMapper) {
         this.jdbc = productJdbcTemplate;
         this.transactions = productTransactionTemplate;
         this.clock = clock;
         this.projects = projects;
+        this.objectMapper = objectMapper;
     }
 
     public ProductApiContract.KnowledgeBaseResponse createKnowledgeBase(
@@ -263,14 +270,29 @@ public class KnowledgeStore {
                 version(), traceId, rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
                 rs.getObject(3, UUID.class), rs.getObject(4, UUID.class), rs.getInt(5),
                 rs.getString(6), rs.getString(7), rs.getString(8), rs.getInt(9), rs.getInt(10),
-                score == null ? null : score.doubleValue(), instant(rs, 11),
-                nullableInstant(rs, 13), nullableInstant(rs, 14));
+                score == null ? null : score.doubleValue(), json(rs, 15), json(rs, 16),
+                instant(rs, 11), nullableInstant(rs, 13), nullableInstant(rs, 14));
+    }
+
+    /** 저장된 JSONB. 없으면 null이며, 화면이 "없음"의 의미를 각자 정한다. */
+    private JsonNode json(ResultSet rs, int column) throws SQLException {
+        String json = rs.getString(column);
+        if (json == null || json.isBlank()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(json);
+        }
+        catch (JsonProcessingException invalid) {
+            throw new IllegalStateException("Stored knowledge version JSON is invalid.", invalid);
+        }
     }
 
     private String knowledgeVersionSelect() {
         return "SELECT knowledge_version_id, knowledge_base_id, connector_version_id, build_job_id, "
                 + "version_number, label, status, config_digest, document_count, chunk_count, "
-                + "created_at, score, ready_at, activated_at FROM app.knowledge_version";
+                + "created_at, score, ready_at, activated_at, chunking_strategy::text, "
+                + "evaluation::text FROM app.knowledge_version";
     }
 
     private static String blankToNull(String value) {

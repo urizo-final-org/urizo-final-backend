@@ -9,9 +9,11 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -35,12 +37,18 @@ import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocum
 @Profile("local-full")
 final class ProductBatchService {
 
+    // 평가 실패는 빌드를 죽이지 않고 건너뛴다. 로그가 없으면 "평가 없음"이 왜 났는지
+    // 아무도 모른 채 활성화한다.
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(ProductBatchService.class);
+
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final EmbeddingClient embeddings;
     private final ConnectorDocumentClient connectors;
     private final ConnectorSecretResolver secrets;
+    private final ChunkingStrategyPlanner planner;
     private final ObjectMapper objectMapper;
     private final int maxDocuments;
 
@@ -51,6 +59,7 @@ final class ProductBatchService {
             EmbeddingClient embeddings,
             ConnectorDocumentClient connectors,
             ConnectorSecretResolver secrets,
+            ChunkingStrategyPlanner planner,
             ObjectMapper objectMapper,
             @Value("${ax.knowledge.connector.max-documents:500}") int maxDocuments) {
         this.jdbc = productJdbcTemplate;
@@ -59,6 +68,7 @@ final class ProductBatchService {
         this.embeddings = embeddings;
         this.connectors = connectors;
         this.secrets = secrets;
+        this.planner = planner;
         this.objectMapper = objectMapper;
         this.maxDocuments = maxDocuments;
     }
@@ -248,26 +258,185 @@ final class ProductBatchService {
         }
     }
 
+    /**
+     * 전략 결정은 트랜잭션 밖에서 한다. LLM 호출을 트랜잭션 안에 두면 응답을 기다리는 동안
+     * 연결을 붙잡는다(COLLECT가 HTTP 수집을 밖에 둔 것과 같은 이유).
+     *
+     * <p>이미 전략이 저장된 버전은 다시 묻지 않는다. 재빌드가 매번 다른 값을 받으면 같은
+     * 버전을 재현할 수 없고, 무엇이 바뀌어 결과가 달라졌는지도 말할 수 없다.
+     */
     private void chunk(UUID jobId) {
+        UUID versionId = transactions.execute(status -> knowledgeVersion(jobId));
+        List<DocumentRow> documents = jdbc.query(
+                "SELECT source_document_id, content FROM app.source_document "
+                        + "WHERE knowledge_version_id = ? ORDER BY external_document_id",
+                (rs, row) -> new DocumentRow(
+                        rs.getObject(1, UUID.class), rs.getString(2)), versionId);
+        ChunkingStrategy strategy = storedStrategy(versionId)
+                .orElseGet(() -> planner.plan(documents.stream().map(DocumentRow::content).toList()));
+
         transactions.executeWithoutResult(status -> {
-            UUID versionId = knowledgeVersion(jobId);
-            List<DocumentRow> documents = jdbc.query(
-                    "SELECT source_document_id, content FROM app.source_document "
-                            + "WHERE knowledge_version_id = ? ORDER BY external_document_id",
-                    (rs, row) -> new DocumentRow(
-                            rs.getObject(1, UUID.class), rs.getString(2)), versionId);
+            int chunks = 0;
             for (DocumentRow document : documents) {
-                UUID chunkId = stableId(document.documentId() + ":chunk:0");
-                jdbc.update("INSERT INTO app.document_chunk "
-                                + "(document_chunk_id, source_document_id, knowledge_version_id, chunk_index, "
-                                + "content, content_digest) VALUES (?, ?, ?, 0, ?, ?) "
-                                + "ON CONFLICT (source_document_id, chunk_index) DO UPDATE SET "
-                                + "content = EXCLUDED.content, content_digest = EXCLUDED.content_digest",
-                        chunkId, document.documentId(), versionId,
-                        document.content(), sha256(document.content()));
+                List<String> pieces = split(document.content(), strategy);
+                for (int index = 0; index < pieces.size(); index++) {
+                    String piece = pieces.get(index);
+                    UUID chunkId = stableId(document.documentId() + ":chunk:" + index);
+                    jdbc.update("INSERT INTO app.document_chunk "
+                                    + "(document_chunk_id, source_document_id, knowledge_version_id, chunk_index, "
+                                    + "content, content_digest) VALUES (?, ?, ?, ?, ?, ?) "
+                                    + "ON CONFLICT (source_document_id, chunk_index) DO UPDATE SET "
+                                    + "content = EXCLUDED.content, content_digest = EXCLUDED.content_digest",
+                            chunkId, document.documentId(), versionId, index,
+                            piece, sha256(piece));
+                }
+                chunks += pieces.size();
             }
-            updateProgress(jobId, "CHUNK", 45, documents.size(), documents.size());
+            // 이전 빌드가 더 잘게 쪼갰다면 남은 꼬리 청크를 지운다. 남겨 두면 사라진 전략의
+            // 청크가 검색에 계속 걸린다.
+            jdbc.update("DELETE FROM app.document_chunk dc USING app.source_document sd "
+                            + "WHERE dc.source_document_id = sd.source_document_id "
+                            + "AND sd.knowledge_version_id = ? AND dc.chunk_index >= ?",
+                    versionId, maxChunkIndex(documents, strategy) + 1);
+            saveStrategy(versionId, strategy);
+            updateProgress(jobId, "CHUNK", 45, chunks, chunks);
         });
+    }
+
+    /**
+     * 문서 제목으로 검색해 그 문서가 상위에 돌아오는지 센다. 실패하면 null.
+     *
+     * <p>표본은 등록 순서에서 고르게 건너뛰며 뽑는다 — 앞 N건만 쓰면 수집 순서가 특정 분야에
+     * 몰렸을 때 그 분야만 재게 된다.
+     */
+    private BuildEvaluation measure(UUID versionId) {
+        try {
+            List<SampleRow> samples = jdbc.query(
+                    "SELECT source_document_id, title FROM app.source_document "
+                            + "WHERE knowledge_version_id = ? AND title IS NOT NULL AND title <> '' "
+                            + "ORDER BY external_document_id",
+                    (rs, row) -> new SampleRow(rs.getObject(1, UUID.class), rs.getString(2)),
+                    versionId);
+            if (samples.isEmpty()) {
+                return null;
+            }
+            int stride = Math.max(1, samples.size() / BuildEvaluation.MAX_SAMPLE);
+            List<Integer> ranks = new ArrayList<>();
+            for (int index = 0; index < samples.size() && ranks.size() < BuildEvaluation.MAX_SAMPLE;
+                    index += stride) {
+                ranks.add(rankOf(versionId, samples.get(index)));
+            }
+            return BuildEvaluation.of(ranks);
+        }
+        catch (RuntimeException failure) {
+            // 색인은 이미 만들어졌다. 측정이 안 됐다고 빌드를 실패로 돌리지 않는다.
+            LOG.warn("Build evaluation skipped: kind={} reason={}",
+                    failure.getClass().getSimpleName(), failure.getMessage());
+            return null;
+        }
+    }
+
+    /** 상위 {@code DEPTH}건에서 자기 문서의 1-기반 순위. 없으면 0. */
+    private int rankOf(UUID versionId, SampleRow sample) {
+        List<UUID> found = jdbc.query(
+                "SELECT dc.source_document_id FROM app.document_chunk dc "
+                        + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL "
+                        + "ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
+                (rs, row) -> rs.getObject(1, UUID.class),
+                versionId, embeddings.queryVector(sample.title()), BuildEvaluation.DEPTH);
+        // 한 문서가 여러 청크를 가지므로 문서 단위로 접은 뒤 순위를 센다. 접지 않으면
+        // 같은 문서의 청크가 상위를 채워 순위가 실제보다 좋아 보인다.
+        List<UUID> distinct = found.stream().distinct().toList();
+        int rank = distinct.indexOf(sample.documentId());
+        return rank < 0 ? 0 : rank + 1;
+    }
+
+    private String encode(BuildEvaluation evaluation) {
+        try {
+            return objectMapper.writeValueAsString(evaluation);
+        }
+        catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("Build evaluation could not be encoded.", impossible);
+        }
+    }
+
+    private record SampleRow(UUID documentId, String title) { }
+
+    private static int maxChunkIndex(List<DocumentRow> documents, ChunkingStrategy strategy) {
+        return documents.stream()
+                .mapToInt(document -> split(document.content(), strategy).size() - 1)
+                .max().orElse(0);
+    }
+
+    /**
+     * 문단 경계 우선으로 자른다. 상한에서 기계적으로 끊으면 문장이 반토막 나 근거 인용이
+     * 어색해진다. 문단이 상한보다 길면 그때만 상한에서 끊는다.
+     *
+     * <p>겹침은 앞 조각의 꼬리를 다음 조각 머리에 붙인다 — 경계에 걸친 문장이 어느 쪽에서도
+     * 온전하지 않게 되는 것을 막는다.
+     */
+    static List<String> split(String content, ChunkingStrategy strategy) {
+        if (strategy.splitsNothing() || content.length() <= strategy.maxCharacters()) {
+            return List.of(content);
+        }
+        List<String> pieces = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (String paragraph : content.split("\n{2,}")) {
+            if (!current.isEmpty()
+                    && current.length() + paragraph.length() + 2 > strategy.maxCharacters()) {
+                pieces.add(current.toString().strip());
+                current = new StringBuilder(tail(pieces.get(pieces.size() - 1), strategy));
+            }
+            if (!current.isEmpty()) {
+                current.append("\n\n");
+            }
+            current.append(paragraph);
+            while (current.length() > strategy.maxCharacters()) {
+                pieces.add(current.substring(0, strategy.maxCharacters()).strip());
+                current = new StringBuilder(tail(pieces.get(pieces.size() - 1), strategy))
+                        .append(current.substring(strategy.maxCharacters()));
+            }
+        }
+        if (!current.toString().isBlank()) {
+            pieces.add(current.toString().strip());
+        }
+        return pieces.isEmpty() ? List.of(content) : List.copyOf(pieces);
+    }
+
+    private static String tail(String piece, ChunkingStrategy strategy) {
+        int overlap = Math.min(strategy.overlapCharacters(), piece.length());
+        return overlap <= 0 ? "" : piece.substring(piece.length() - overlap);
+    }
+
+    private Optional<ChunkingStrategy> storedStrategy(UUID versionId) {
+        return jdbc.query(
+                "SELECT chunking_strategy::text FROM app.knowledge_version "
+                        + "WHERE knowledge_version_id = ? AND chunking_strategy IS NOT NULL",
+                (rs, row) -> rs.getString(1), versionId).stream()
+                .findFirst()
+                .map(json -> {
+                    try {
+                        JsonNode node = objectMapper.readTree(json);
+                        return new ChunkingStrategy(
+                                node.path("maxCharacters").asInt(0),
+                                node.path("overlapCharacters").asInt(0),
+                                node.path("reason").asText("저장된 전략."));
+                    }
+                    catch (JsonProcessingException invalid) {
+                        throw new IllegalStateException("Stored chunking strategy is invalid.", invalid);
+                    }
+                });
+    }
+
+    private void saveStrategy(UUID versionId, ChunkingStrategy strategy) {
+        try {
+            jdbc.update("UPDATE app.knowledge_version SET chunking_strategy = ?::jsonb "
+                            + "WHERE knowledge_version_id = ?",
+                    objectMapper.writeValueAsString(strategy), versionId);
+        }
+        catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("Chunking strategy could not be encoded.", impossible);
+        }
     }
 
     private void embed(UUID jobId) {
@@ -321,12 +490,26 @@ final class ProductBatchService {
         });
     }
 
+    /**
+     * 색인이 실제로 검색되는지 재고 결과를 버전에 남긴다(AXMS-AI02-019).
+     *
+     * <p>임베딩 호출이 표본 수만큼 나가므로 트랜잭션 밖에서 잰다(COLLECT·CHUNK와 같은 이유).
+     *
+     * <p>측정이 실패해도 빌드를 죽이지 않는다 — 색인은 이미 만들어졌고, 평가가 없는 버전은
+     * 화면에서 "평가 없음"으로 보이면 된다. 대신 로그로 남긴다.
+     */
     private void evaluate(UUID jobId) {
+        UUID targetVersion = transactions.execute(status -> knowledgeVersion(jobId));
+        BuildEvaluation evaluation = measure(targetVersion);
+
         transactions.executeWithoutResult(status -> {
             UUID versionId = knowledgeVersion(jobId);
             Instant now = Instant.now(clock);
-            jdbc.update("UPDATE app.knowledge_version SET status = 'APPROVAL_PENDING', score = 100, ready_at = ? "
+            jdbc.update("UPDATE app.knowledge_version SET status = 'APPROVAL_PENDING', "
+                            + "score = ?, evaluation = ?::jsonb, ready_at = ? "
                             + "WHERE knowledge_version_id = ? AND status = 'BUILDING'",
+                    evaluation == null ? null : evaluation.score(),
+                    evaluation == null ? null : encode(evaluation),
                     Timestamp.from(now), versionId);
             jdbc.update("UPDATE app.product_job SET status = 'WAITING_APPROVAL', "
                             + "state_version = state_version + 1, phase = 'APPROVAL_PENDING', "

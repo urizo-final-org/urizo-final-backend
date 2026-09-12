@@ -75,6 +75,15 @@ ax:
       # 이미지 재빌드가 실측 4.9분이라 모델 교체는 코드가 아니라 환경으로 한다.
       provider: ${AXMS_PUBLIC_CHAT_LLM_PROVIDER:ANTHROPIC}
       model: ${AXMS_PUBLIC_CHAT_LLM_MODEL:}
+    chunking-llm:
+      # 빌드의 CHUNK 단계에서 LLM이 청킹 규칙을 정한다(AI02-018). 챗봇 스위치와 분리한
+      # 이유는 과금 성격이 달라서다 — 챗봇은 질의마다, 이쪽은 빌드 한 번에 한 번이다.
+      # 꺼 두면 문서당 1청크로 기존과 동일하게 동작한다.
+      enabled: ${AXMS_CHUNKING_LLM:false}
+      # 벽시계 상한. 넘기면 전략 없이 계속 진행한다 — 8분짜리 빌드를 여기서 죽이지 않는다.
+      timeout: ${AXMS_CHUNKING_LLM_TIMEOUT:30s}
+      provider: ${AXMS_CHUNKING_LLM_PROVIDER:ANTHROPIC}
+      model: ${AXMS_CHUNKING_LLM_MODEL:}
     embedding:
       # 임베딩 서비스는 컨테이너 밖 호스트에서 동작한다. Compose를 바꾸지 않고
       # 컨테이너가 호스트에 닿도록 host.docker.internal을 기본값으로 둔다.

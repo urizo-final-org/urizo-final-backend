@@ -217,7 +217,8 @@ public final class ProductService implements
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
             List<String> category,
-            String previousQuery) {
+            String previousQuery,
+            UUID projectId) {
         // 검색·인용·거절은 store가 확정한 그대로 두고 answer 문장만 다시 쓴다.
         // 플래그가 꺼져 있거나 LLM이 실패하면 추출식 응답이 그대로 나간다.
         //
@@ -226,7 +227,8 @@ public final class ProductService implements
         // 비교가 끊긴다 — 켠 뒤 대명사 질문이 실제로 흔들리면 그때 넣는다.
         return answers.rewrite(
                 request.query(),
-                store.query(chatbotId, traceId, request, category, previousQuery));
+                store.query(chatbotId, traceId, request, category, previousQuery),
+                projectId);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

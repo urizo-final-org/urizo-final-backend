@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.knowledge.service;
 
 import java.time.Clock;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -79,6 +80,57 @@ class PublicAnswerComposer {
             7. 마크다운 기호를 쓰지 않는다. *, **, #, -, [](), 표 기호는 화면에 글자
                그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.""";
 
+    /**
+     * 지원사업(공고) 도메인 프롬프트(2026-09-12, axms-ai02-011). 관광 프롬프트와 갈라지는
+     * 지점은 셋이다.
+     *
+     * <p><b>규칙 4 — 문의처·신청방법을 반드시 싣는다.</b> 관광은 전화번호를 뺀다(근거 카드에
+     * 있으므로). 이 도메인의 핵심 가치는 반대로 전화 문의 대체다 — 02 문서 시연 시나리오가
+     * "신청방법·문의처 인용"을 명시한다. URL 제외는 관광과 같은 이유로 유지한다.
+     *
+     * <p><b>규칙 5 — [상태] 대신 자격 비판정.</b> 공고 본문에는 [상태] 줄이 구조적으로 없다
+     * (event_end_date가 [행사기간] 파싱 산물이고, 만료 라벨은 2호 범위에서 뺐다). 대신 이
+     * 도메인의 거절 축은 자격 판정이다 — 지원금 자격을 지어내지 않는 것이 핵심 가치다.
+     *
+     * <p>프롬프트 선택은 {@link #systemPromptFor(UUID)}가 한다.
+     */
+    static final String SME_SYSTEM_PROMPT = """
+            너는 중소기업 지원사업 안내 챗봇이다. 아래 규칙을 예외 없이 지킨다.
+
+            1. 제공된 근거 문서의 내용만 사용한다.
+            2. 근거에 없는 정보를 추가하지 않는다. 일반 상식, 추측, 계산으로
+               채우지 않는다. 날짜·금액·자격 요건·연락처는 근거에 적힌 그대로 쓴다.
+            3. 근거가 질문에 답하기에 부족하면, 지어내지 말고 부족하다고 말한다.
+            4. 소개할 사업이 여럿이면 한 사업씩 덩어리로 나눈다. 각 덩어리는 사업명
+               한 줄, 한 문장 요약, 그 아래 "· 항목: 값" 형식의 정보 줄로 쓰고 덩어리
+               사이는 빈 줄로 띄운다. 한 사업만 소개할 때도 같은 형식을 쓴다. 정보
+               줄에는 근거에 있는 신청기간·지원대상·신청방법·문의처를 우선해 싣고,
+               신청방법과 문의처가 근거에 있으면 반드시 포함한다 — 전화번호도 근거에
+               적힌 그대로 쓴다. 홈페이지 주소(URL)는 넣지 않는다 — 화면의 근거 카드에
+               이미 있다. 머리말·맺음말은 쓰지 않는다. 전체 500자 안팎으로 답한다.
+            5. 개별 기업이나 질문자가 지원 자격이 되는지, 선정될 수 있는지는 판정하지
+               않는다. 근거의 '지원대상'을 그대로 안내하고, 정확한 자격 확인은 근거에
+               있는 문의처로 안내한다. 근거에 문의처가 없으면 문의처를 지어내지 않는다.
+            6. 다정하고 상냥한 존댓말로 쓴다. 문장 끝은 "~입니다", "~해요" 같은 부드러운
+               종결어미를 쓰고, 차갑거나 사무적인 어투("~함", "~됨")와 이모지는 쓰지
+               않는다. 정보 줄("· 신청기간: …")은 명사형으로 짧게 써도 된다. 다만 근거가
+               정한 사실(날짜·금액·자격 요건)은 부드럽게 쓰되 추측형으로 흐리지 않는다.
+            7. 마크다운 기호를 쓰지 않는다. *, **, #, -, [](), 표 기호는 화면에 글자
+               그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.""";
+
+    /**
+     * 도메인 판정: projectId가 없으면 관광, 있으면 지원사업.
+     *
+     * <p>UUID 상수를 쓰지 않는 이유 — 중기부 프로젝트는 시연에서 라이브로 등록되어 UUID가
+     * 그때 생긴다. 반대로 관광은 projectId 없이 기본 챗봇 설정으로 들어오는 유일한 경로라
+     * (portal-projects 매핑에 관광이 없는 것이 의도), "없음=관광"이 라이브에도 안전하다.
+     * 도메인 2개 확정 범위의 규칙이며, 관광이 projectId를 싣게 되는 날(slug 승격)이 오면
+     * 프로젝트별 프롬프트 저장으로 바꾼다.
+     */
+    static String systemPromptFor(UUID projectId) {
+        return projectId == null ? SYSTEM_PROMPT : SME_SYSTEM_PROMPT;
+    }
+
     private static final String USER_TEMPLATE = """
             [근거 문서]
             %s
@@ -110,13 +162,13 @@ class PublicAnswerComposer {
      * 아니거나, 호출이 실패하면 {@code grounded}를 그대로 돌려준다.
      */
     ProductApiContract.RagQueryResponse rewrite(
-            String query, ProductApiContract.RagQueryResponse grounded) {
+            String query, ProductApiContract.RagQueryResponse grounded, UUID projectId) {
         if (!properties.enabled()
                 || !"ANSWERED".equals(grounded.outcome())
                 || grounded.citations().isEmpty()) {
             return grounded;
         }
-        String prose = generate(query, grounded.citations());
+        String prose = generate(query, grounded.citations(), systemPromptFor(projectId));
         if (prose == null || prose.isBlank()) {
             LOG.warn("Public chat LLM answer fell back to the extractive answer: model={}",
                     properties.model());
@@ -129,13 +181,14 @@ class PublicAnswerComposer {
     }
 
     /** 실패하면 null. 호출자는 추출식 답변으로 폴백한다. */
-    private String generate(String query, List<ProductApiContract.Citation> citations) {
+    private String generate(
+            String query, List<ProductApiContract.Citation> citations, String systemPrompt) {
         ProviderChatRequest request = new ProviderChatRequest(
                 properties.provider(),
                 properties.model(),
                 List.of(
                         ProviderChatMessage.plain(
-                                ProviderChatMessage.Role.SYSTEM, SYSTEM_PROMPT),
+                                ProviderChatMessage.Role.SYSTEM, systemPrompt),
                         ProviderChatMessage.plain(
                                 ProviderChatMessage.Role.USER, userMessage(query, citations))),
                 clock.instant().plus(properties.timeout()));

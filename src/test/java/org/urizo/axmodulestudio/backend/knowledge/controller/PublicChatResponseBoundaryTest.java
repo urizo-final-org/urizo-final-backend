@@ -61,11 +61,12 @@ class PublicChatResponseBoundaryTest {
     @Test
     void categoryAndPreviousQueryAreOptionalOnThePublicRequest() {
         assertThat(componentNames(PublicChatContract.PublicChatQueryRequest.class))
-                .containsExactly("query", "conversationId", "category", "previousQuery");
+                .containsExactly("query", "conversationId", "category", "previousQuery", "projectId");
         PublicChatContract.PublicChatQueryRequest firstTurn =
-                new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null, null);
+                new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null, null, null);
         assertThat(firstTurn.category()).isNull();
         assertThat(firstTurn.previousQuery()).isNull();
+        assertThat(firstTurn.projectId()).isNull();
     }
 
     @Test

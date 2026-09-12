@@ -46,7 +46,7 @@ class PublicAnswerComposerTest {
     void flagOffKeepsTheExtractiveAnswerAndNeverCallsTheProvider() {
         ProductApiContract.RagQueryResponse grounded = answered();
 
-        assertThat(disabled().rewrite("언제 열려?", grounded)).isSameAs(grounded);
+        assertThat(disabled().rewrite("언제 열려?", grounded, null)).isSameAs(grounded);
     }
 
     @Test
@@ -55,7 +55,7 @@ class PublicAnswerComposerTest {
                 true, Duration.ofSeconds(20), request -> reply("  다시 쓴 산문 답변.  "));
         ProductApiContract.RagQueryResponse grounded = answered();
 
-        ProductApiContract.RagQueryResponse rewritten = composer.rewrite("언제 열려?", grounded);
+        ProductApiContract.RagQueryResponse rewritten = composer.rewrite("언제 열려?", grounded, null);
 
         assertThat(rewritten.answer()).isEqualTo("다시 쓴 산문 답변.");
         assertThat(rewritten.outcome()).isEqualTo("ANSWERED");
@@ -73,7 +73,7 @@ class PublicAnswerComposerTest {
                     ModelGatewayErrorCode.MODEL_NOT_CONFIGURED, "no credential");
         });
 
-        assertThat(composer.rewrite("언제 열려?", answered()).answer()).isEqualTo(EXTRACTIVE);
+        assertThat(composer.rewrite("언제 열려?", answered(), null).answer()).isEqualTo(EXTRACTIVE);
     }
 
     @Test
@@ -89,7 +89,7 @@ class PublicAnswerComposerTest {
         });
 
         Instant startedAt = Instant.now();
-        ProductApiContract.RagQueryResponse rewritten = composer.rewrite("언제 열려?", answered());
+        ProductApiContract.RagQueryResponse rewritten = composer.rewrite("언제 열려?", answered(), null);
 
         assertThat(rewritten.answer()).isEqualTo(EXTRACTIVE);
         // 벽시계 상한이 실제로 걸린다. 상한이 없으면 provider가 5초를 붙잡는다.
@@ -101,7 +101,7 @@ class PublicAnswerComposerTest {
         PublicAnswerComposer composer = composer(
                 true, Duration.ofSeconds(20), request -> reply("   "));
 
-        assertThat(composer.rewrite("언제 열려?", answered()).answer()).isEqualTo(EXTRACTIVE);
+        assertThat(composer.rewrite("언제 열려?", answered(), null).answer()).isEqualTo(EXTRACTIVE);
     }
 
     @Test
@@ -115,8 +115,34 @@ class PublicAnswerComposerTest {
                 "1.0", TRACE, ID, ID, "REFUSED",
                 "활성 지식에서 답변을 뒷받침할 근거를 찾지 못했습니다.", List.of(), ID, Instant.EPOCH);
 
-        assertThat(composer.rewrite("반도체 공정", refused)).isSameAs(refused);
+        assertThat(composer.rewrite("반도체 공정", refused, null)).isSameAs(refused);
         assertThat(calls).hasValue(0);
+    }
+
+    /**
+     * 도메인 프롬프트 선택(axms-ai02-011). projectId 유무가 유일한 스위치다 — 관광은
+     * projectId 없이 기본 챗봇 설정으로 들어오는 유일한 경로이고, 중기부는 시연에서
+     * 라이브로 등록되어 UUID를 미리 알 수 없기 때문이다.
+     */
+    @Test
+    void anExplicitProjectSpeaksTheGrantDomainPrompt() {
+        AtomicReference<ProviderChatRequest> captured = new AtomicReference<>();
+        PublicAnswerComposer composer = composer(true, Duration.ofSeconds(20), request -> {
+            captured.set(request);
+            return reply("답변");
+        });
+
+        composer.rewrite("청년 창업 지원 사업 있어?", answered(), UUID.randomUUID());
+
+        String system = captured.get().messages().get(0).content();
+        assertThat(system).isEqualTo(PublicAnswerComposer.SME_SYSTEM_PROMPT);
+        assertThat(system)
+                .contains("지원사업 안내 챗봇")
+                // 관광과 반대다 — 이 도메인의 핵심 가치가 신청방법·문의처 인용이다.
+                .contains("신청방법과 문의처가 근거에 있으면 반드시 포함한다")
+                // 자격 판정은 지어내지 않는다(시연 시나리오 3).
+                .contains("선정될 수 있는지는 판정하지")
+                .doesNotContain("[상태]");
     }
 
     @Test
@@ -127,7 +153,7 @@ class PublicAnswerComposerTest {
             return reply("답변");
         });
 
-        composer.rewrite("진주남강유등축제 언제 열려?", answered());
+        composer.rewrite("진주남강유등축제 언제 열려?", answered(), null);
 
         ProviderChatRequest request = captured.get();
         assertThat(request.provider()).isEqualTo(ModelProvider.ANTHROPIC);
@@ -171,7 +197,7 @@ class PublicAnswerComposerTest {
         });
         String oversized = "가".repeat(900);
 
-        composer.rewrite("질문", answered(citation("제목", oversized)));
+        composer.rewrite("질문", answered(citation("제목", oversized)), null);
 
         assertThat(captured.get().messages().get(1).content()).contains("가".repeat(500));
         assertThat(captured.get().messages().get(1).content()).doesNotContain("가".repeat(501));
@@ -236,7 +262,7 @@ class PublicAnswerComposerTest {
                 "[행사기간] 20261003 ~ 20261018\n[개요] 탈춤 공연.", 0.71, "축제",
                 "ENDED", LocalDate.of(2026, 10, 18), null);
 
-        composer.rewrite("탈춤 축제 언제야?", answered(ended));
+        composer.rewrite("탈춤 축제 언제야?", answered(ended), null);
 
         assertThat(captured.get().messages().get(1).content())
                 // 하이픈 날짜를 넘기면 규칙 2 때문에 답변에도 그대로 나온다.
@@ -252,7 +278,7 @@ class PublicAnswerComposerTest {
             return reply("답변");
         });
 
-        composer.rewrite("진주남강유등축제 언제 열려?", answered());
+        composer.rewrite("진주남강유등축제 언제 열려?", answered(), null);
 
         assertThat(captured.get().messages().get(1).content()).doesNotContain("[상태]");
     }

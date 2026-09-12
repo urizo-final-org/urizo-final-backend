@@ -454,15 +454,18 @@ class CodingHandlerStageServiceTest {
     }
 
     /**
-     * Gemini keeps its thought signatures under a key hashed from the whole earlier
-     * conversation (the shared adapter's correlationId). A folded body would change that
-     * key for every later call, the signatures would come back empty, and Gemini would
-     * refuse the unsigned calls - measured on 2026-09-11 as MODEL_RESPONSE_INVALID on the
-     * first folded turn. So with a Gemini primary binding the code stage keeps every body
-     * and drops the folding hint, whatever the fold depth says.
+     * Gemini refused a folded conversation until AI04-027. The shared adapter kept each
+     * turn's thought signatures under a key hashed from the whole earlier conversation, so
+     * folding one old body changed the key of every call after it, the signatures came back
+     * empty, and Gemini refused the unsigned calls - measured on 2026-09-11 as
+     * MODEL_RESPONSE_INVALID on the first folded turn. The adapter now stores each signature
+     * under the tool call id it was issued with, which a fold does not touch, so the code
+     * stage folds for a Gemini primary binding like it does for every other provider -
+     * measured on Job 99748158: nineteen turns, no provider refusal, and the code stage's
+     * input down from 263,279 to 136,770 tokens.
      */
     @Test
-    void aGeminiPrimaryBindingNeverFoldsToolHistory() {
+    void aGeminiPrimaryBindingFoldsToolHistoryLikeEveryOtherProvider() {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(
                 mapper, bindingPolicy(mapper), 1, ModelProvider.GOOGLE_GENAI);
@@ -477,11 +480,16 @@ class CodingHandlerStageServiceTest {
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(fixture.gateway(), times(5)).chat(routed.capture());
-        assertThat(toolBodies(routed.getAllValues().get(4)))
-                .hasSize(4)
-                .allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+        // Fifth request: read_diff, two folded reads, and the search that arrived last.
+        // read_diff is never folded.
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(4);
+        assertThat(fifth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fifth.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fifth.get(2)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fifth.get(3)).contains(DIFF_DIGEST);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .doesNotContain("folded to a short note");
+                .contains("Only your last 1 read_file and search_code results");
     }
 
     @Test

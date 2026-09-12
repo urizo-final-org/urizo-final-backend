@@ -32,7 +32,6 @@ import org.urizo.axmodulestudio.backend.coding.integration.DeploymentAdapter;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayErrorCode;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
-import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
@@ -1950,20 +1949,21 @@ public final class CodingHandlerStageService {
 
     /**
      * Whether the code stage may fold its tool history under these bindings: a fold depth
-     * above zero, and a primary provider that tolerates a rewritten history.
+     * above zero and a binding to decide it from. Every provider tolerates a rewritten
+     * history now, so the decision is the depth alone.
      *
-     * <p>Gemini does not. The shared adapter stores each turn's thought signatures under a
-     * key hashed from the whole earlier conversation (its correlationId), so changing an old
-     * tool body changes the key of every call after it, the signatures come back empty, and
-     * Gemini refuses the unsigned function calls - MODEL_RESPONSE_INVALID on the first turn
-     * that folded (measured 2026-09-11). Claude and OpenAI store no such signature and fold
-     * safely. The primary binding decides once, before the first turn, because the fold is
-     * decided for the whole conversation, not per turn.
+     * <p>Gemini did not until AI04-027. The shared adapter stored each turn's thought
+     * signatures under a key hashed from the whole earlier conversation (its correlationId),
+     * so changing an old tool body changed the key of every call after it, the signatures
+     * came back empty, and Gemini refused the unsigned function calls - MODEL_RESPONSE_INVALID
+     * on the first turn that folded (measured 2026-09-11). The adapter now keys each signature
+     * by the tool call id it was issued with, which a fold does not touch; Job 99748158 then
+     * ran nineteen Gemini turns with no refusal. Claude and OpenAI store no such signature and
+     * always folded safely. Setting the fold depth to zero still disables folding everywhere.
      */
     private boolean foldsToolHistory(List<ProviderModelRegistration> modelBindings) {
         return toolHistoryKeep > 0
-                && !modelBindings.isEmpty()
-                && modelBindings.get(0).provider() != ModelProvider.GOOGLE_GENAI;
+                && !modelBindings.isEmpty();
     }
 
     /**

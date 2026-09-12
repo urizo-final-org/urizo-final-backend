@@ -683,7 +683,8 @@ final class ProductBatchService {
         return UUID.nameUUIDFromBytes(value.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static String sha256(String value) {
+    /** 저장 형식("sha256:" + hex)의 단일 출처. 원천 변경 점검(AI02-022)이 같은 자로 비교한다. */
+    static String sha256(String value) {
         try {
             byte[] bytes = MessageDigest.getInstance("SHA-256")
                     .digest(value.getBytes(StandardCharsets.UTF_8));

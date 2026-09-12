@@ -270,12 +270,12 @@ public class KnowledgeStore {
                 version(), traceId, rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
                 rs.getObject(3, UUID.class), rs.getObject(4, UUID.class), rs.getInt(5),
                 rs.getString(6), rs.getString(7), rs.getString(8), rs.getInt(9), rs.getInt(10),
-                score == null ? null : score.doubleValue(), chunkingStrategy(rs, 15),
+                score == null ? null : score.doubleValue(), json(rs, 15), json(rs, 16),
                 instant(rs, 11), nullableInstant(rs, 13), nullableInstant(rs, 14));
     }
 
-    /** AI02-018. 저장된 규칙이 없으면 null이며, 화면은 그것을 "문서당 1청크"로 읽는다. */
-    private JsonNode chunkingStrategy(ResultSet rs, int column) throws SQLException {
+    /** 저장된 JSONB. 없으면 null이며, 화면이 "없음"의 의미를 각자 정한다. */
+    private JsonNode json(ResultSet rs, int column) throws SQLException {
         String json = rs.getString(column);
         if (json == null || json.isBlank()) {
             return null;
@@ -284,15 +284,15 @@ public class KnowledgeStore {
             return objectMapper.readTree(json);
         }
         catch (JsonProcessingException invalid) {
-            throw new IllegalStateException("Stored chunking strategy is invalid.", invalid);
+            throw new IllegalStateException("Stored knowledge version JSON is invalid.", invalid);
         }
     }
 
     private String knowledgeVersionSelect() {
         return "SELECT knowledge_version_id, knowledge_base_id, connector_version_id, build_job_id, "
                 + "version_number, label, status, config_digest, document_count, chunk_count, "
-                + "created_at, score, ready_at, activated_at, chunking_strategy::text "
-                + "FROM app.knowledge_version";
+                + "created_at, score, ready_at, activated_at, chunking_strategy::text, "
+                + "evaluation::text FROM app.knowledge_version";
     }
 
     private static String blankToNull(String value) {

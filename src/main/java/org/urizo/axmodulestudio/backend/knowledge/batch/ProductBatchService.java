@@ -35,6 +35,11 @@ import org.urizo.axmodulestudio.backend.knowledge.integration.TourismSampleDocum
 @Profile("local-full")
 final class ProductBatchService {
 
+    // 평가 실패는 빌드를 죽이지 않고 건너뛴다. 로그가 없으면 "평가 없음"이 왜 났는지
+    // 아무도 모른 채 활성화한다.
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(ProductBatchService.class);
+
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final Clock clock;
@@ -246,6 +251,65 @@ final class ProductBatchService {
         });
     }
 
+    /**
+     * 문서 제목으로 검색해 그 문서가 상위에 돌아오는지 센다. 실패하면 null.
+     *
+     * <p>표본은 등록 순서에서 고르게 건너뛰며 뽑는다 — 앞 N건만 쓰면 수집 순서가 특정 분야에
+     * 몰렸을 때 그 분야만 재게 된다.
+     */
+    private BuildEvaluation measure(UUID versionId) {
+        try {
+            List<SampleRow> samples = jdbc.query(
+                    "SELECT source_document_id, title FROM app.source_document "
+                            + "WHERE knowledge_version_id = ? AND title IS NOT NULL AND title <> '' "
+                            + "ORDER BY external_document_id",
+                    (rs, row) -> new SampleRow(rs.getObject(1, UUID.class), rs.getString(2)),
+                    versionId);
+            if (samples.isEmpty()) {
+                return null;
+            }
+            int stride = Math.max(1, samples.size() / BuildEvaluation.MAX_SAMPLE);
+            List<Integer> ranks = new ArrayList<>();
+            for (int index = 0; index < samples.size() && ranks.size() < BuildEvaluation.MAX_SAMPLE;
+                    index += stride) {
+                ranks.add(rankOf(versionId, samples.get(index)));
+            }
+            return BuildEvaluation.of(ranks);
+        }
+        catch (RuntimeException failure) {
+            // 색인은 이미 만들어졌다. 측정이 안 됐다고 빌드를 실패로 돌리지 않는다.
+            LOG.warn("Build evaluation skipped: kind={} reason={}",
+                    failure.getClass().getSimpleName(), failure.getMessage());
+            return null;
+        }
+    }
+
+    /** 상위 {@code DEPTH}건에서 자기 문서의 1-기반 순위. 없으면 0. */
+    private int rankOf(UUID versionId, SampleRow sample) {
+        List<UUID> found = jdbc.query(
+                "SELECT dc.source_document_id FROM app.document_chunk dc "
+                        + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL "
+                        + "ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
+                (rs, row) -> rs.getObject(1, UUID.class),
+                versionId, embeddings.queryVector(sample.title()), BuildEvaluation.DEPTH);
+        // 한 문서가 여러 청크를 가지므로 문서 단위로 접은 뒤 순위를 센다. 접지 않으면
+        // 같은 문서의 청크가 상위를 채워 순위가 실제보다 좋아 보인다.
+        List<UUID> distinct = found.stream().distinct().toList();
+        int rank = distinct.indexOf(sample.documentId());
+        return rank < 0 ? 0 : rank + 1;
+    }
+
+    private String encode(BuildEvaluation evaluation) {
+        try {
+            return objectMapper.writeValueAsString(evaluation);
+        }
+        catch (JsonProcessingException impossible) {
+            throw new IllegalStateException("Build evaluation could not be encoded.", impossible);
+        }
+    }
+
+    private record SampleRow(UUID documentId, String title) { }
+
     private static int maxChunkIndex(List<DocumentRow> documents, ChunkingStrategy strategy) {
         return documents.stream()
                 .mapToInt(document -> split(document.content(), strategy).size() - 1)
@@ -374,12 +438,26 @@ final class ProductBatchService {
         });
     }
 
+    /**
+     * 색인이 실제로 검색되는지 재고 결과를 버전에 남긴다(AXMS-AI02-019).
+     *
+     * <p>임베딩 호출이 표본 수만큼 나가므로 트랜잭션 밖에서 잰다(COLLECT·CHUNK와 같은 이유).
+     *
+     * <p>측정이 실패해도 빌드를 죽이지 않는다 — 색인은 이미 만들어졌고, 평가가 없는 버전은
+     * 화면에서 "평가 없음"으로 보이면 된다. 대신 로그로 남긴다.
+     */
     private void evaluate(UUID jobId) {
+        UUID targetVersion = transactions.execute(status -> knowledgeVersion(jobId));
+        BuildEvaluation evaluation = measure(targetVersion);
+
         transactions.executeWithoutResult(status -> {
             UUID versionId = knowledgeVersion(jobId);
             Instant now = Instant.now(clock);
-            jdbc.update("UPDATE app.knowledge_version SET status = 'APPROVAL_PENDING', score = 100, ready_at = ? "
+            jdbc.update("UPDATE app.knowledge_version SET status = 'APPROVAL_PENDING', "
+                            + "score = ?, evaluation = ?::jsonb, ready_at = ? "
                             + "WHERE knowledge_version_id = ? AND status = 'BUILDING'",
+                    evaluation == null ? null : evaluation.score(),
+                    evaluation == null ? null : encode(evaluation),
                     Timestamp.from(now), versionId);
             jdbc.update("UPDATE app.product_job SET status = 'WAITING_APPROVAL', "
                             + "state_version = state_version + 1, phase = 'APPROVAL_PENDING', "

@@ -47,6 +47,65 @@ class CodingToolReadFileRangeTest {
                 .hasMessageContaining(String.valueOf(content.split("\n", -1).length));
     }
 
+    /** 300 filler lines with declarations at lines 3, 150 and 298 - over the bound as a whole. */
+    private static String sourceWithDeclarations() {
+        StringBuilder content = new StringBuilder();
+        for (int line = 1; line <= 300; line++) {
+            content.append(switch (line) {
+                case 3 -> "function alpha(a: number) {";
+                case 150 -> "export const BETA = { name: 'x' }";
+                case 298 -> "export default function Gamma() {";
+                default -> "  " + "x".repeat(84);
+            }).append('\n');
+        }
+        return content.toString();
+    }
+
+    @Test
+    @DisplayName("A refused whole read of a source file lists its declarations with line numbers")
+    void oversizedWholeReadCarriesAnOutline() {
+        assertThatThrownBy(() -> CodingToolService.readFileView(args(), sourceWithDeclarations()))
+                .isInstanceOf(CodingToolException.class)
+                .hasMessageContaining("Outline (line: declaration):")
+                .hasMessageContaining("\n3: function alpha(a: number) {")
+                .hasMessageContaining("\n150: export const BETA = { name: 'x' }")
+                .hasMessageContaining("\n298: export default function Gamma() {")
+                // Indented body lines are not declarations.
+                .satisfies(failure -> assertThat(failure.getMessage()).doesNotContain("\n4: "));
+    }
+
+    @Test
+    @DisplayName("A file that is not source code gets the plain refusal, without an outline")
+    void oversizedWholeReadOfANonSourceFileHasNoOutline() {
+        ObjectNode readme = MAPPER.createObjectNode();
+        readme.put("path", "README.md");
+        assertThatThrownBy(() -> CodingToolService.readFileView(readme, sourceWithDeclarations()))
+                .isInstanceOf(CodingToolException.class)
+                .hasMessageContaining("startLine")
+                .satisfies(failure -> assertThat(failure.getMessage()).doesNotContain("Outline"));
+    }
+
+    @Test
+    @DisplayName("The outline stops at its cap and says how many declarations it left out")
+    void outlineIsCappedAndCountsTheRest() {
+        String[] lines = new String[70];
+        for (int index = 0; index < lines.length; index++) {
+            lines[index] = "const v" + index + " = " + index + "\r";
+        }
+        String outline = CodingToolService.fileOutline("src/many.ts", lines);
+        assertThat(outline)
+                .contains("\n1: const v0 = 0")
+                .contains("\n60: const v59 = 59")
+                .doesNotContain("\n61: ")
+                .doesNotContain("\r")
+                .endsWith("... and 10 more");
+        assertThat(CodingToolService.fileOutline("src/App.java", new String[] {
+            "package a;", "", "public final class App {", "    private int count;",
+            "    public void run() {", "        run();", "    }", "}"}))
+                .isEqualTo(" Outline (line: declaration):\n3: public final class App {"
+                        + "\n4:     private int count;\n5:     public void run() {");
+    }
+
     @Test
     @DisplayName("A ranged read returns one note line and then exactly the asked lines")
     void rangedReadReturnsNoteAndSlice() {

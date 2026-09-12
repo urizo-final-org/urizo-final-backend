@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -31,6 +32,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.springframework.http.HttpStatus;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnPermit;
@@ -81,13 +83,33 @@ class CodingHandlerStageServiceTest {
 
     private static StageFixture stageFixture(
             ObjectMapper mapper, ProfileToolBindingPolicy toolBindings) {
+        return stageFixture(mapper, toolBindings, 3);
+    }
+
+    /** {@code toolHistoryKeep} is the fold depth of the code stage; 3 is the production default. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep) {
+        return stageFixture(mapper, toolBindings, toolHistoryKeep, ModelProvider.GOOGLE_GENAI);
+    }
+
+    /** The provider is the code node's primary binding; the fold guard reads it. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
+            ModelProvider provider) {
+        return stageFixture(mapper, toolBindings, toolHistoryKeep, provider, List.of());
+    }
+
+    /** {@code results} are the attempt's earlier stage results, such as the analysis. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
+            ModelProvider provider, List<CodingHandlerContract.HandlerResultResponse> results) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
         ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
         Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
         ProviderModelRegistration registration = new ProviderModelRegistration(
-                ModelProvider.GOOGLE_GENAI,
+                provider,
                 "coding-test-model",
                 Set.of(ModelCapability.CHAT, ModelCapability.TOOL_CALLING),
                 Duration.ofSeconds(30),
@@ -106,7 +128,8 @@ class CodingHandlerStageServiceTest {
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), mock(DeploymentAdapter.class), anyBindings,
                 mock(GuardrailPathSelectionService.class),
-                mock(GuardrailRuleService.class), mapper, clock);
+                mock(GuardrailRuleService.class), mapper, clock,
+                120, Duration.ofMillis(500), toolHistoryKeep);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -128,7 +151,7 @@ class CodingHandlerStageServiceTest {
                         "1.0", JOB, TRACE, 1, WORKSPACE,
                         CodingHandlerContract.AttemptStatus.ACTIVE,
                         "Implement the approved change.",
-                        List.of(), List.of(), List.of(), NOW, null);
+                        results, List.of(), List.of(), NOW, null);
         when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
         when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
         when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
@@ -174,18 +197,299 @@ class CodingHandlerStageServiceTest {
     /** The provider returns the tool call natively; the content stays empty. */
     private static ProviderChatResponse toolCallReply(
             String tool, String callId, String arguments) {
+        return toolCallReply(ModelProvider.GOOGLE_GENAI, tool, callId, arguments);
+    }
+
+    private static ProviderChatResponse toolCallReply(
+            ModelProvider provider, String tool, String callId, String arguments) {
         return new ProviderChatResponse(
-                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                provider, "coding-test-model",
                 "",
                 List.of(new ProviderChatMessage.ToolCall(callId, tool, arguments)),
                 10, 5, Duration.ofMillis(10));
     }
 
     private static ProviderChatResponse terminalReply() {
+        return terminalReply(ModelProvider.GOOGLE_GENAI);
+    }
+
+    private static ProviderChatResponse terminalReply(ModelProvider provider) {
         return new ProviderChatResponse(
-                ModelProvider.GOOGLE_GENAI, "coding-test-model",
+                provider, "coding-test-model",
                 "{\"port\":\"completed\",\"payload\":{\"summary\":\"done\"}}",
                 12, 6, Duration.ofMillis(10));
+    }
+
+    private static List<String> toolBodies(ProviderChatRequest request) {
+        return request.messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::content)
+                .toList();
+    }
+
+    private static ProviderChatResponse[] threeReadsThenDone() {
+        return threeReadsThenDone(ModelProvider.GOOGLE_GENAI);
+    }
+
+    private static ProviderChatResponse[] threeReadsThenDone(ModelProvider provider) {
+        return new ProviderChatResponse[] {
+            toolCallReply(provider, "read_file", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+                    "{\"path\":\"src/App.java\"}"),
+            toolCallReply(provider, "read_file", "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+                    "{\"path\":\"src/App.java\",\"startLine\":1,\"endLine\":9}"),
+            toolCallReply(provider, "search_code", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                    "{\"query\":\"App\",\"scope\":\"src\"}"),
+            terminalReply(provider),
+        };
+    }
+
+    /**
+     * Measured on Job 45593ba8: 91% of the code stage's 263,279 input tokens were earlier
+     * tool results replayed on every later answer. With a fold depth of one, each new read
+     * or search folds the one before it, and the request that follows carries the note
+     * instead of the body. read_diff is never folded.
+     */
+    @Test
+    void foldsReadResultsOlderThanTheKeptOnesInTheCodeStage() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 1, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.ANTHROPIC,
+                        "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone(ModelProvider.ANTHROPIC));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        // Fourth request: read_diff, read_file, read_file so far - only the first read folds.
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        assertThat(fourth).hasSize(3);
+        assertThat(fourth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fourth.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fourth.get(2)).contains(DIFF_DIGEST);
+        // Fifth request: the search arrived, so the second read folds too. The first read's
+        // note is the same text as before - folded once, not rewritten.
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(4);
+        assertThat(fifth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fifth.get(1)).isEqualTo(fourth.get(1));
+        assertThat(fifth.get(2)).isEqualTo(fourth.get(1));
+        assertThat(fifth.get(3)).contains(DIFF_DIGEST);
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .contains("Only your last 1 read_file and search_code results");
+    }
+
+    /**
+     * Job 45593ba8's coding stage opened a 558-line screen file whole, was refused, and read
+     * lines 1-130 and 130-300 to land two edits at 162 and 230 - text that rode along on
+     * fifteen later answers. The server now reads each target file first and hands the model
+     * only the line count and the declarations. A larger file's refusal already carries both;
+     * a file the workspace will not return at all is left out instead of failing the stage;
+     * and only the first three target files are read, because every outline is re-sent.
+     */
+    @Test
+    void theCodeStageStartsFromAnOutlineOfEachTargetFileInsteadOfItsText() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper,
+                        "src/Small.java", "src/Large.tsx", "src/Huge.tsx", "src/Fourth.java")));
+        List<JsonNode> submitted = new ArrayList<>();
+        AtomicReference<String> lastPath = new AtomicReference<>("");
+        String largeRefusal = "The file is 29470 characters over 559 lines - too large to read "
+                + "whole. Outline (line: declaration):\n173: export function PortalHome() {";
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(invocation -> {
+                    JsonNode toolRequest = invocation.getArgument(1);
+                    submitted.add(toolRequest);
+                    String path = toolRequest.path("tool").path("arguments").path("path").asText("");
+                    lastPath.set(path);
+                    if ("src/Large.tsx".equals(path)) {
+                        throw new CodingToolException(
+                                "TOOL_ARGUMENTS_INVALID", largeRefusal, HttpStatus.BAD_REQUEST);
+                    }
+                    if ("src/Huge.tsx".equals(path)) {
+                        throw new CodingToolException("TOOL_EXECUTION_FAILED",
+                                "The MCP coding tool refused the call. RESULT_TOO_LARGE: "
+                                        + "The requested file is too large.",
+                                HttpStatus.BAD_GATEWAY);
+                    }
+                    return acceptedSubmit(fixture.submittedToolCall()).answer(invocation);
+                });
+        doAnswer(ignored -> "src/Small.java".equals(lastPath.get())
+                ? new CodingToolContract.ResultContent(
+                        "1.0", UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        fixture.submittedToolCall().get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION, "text/plain", 80,
+                        "sha256:" + "f".repeat(64),
+                        "package demo;\n\npublic class Small {\n"
+                                + "    public void updateUser() {\n    }\n}\n")
+                : new CodingToolContract.ResultContent(
+                        "1.0", UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                        fixture.submittedToolCall().get(),
+                        JOB, TRACE, "stage-tool.result", EXECUTION, "application/json", 120,
+                        "sha256:" + "f".repeat(64),
+                        "{\"workspaceId\":\"" + WORKSPACE + "\","
+                                + "\"baseSha\":\"" + BASE_SHA + "\","
+                                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                                + "\"digest\":\"" + DIFF_DIGEST + "\","
+                                + "\"changedPaths\":[\"src/App.java\"]}"))
+                .when(fixture.toolService()).result("Bearer worker", EXECUTION);
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        List<JsonNode> reads = submitted.stream()
+                .filter(toolRequest -> "read_file".equals(
+                        toolRequest.path("tool").path("name").asText()))
+                .toList();
+        assertThat(reads)
+                .extracting(toolRequest ->
+                        toolRequest.path("tool").path("arguments").path("path").asText())
+                .containsExactly("src/Small.java", "src/Large.tsx", "src/Huge.tsx");
+        assertThat(reads)
+                .extracting(toolRequest -> toolRequest.path("toolCallId").asText())
+                .doesNotHaveDuplicates();
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(routed.capture());
+        String context = firstUserMessage(routed.getAllValues().get(0));
+        JsonNode outlines = mapper.readTree(context).path("targetFileOutlines");
+        assertThat(outlines).hasSize(2);
+        assertThat(outlines.get(0).path("path").asText()).isEqualTo("src/Small.java");
+        assertThat(outlines.get(0).path("outline").asText()).isEqualTo(
+                "7 lines. Outline (line: declaration):\n"
+                        + "3: public class Small {\n"
+                        + "4:     public void updateUser() {");
+        assertThat(outlines.get(1).path("path").asText()).isEqualTo("src/Large.tsx");
+        assertThat(outlines.get(1).path("outline").asText()).isEqualTo(largeRefusal);
+        assertThat(context).doesNotContain("package demo");
+        assertThat(routed.getAllValues().get(0).prompt()).contains("targetFileOutlines");
+    }
+
+    @Test
+    void withoutTargetFilesTheCodeStageReadsNothingBeforeTheModelAnswers() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        List<JsonNode> submitted = new ArrayList<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(invocation -> {
+                    submitted.add(invocation.getArgument(1));
+                    return acceptedSubmit(fixture.submittedToolCall()).answer(invocation);
+                });
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_diff");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(routed.capture());
+        assertThat(mapper.readTree(firstUserMessage(routed.getAllValues().get(0)))
+                .has("targetFileOutlines")).isFalse();
+    }
+
+    /** A feasible analysis naming the given target files, as approval 1 stored it. */
+    private static CodingHandlerContract.HandlerResultResponse analysisNaming(
+            ObjectMapper mapper, String... targetFiles) {
+        ObjectNode payload = mapper.createObjectNode().put("planSummary", "고칩니다.");
+        payload.putArray("acceptanceCriteria").add("완료한다");
+        ArrayNode targets = payload.putArray("targetFiles");
+        for (String target : targetFiles) {
+            targets.add(target);
+        }
+        return new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.fromString("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+                JOB, TRACE, 1, "coding.analyze",
+                CodingHandlerContract.ResultType.ANALYSIS, "feasible",
+                WORKSPACE, null, null, null, payload, NOW);
+    }
+
+    /** The context the stage opens with: the first user message of a request. */
+    private static String firstUserMessage(ProviderChatRequest request) {
+        return request.messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.USER)
+                .findFirst()
+                .orElseThrow()
+                .content();
+    }
+
+    @Test
+    void aZeroFoldDepthLeavesEveryToolBodyInPlace() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 0, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.ANTHROPIC,
+                        "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone(ModelProvider.ANTHROPIC));
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        assertThat(toolBodies(routed.getAllValues().get(4)))
+                .hasSize(4)
+                .allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .doesNotContain("folded to a short note");
+    }
+
+    /**
+     * Gemini refused a folded conversation until AI04-027. The shared adapter kept each
+     * turn's thought signatures under a key hashed from the whole earlier conversation, so
+     * folding one old body changed the key of every call after it, the signatures came back
+     * empty, and Gemini refused the unsigned calls - measured on 2026-09-11 as
+     * MODEL_RESPONSE_INVALID on the first folded turn. The adapter now stores each signature
+     * under the tool call id it was issued with, which a fold does not touch, so the code
+     * stage folds for a Gemini primary binding like it does for every other provider -
+     * measured on Job 99748158: nineteen turns, no provider refusal, and the code stage's
+     * input down from 263,279 to 136,770 tokens.
+     */
+    @Test
+    void aGeminiPrimaryBindingFoldsToolHistoryLikeEveryOtherProvider() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 1, ModelProvider.GOOGLE_GENAI);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        // Fifth request: read_diff, two folded reads, and the search that arrived last.
+        // read_diff is never folded.
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(4);
+        assertThat(fifth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fifth.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fifth.get(2)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fifth.get(3)).contains(DIFF_DIGEST);
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .contains("Only your last 1 read_file and search_code results");
     }
 
     @Test
@@ -299,7 +603,8 @@ class CodingHandlerStageServiceTest {
         // (5,827 tokens x 8 answers on Job 60401f37), so the stage is told to open the
         // first targetFile and reach for the next only when the change does not fit.
         assertThat(routed.getAllValues().get(0).prompt())
-                .contains("open the first")
+                .contains("start with the first targetFile")
+                .contains("read_file only that range")
                 .contains("Open a later");
         assertThat(routed.getAllValues().get(1).prompt())
                 .contains("apply_patch succeeded")

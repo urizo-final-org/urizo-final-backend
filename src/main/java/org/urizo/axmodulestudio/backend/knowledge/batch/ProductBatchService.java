@@ -252,29 +252,16 @@ final class ProductBatchService {
     }
 
     /**
-     * 문서 제목으로 검색해 그 문서가 상위에 돌아오는지 센다. 실패하면 null.
+     * 검색 품질 측정. 지식베이스에 <b>확정된</b> 골든 세트가 있으면 그 시험지로,
+     * 없으면 기존 제목 자가검색으로 잰다(AXMS-AI02-020). 실패하면 null.
      *
-     * <p>표본은 등록 순서에서 고르게 건너뛰며 뽑는다 — 앞 N건만 쓰면 수집 순서가 특정 분야에
-     * 몰렸을 때 그 분야만 재게 된다.
+     * <p>DRAFT 세트는 여기서 보이지 않는다 — 검수·동결 전의 시험지는 어떤 점수에도
+     * 쓰이지 않는다는 확정 순서를 조회 조건이 강제한다.
      */
     private BuildEvaluation measure(UUID versionId) {
         try {
-            List<SampleRow> samples = jdbc.query(
-                    "SELECT source_document_id, title FROM app.source_document "
-                            + "WHERE knowledge_version_id = ? AND title IS NOT NULL AND title <> '' "
-                            + "ORDER BY external_document_id",
-                    (rs, row) -> new SampleRow(rs.getObject(1, UUID.class), rs.getString(2)),
-                    versionId);
-            if (samples.isEmpty()) {
-                return null;
-            }
-            int stride = Math.max(1, samples.size() / BuildEvaluation.MAX_SAMPLE);
-            List<Integer> ranks = new ArrayList<>();
-            for (int index = 0; index < samples.size() && ranks.size() < BuildEvaluation.MAX_SAMPLE;
-                    index += stride) {
-                ranks.add(rankOf(versionId, samples.get(index)));
-            }
-            return BuildEvaluation.of(ranks);
+            GoldenSet set = confirmedSet(versionId);
+            return set == null ? titleMeasure(versionId) : goldenMeasure(versionId, set);
         }
         catch (RuntimeException failure) {
             // 색인은 이미 만들어졌다. 측정이 안 됐다고 빌드를 실패로 돌리지 않는다.
@@ -284,18 +271,144 @@ final class ProductBatchService {
         }
     }
 
-    /** 상위 {@code DEPTH}건에서 자기 문서의 1-기반 순위. 없으면 0. */
-    private int rankOf(UUID versionId, SampleRow sample) {
+    /**
+     * 문서 제목으로 검색해 그 문서가 상위에 돌아오는지 센다.
+     *
+     * <p>표본은 등록 순서에서 고르게 건너뛰며 뽑는다 — 앞 N건만 쓰면 수집 순서가 특정 분야에
+     * 몰렸을 때 그 분야만 재게 된다.
+     */
+    private BuildEvaluation titleMeasure(UUID versionId) {
+        List<SampleRow> samples = jdbc.query(
+                "SELECT source_document_id, title FROM app.source_document "
+                        + "WHERE knowledge_version_id = ? AND title IS NOT NULL AND title <> '' "
+                        + "ORDER BY external_document_id",
+                (rs, row) -> new SampleRow(rs.getObject(1, UUID.class), rs.getString(2)),
+                versionId);
+        if (samples.isEmpty()) {
+            return null;
+        }
+        int stride = Math.max(1, samples.size() / BuildEvaluation.MAX_SAMPLE);
+        List<Integer> ranks = new ArrayList<>();
+        for (int index = 0; index < samples.size() && ranks.size() < BuildEvaluation.MAX_SAMPLE;
+                index += stride) {
+            SampleRow sample = samples.get(index);
+            ranks.add(rankOf(versionId, sample.documentId(), sample.title()));
+        }
+        return BuildEvaluation.of(ranks);
+    }
+
+    /**
+     * 확정 세트로 채점한다. 제외는 {@link #partition}이 <b>순위를 재기 전에</b> 존재 검사만으로
+     * 끝낸다 — 성적을 보고 문항을 빼는 흐름이 실행 순서상 불가능하다.
+     *
+     * <p>물을 수 있는 문항이 하나도 없으면(정답 문서 전멸) 제목 자가검색으로 폴백한다.
+     */
+    private BuildEvaluation goldenMeasure(UUID versionId, GoldenSet set) {
+        Map<String, DocRef> present = new java.util.HashMap<>();
+        jdbc.query(
+                "SELECT external_document_id, source_document_id, content_digest "
+                        + "FROM app.source_document WHERE knowledge_version_id = ?",
+                rs -> {
+                    present.put(rs.getString(1),
+                            new DocRef(rs.getObject(2, UUID.class), rs.getString(3)));
+                }, versionId);
+        Partition partition = partition(set.questions(), present);
+        if (partition.askable().isEmpty()) {
+            LOG.warn("Golden evaluation fell back to titles: no expected document of "
+                    + "setVersion={} exists in this version.", set.setVersion());
+            return titleMeasure(versionId);
+        }
+        List<Integer> ranks = new ArrayList<>();
+        for (GoldenQuestion question : partition.askable()) {
+            ranks.add(rankOf(versionId,
+                    present.get(question.expectedExternalDocumentId()).documentId(),
+                    question.question()));
+        }
+        return BuildEvaluation.golden(
+                set.setVersion(), ranks, partition.excluded(), partition.modifiedCount());
+    }
+
+    /**
+     * 채점 전 분류. <b>존재 여부만</b> 본다 — 이 시점에 순위 정보는 아직 만들어지지 않았고,
+     * 그래서 "불리한 문항 제외"가 구조적으로 불가능하다. 내용이 달라진 문서(digest 불일치)는
+     * 제외 사유가 아니라 기록이다: 문서가 있으면 여전히 정답이다.
+     */
+    static Partition partition(List<GoldenQuestion> questions, Map<String, DocRef> present) {
+        List<GoldenQuestion> askable = new ArrayList<>();
+        List<BuildEvaluation.ExcludedQuestion> excluded = new ArrayList<>();
+        int modified = 0;
+        for (GoldenQuestion question : questions) {
+            DocRef reference = present.get(question.expectedExternalDocumentId());
+            if (reference == null) {
+                excluded.add(new BuildEvaluation.ExcludedQuestion(
+                        question.id(), "DOCUMENT_MISSING"));
+                continue;
+            }
+            if (!reference.contentDigest().equals(question.sourceContentDigest())) {
+                modified++;
+            }
+            askable.add(question);
+        }
+        return new Partition(List.copyOf(askable), List.copyOf(excluded), modified);
+    }
+
+    /** 이 버전의 지식베이스에 확정(CONFIRMED)된 세트. DRAFT·부재·파싱 불가는 전부 null. */
+    private GoldenSet confirmedSet(UUID versionId) {
+        List<String> rows = jdbc.query(
+                "SELECT kb.evaluation_question_set::text FROM app.knowledge_base kb "
+                        + "JOIN app.knowledge_version kv ON kv.knowledge_base_id = kb.knowledge_base_id "
+                        + "WHERE kv.knowledge_version_id = ? "
+                        + "AND kb.evaluation_question_set->>'status' = 'CONFIRMED'",
+                (rs, row) -> rs.getString(1), versionId);
+        if (rows.isEmpty()) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(rows.get(0));
+            List<GoldenQuestion> questions = new ArrayList<>();
+            for (JsonNode question : node.path("questions")) {
+                String text = question.path("question").asText("");
+                String expected = question.path("expectedExternalDocumentId").asText("");
+                if (!text.isBlank() && !expected.isBlank()) {
+                    questions.add(new GoldenQuestion(
+                            question.path("id").asText(""), text, expected,
+                            question.path("sourceContentDigest").asText("")));
+                }
+            }
+            return questions.isEmpty() ? null
+                    : new GoldenSet(node.path("setVersion").asInt(1), List.copyOf(questions));
+        }
+        catch (JsonProcessingException failure) {
+            LOG.warn("Golden evaluation fell back to titles: stored set is unreadable.");
+            return null;
+        }
+    }
+
+    record GoldenQuestion(
+            String id, String question, String expectedExternalDocumentId,
+            String sourceContentDigest) { }
+
+    record GoldenSet(int setVersion, List<GoldenQuestion> questions) { }
+
+    record DocRef(UUID documentId, String contentDigest) { }
+
+    record Partition(
+            List<GoldenQuestion> askable,
+            List<BuildEvaluation.ExcludedQuestion> excluded,
+            int modifiedCount) { }
+
+    /** 상위 {@code DEPTH}건에서 정답 문서의 1-기반 순위. 없으면 0. */
+    private int rankOf(UUID versionId, UUID expectedDocumentId, String query) {
         List<UUID> found = jdbc.query(
                 "SELECT dc.source_document_id FROM app.document_chunk dc "
                         + "WHERE dc.knowledge_version_id = ? AND dc.embedding IS NOT NULL "
                         + "ORDER BY dc.embedding <=> ?::vector, dc.document_chunk_id LIMIT ?",
                 (rs, row) -> rs.getObject(1, UUID.class),
-                versionId, embeddings.queryVector(sample.title()), BuildEvaluation.DEPTH);
+                versionId, embeddings.queryVector(query), BuildEvaluation.DEPTH);
         // 한 문서가 여러 청크를 가지므로 문서 단위로 접은 뒤 순위를 센다. 접지 않으면
         // 같은 문서의 청크가 상위를 채워 순위가 실제보다 좋아 보인다.
         List<UUID> distinct = found.stream().distinct().toList();
-        int rank = distinct.indexOf(sample.documentId());
+        int rank = distinct.indexOf(expectedDocumentId);
         return rank < 0 ? 0 : rank + 1;
     }
 

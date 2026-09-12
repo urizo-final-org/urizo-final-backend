@@ -59,4 +59,41 @@ class BuildEvaluationTest {
         assertThat(BuildEvaluation.of(List.of(1)).method())
                 .isEqualTo(BuildEvaluation.TITLE_SELF_RETRIEVAL);
     }
+
+    /** 골든 지표는 같은 산술에 세트 버전·동결된 제외·수정 기록을 더 싣는다(AI02-020). */
+    @Test
+    void goldenCarriesTheSetVersionAndTheFrozenExclusions() {
+        BuildEvaluation evaluation = BuildEvaluation.golden(
+                1, List.of(1, 2),
+                List.of(new BuildEvaluation.ExcludedQuestion("q07", "DOCUMENT_MISSING")), 4);
+
+        assertThat(evaluation.method()).isEqualTo(BuildEvaluation.GOLDEN_QUESTION);
+        assertThat(evaluation.sampleSize()).isEqualTo(2);
+        assertThat(evaluation.mrr10()).isEqualTo(0.75);
+        assertThat(evaluation.setVersion()).isEqualTo(1);
+        assertThat(evaluation.excluded()).hasSize(1);
+        assertThat(evaluation.modifiedCount()).isEqualTo(4);
+    }
+
+    /** 제목 자가검색 JSON은 예전 모양 그대로여야 한다 — 새 필드가 null로도 끼면 안 된다. */
+    @Test
+    void titleJsonKeepsItsOriginalShape() throws Exception {
+        String json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(BuildEvaluation.of(List.of(1)));
+
+        assertThat(json).contains("TITLE_SELF_RETRIEVAL")
+                .doesNotContain("setVersion").doesNotContain("excluded")
+                .doesNotContain("modifiedCount");
+    }
+
+    @Test
+    void goldenJsonCarriesTheNewFields() throws Exception {
+        String json = new com.fasterxml.jackson.databind.ObjectMapper()
+                .writeValueAsString(BuildEvaluation.golden(
+                        2, List.of(1),
+                        List.of(new BuildEvaluation.ExcludedQuestion("q03", "DOCUMENT_MISSING")), 0));
+
+        assertThat(json).contains("GOLDEN_QUESTION").contains("\"setVersion\":2")
+                .contains("\"q03\"").contains("DOCUMENT_MISSING").contains("\"modifiedCount\":0");
+    }
 }

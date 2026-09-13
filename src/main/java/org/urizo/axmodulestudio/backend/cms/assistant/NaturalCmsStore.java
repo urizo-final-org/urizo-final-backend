@@ -236,6 +236,71 @@ public final class NaturalCmsStore {
         return requireJob(jobId, false);
     }
 
+    /**
+     * 파이프라인이 막은 이유.
+     *
+     * <p>같은 시도의 마지막 {@code infeasible} 결과를 읽는다. 사람이 반려한 것은 대상이 아니다.
+     * 그때는 {@code approvalFeedback}이 이미 사유이고 화면도 다르게 안내한다.
+     *
+     * <p>이유가 없으면 빈 값을 돌려준다. 없는 것도 답이라 404로 만들지 않는다 — 화면은 그때
+     * 요청 문장으로 안내하던 예전 경로로 되돌아간다.
+     */
+    public NaturalCmsContract.RefusalResponse refusal(AuthenticatedActor actor, UUID jobId) {
+        if (actor == null || !actor.role().isCmsAdministrator()) {
+            throw forbidden("A CMS administrator is required.");
+        }
+        NaturalCmsContract.JobResponse job = requireJob(jobId, false);
+        if (!"REJECTED".equals(job.status()) || job.approvalDecision() != null) {
+            return new NaturalCmsContract.RefusalResponse(
+                    NaturalCmsContract.SCHEMA_VERSION, null, null, List.of());
+        }
+        List<NaturalCmsContract.RefusalResponse> rows = jdbc.query("""
+                SELECT payload ->> 'refusalCode',
+                       payload ->> 'reason',
+                       payload -> 'closedOperations'
+                FROM app.natural_cms_handler_result
+                WHERE job_id = ? AND pipeline_attempt = ? AND result_port = 'infeasible'
+                ORDER BY recorded_at DESC
+                LIMIT 1
+                """,
+                (rs, row) -> new NaturalCmsContract.RefusalResponse(
+                        NaturalCmsContract.SCHEMA_VERSION, rs.getString(1), rs.getString(2),
+                        closedOperations(rs.getString(3))),
+                job.jobId(), job.pipelineAttempt());
+        return rows.isEmpty()
+                ? new NaturalCmsContract.RefusalResponse(
+                        NaturalCmsContract.SCHEMA_VERSION, null, null, List.of())
+                : rows.get(0);
+    }
+
+    /**
+     * 막힌 동작 목록을 읽는다. 없으면 빈 목록이다.
+     *
+     * <p>이 값을 쓰는 곳은 화면 문구 하나뿐이다. 읽다 실패해도 사유 문장은 그대로 보여 줘야
+     * 하므로 여기서 예외를 내지 않는다. 「무엇이 막혔는지」가 빠질 뿐 「막혔다」는 남는다.
+     */
+    private List<String> closedOperations(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(value);
+            if (!parsed.isArray()) {
+                return List.of();
+            }
+            List<String> operations = new java.util.ArrayList<>();
+            parsed.forEach(node -> {
+                if (node.isTextual()) {
+                    operations.add(node.asText());
+                }
+            });
+            return List.copyOf(operations);
+        }
+        catch (JsonProcessingException failure) {
+            return List.of();
+        }
+    }
+
     public NaturalCmsContract.JobResponse decide(
             AuthenticatedActor actor,
             UUID jobId,

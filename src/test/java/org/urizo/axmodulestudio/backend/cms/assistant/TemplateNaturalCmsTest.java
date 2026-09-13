@@ -34,7 +34,20 @@ class TemplateNaturalCmsTest {
     private NaturalCmsResourceService resources() {
         when(cms.templates()).thenReturn(List.of(template()));
         when(cms.templateForUpdate("CLASSIC")).thenReturn(template());
-        return new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+        return new NaturalCmsResourceService(
+                cms, mock(CmsRequestValidator.class), mapper, unconfiguredGuardrails());
+    }
+
+    /**
+     * 저장 전 가드레일. 코드가 연 것을 그대로 쓴다.
+     *
+     * <p>템플릿은 가드레일이 관리하는 넷에 없어 설정과 무관하지만, 생성자는 저장소를 받으므로
+     * 저장한 적 없는 상태를 넣는다.
+     */
+    private static NaturalCmsGuardrailStore unconfiguredGuardrails() {
+        NaturalCmsGuardrailStore store = mock(NaturalCmsGuardrailStore.class);
+        when(store.current()).thenReturn(NaturalCmsGuardrail.unconfigured());
+        return store;
     }
     private JsonNode command(String fields) throws Exception {
         return mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":" + fields + "}");
@@ -83,7 +96,9 @@ class TemplateNaturalCmsTest {
     @Test void validatesActualCmsDtoConstraints() throws Exception {
         try (var factory = Validation.buildDefaultValidatorFactory()) {
             when(cms.templates()).thenReturn(List.of(template()));
-            var service = new NaturalCmsResourceService(cms, new CmsRequestValidator(factory.getValidator()), mapper);
+            var service = new NaturalCmsResourceService(
+                    cms, new CmsRequestValidator(factory.getValidator()), mapper,
+                    unconfiguredGuardrails());
             assertThatCode(() -> service.validateCommand(resource, command("{\"primaryColor\":\"#aabbcc\",\"heroButtonUrl\":\"/search\"}"))).doesNotThrowAnyException();
             assertThatThrownBy(() -> service.validateCommand(resource, command("{\"primaryColor\":\"red\"}"))).isInstanceOf(RuntimeException.class);
             assertThatThrownBy(() -> service.validateCommand(resource, command("{\"heroTitle\":\"\"}"))).isInstanceOf(RuntimeException.class);

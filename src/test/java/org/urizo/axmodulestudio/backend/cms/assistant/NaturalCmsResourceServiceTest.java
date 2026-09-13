@@ -13,6 +13,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -32,6 +35,25 @@ import org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator;
 import org.urizo.axmodulestudio.backend.cms.service.CmsService;
 
 class NaturalCmsResourceServiceTest {
+
+    /**
+     * 울타리를 아직 저장한 적 없는 구성.
+     *
+     * <p>아래 대부분의 테스트는 울타리와 무관한 규칙을 본다. 저장 전에는 코드가 연 그대로
+     * 동작해야 하므로, 이 구성에서 통과한다는 것이 곧 "설정을 만들어도 기존 동작이 그대로다"의
+     * 회귀 검사가 된다. 울타리를 켠 경우는 아래 울타리 전용 테스트가 따로 본다.
+     */
+    private static NaturalCmsResourceService newResources(
+            CmsService cms, CmsRequestValidator validator, ObjectMapper mapper) {
+        return new NaturalCmsResourceService(cms, validator, mapper, guardrails(
+                NaturalCmsGuardrail.unconfigured()));
+    }
+
+    private static NaturalCmsGuardrailStore guardrails(NaturalCmsGuardrail guardrail) {
+        NaturalCmsGuardrailStore store = mock(NaturalCmsGuardrailStore.class);
+        when(store.current()).thenReturn(guardrail);
+        return store;
+    }
 
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
@@ -65,7 +87,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         CmsRequestValidator validator = mock(CmsRequestValidator.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, validator, mapper);
+                newResources(cms, validator, mapper);
         when(cms.content(7)).thenReturn(content("Old title", document("Old body")));
         ObjectNode command = mapper.createObjectNode().put("operation", "UPDATE");
         command.putObject("fields")
@@ -97,7 +119,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.content(7)).thenReturn(content("Old title", document("Old body")));
         when(cms.updateContent(7, "New title", document("Old body")))
                 .thenReturn(content("New title", document("Old body")));
@@ -115,7 +137,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"title":"New title","author":"Someone"}}
                 """);
@@ -128,7 +150,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void rejectsAnEmptyFieldSet() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{}}
@@ -148,7 +170,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.post(12)).thenReturn(post(12, 4, "공지", "본문"));
         ObjectNode command = mapper.createObjectNode().put("operation", "UPDATE");
         command.putObject("fields").put("body",
@@ -168,7 +190,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.post(12)).thenReturn(post(12, 4, "공지", "본문"));
         JsonNode command = mapper.valueToTree(java.util.Map.of(
                 "operation", "UPDATE", "fields", java.util.Map.of("body", "본문\n" + line)));
@@ -183,7 +205,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.menu(3)).thenReturn(new MenuView(3, "회사소개", "/about", 5L, 1, "NONE", null));
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"name":"회사 소개","displayOrder":2,"parentId":null}}
@@ -199,7 +221,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.board(4)).thenReturn(new BoardView(
                 4, "공지사항", "안내 게시판",
                 Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z")));
@@ -217,7 +239,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.templates()).thenReturn(java.util.List.of(template()));
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"heroTitle":"새 대표 문구"}}
@@ -236,7 +258,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void rejectsAFieldValueOfTheWrongJsonType() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"displayOrder":"2"}}
@@ -267,7 +289,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = menuTree();
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"CREATE","fields":{"name":"자료실","path":"/support/archive",
                  "parentId":40}}
@@ -288,7 +310,7 @@ class NaturalCmsResourceServiceTest {
                 .thenReturn(new MenuView(50, "회사", "/company", null, 10, "NONE", null));
         when(cms.menu(50)).thenReturn(new MenuView(50, "회사", "/company", null, 10, "NONE", null));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"CREATE","fields":{"name":"회사","path":"/company","position":1}}
                 """);
@@ -308,7 +330,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = menuTree();
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"position":1}}
                 """);
@@ -326,7 +348,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = menuTree();
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"position":9}}
                 """);
@@ -342,7 +364,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = menuTree();
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -357,7 +379,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void rejectsADeleteCommandThatCarriesFields() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{"name":"소개"}}
@@ -383,7 +405,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.menus()).thenReturn(java.util.List.copyOf(menus));
         when(cms.menu(10)).thenReturn(menus.get(0));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -399,7 +421,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void keepsCreateAndDeleteClosedForResourcesThatOnlyOpenUpdate() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"CREATE","fields":{"siteName":"새 사이트"}}
@@ -416,7 +438,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode state = resources.snapshot(
                 new NaturalCmsContract.ResourceRef("CONTENT", "new"));
@@ -436,7 +458,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.createContent(AUTHOR, "채용 안내", document("모집합니다")))
                 .thenReturn(content("채용 안내", document("모집합니다")));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
         command.putObject("fields")
                 .put("title", "채용 안내")
@@ -461,7 +483,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
         command.putObject("fields").put("title", "안내").put("body", "## 모집\n\n- 개발자");
 
@@ -477,7 +499,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
         command.putObject("fields").put("title", "안내").put("body",
                 "{\"type\":\"doc\",\"content\":[{\"type\":\"table\",\"content\":[]}]}");
@@ -495,7 +517,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
         command.putObject("fields").put("title", "안내").put("body",
                 "{\"type\":\"doc\",\"content\":[{\"type\":\"image\",\"attrs\":"
@@ -519,7 +541,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.content(7)).thenReturn(content("회사 소개", "## 소개"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -535,7 +557,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{"title":"회사 소개"}}
                 """);
@@ -551,7 +573,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("MENU", "new"));
 
@@ -574,7 +596,7 @@ class NaturalCmsResourceServiceTest {
                 1, "공지사항", "안내",
                 Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z"))));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode context = resources.promptContext(
                 new NaturalCmsContract.ResourceRef("MENU", "12"));
@@ -593,7 +615,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("BOARD", "new"));
 
@@ -611,7 +633,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.createBoard(new CmsRequests.BoardRequest("자료실", null))).thenReturn(board(9, "자료실", null));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"CREATE","fields":{"name":"자료실"}}
                 """);
@@ -630,7 +652,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.board(4)).thenReturn(board(4, "자료실", "빈 게시판"));
         when(cms.posts(4)).thenReturn(java.util.List.of());
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -655,7 +677,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.posts(4)).thenReturn(java.util.List.of(
                 post(12, 4, "공지", "본문"), post(13, 4, "안내", "본문")));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -679,7 +701,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.posts(4)).thenReturn(java.util.List.of(
                 post(12, 4, "공지", "본문"), post(13, 4, "안내", "본문")));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode context = resources.promptContext(
                 new NaturalCmsContract.ResourceRef("BOARD", "4"));
@@ -693,7 +715,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         assertThat(resources.promptContext(
                 new NaturalCmsContract.ResourceRef("BOARD", "new")).path("posts").asInt()).isZero();
@@ -705,7 +727,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         JsonNode state = resources.snapshot(
                 new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:new"));
@@ -725,7 +747,7 @@ class NaturalCmsResourceServiceTest {
         var request = new CmsRequests.PostRequest("점검 안내", document("안내"), null, "", null, null);
         when(cms.createPost(AUTHOR, 4, request)).thenReturn(post(21, 4, "점검 안내", "안내"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
         command.putObject("fields").put("title", "점검 안내").put("body", document("안내"));
 
@@ -746,7 +768,7 @@ class NaturalCmsResourceServiceTest {
         when(cms.updatePost(12, new CmsRequests.PostRequest("새 제목", document("옛 본문"), null, "", null, null)))
                 .thenReturn(post(12, 4, "새 제목", "옛 본문"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"title":"새 제목"}}
                 """);
@@ -765,7 +787,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.post(12)).thenReturn(post(12, 7, "다른 게시판 글", "본문"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"title":"새 제목"}}
                 """);
@@ -783,7 +805,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.post(12)).thenReturn(post(12, 4, "지울 글", "본문"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"DELETE","fields":{}}
                 """);
@@ -800,7 +822,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void keepsAPostInItsBoardByRejectingABoardField() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
                 {"operation":"UPDATE","fields":{"boardId":7}}
@@ -819,7 +841,7 @@ class NaturalCmsResourceServiceTest {
         CmsService cms = mock(CmsService.class);
         when(cms.post(12)).thenReturn(post(12, 4, "제목", "본문"));
         NaturalCmsResourceService resources =
-                new NaturalCmsResourceService(cms, mock(CmsRequestValidator.class), mapper);
+                newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.valueToTree(java.util.Map.of(
                 "operation", "UPDATE",
                 "fields", java.util.Map.of("body", "본문\n| 표 |")));
@@ -833,7 +855,7 @@ class NaturalCmsResourceServiceTest {
     @Test
     void rejectsAPostTargetIdThatDoesNotCarryItsBoard() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
-        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+        NaturalCmsResourceService resources = newResources(
                 mock(CmsService.class), mock(CmsRequestValidator.class), mapper);
 
         // 게시판 id 자리가 비면 게시판 대상으로 읽혀 숫자 id 검사에서 멈춘다.
@@ -890,5 +912,236 @@ class NaturalCmsResourceServiceTest {
                 "classic", "wide", "#112233", "기존 사이트", "머리말", "꼬리말",
                 "/hero.png", "환영합니다", "부제", "자세히", "/about",
                 true, Instant.parse("2026-08-30T00:01:00Z"));
+    }
+
+    // ── 울타리 ───────────────────────────────────────────────────────────────
+    //
+    // 가드레일은 Handler가 연 것과 교집합으로만 동작한다. 아래 테스트는 그 교집합이
+    // 좁히기만 하고 넓히지 못하는지, 그리고 저장 전에는 아무 영향이 없는지를 고정한다.
+
+    /** {@code menuTree()}가 실제로 갖고 있는 대메뉴. 병합 단계가 현재 값을 읽는다. */
+    private static final NaturalCmsContract.ResourceRef MENU_RESOURCE =
+            new NaturalCmsContract.ResourceRef("MENU", "10");
+
+    private static NaturalCmsResourceService fenced(
+            CmsService cms, ObjectMapper mapper, NaturalCmsGuardrail guardrail) {
+        return new NaturalCmsResourceService(
+                cms, mock(CmsRequestValidator.class), mapper, guardrails(guardrail));
+    }
+
+    /** 대상 하나의 동작만 담은 가드레일. 나머지 대상은 목록에 없어 코드 기본값을 따른다. */
+    private static NaturalCmsGuardrail saved(String resourceKey, String... operations) {
+        return new NaturalCmsGuardrail(true, Map.of(resourceKey, Set.of(operations)));
+    }
+
+    /** 저장 전에는 코드가 연 그대로다. 설치 직후 자연어 CMS가 멎으면 안 된다. */
+    @Test
+    void keepsEveryOpenedOperationBeforeTheGuardrailIsSaved() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                menuTree(), mapper, NaturalCmsGuardrail.unconfigured());
+
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
+                .doesNotThrowAnyException();
+    }
+
+    /** 닫은 동작을 실은 명령은 거절되고, 화면이 가려 말할 수 있게 전용 코드가 붙는다. */
+    @Test
+    void refusesAnOperationTheGuardrailClosed() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
+
+        assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+    }
+
+    /** 열어 둔 동작은 그대로 통과한다. 닫는 것은 그 대상의 그 동작뿐이다. */
+    @Test
+    void acceptsAnOperationTheGuardrailLeftOpen() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
+
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":{\"name\":\"새 이름\"}}")))
+                .doesNotThrowAnyException();
+    }
+
+    /** 설정은 좁히기만 한다. 코드가 열지 않은 동작은 허용 목록에 넣어도 통과하지 못한다. */
+    @Test
+    void cannotOpenAnOperationTheHandlerDoesNotDeclare() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.templates()).thenReturn(List.of(template()));
+        // 템플릿 Handler는 UPDATE만 연다. 설정에 CREATE를 넣어도 열리지 않아야 한다.
+        NaturalCmsResourceService resources = fenced(cms, mapper,
+                saved("TEMPLATE", "CREATE", "UPDATE"));
+
+        assertThatThrownBy(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"),
+                mapper.readTree("{\"operation\":\"CREATE\",\"fields\":{\"siteName\":\"새 이름\"}}")))
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo("CMS_COMMAND_INVALID");
+    }
+
+    /** 한 대상의 삭제를 닫아도 만들고 고치는 것은 남는다. */
+    @Test
+    void refusesDeleteWhileKeepingTheOtherOperations() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                saved(NaturalCmsGuardrail.MENU, "CREATE", "UPDATE"));
+
+        assertThatThrownBy(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":{\"name\":\"새 이름\"}}")))
+                .doesNotThrowAnyException();
+    }
+
+    /**
+     * Snapshot은 가드레일과 무관하다.
+     *
+     * <p>관리자가 정하는 단위가 대상별 동작이라 필드를 뺄 이유가 없다. 모델이 현재 값을
+     * 못 보면 바꾸지 않은 필드를 채울 수 없어 수정 자체가 어그러진다.
+     */
+    @Test
+    void keepsEveryFieldInTheSnapshot() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                saved(NaturalCmsGuardrail.MENU, "UPDATE"));
+
+        ObjectNode state = resources.snapshot(new NaturalCmsContract.ResourceRef("MENU", "10"));
+
+        assertThat(state.has("id")).isTrue();
+        assertThat(state.has("name")).isTrue();
+        assertThat(state.has("path")).isTrue();
+        assertThat(state.has("parentId")).isTrue();
+    }
+
+    /**
+     * 가드레일이 관리하지 않는 대상은 저장 뒤에도 코드가 연 그대로다.
+     *
+     * <p>TEMPLATE은 선택 표의 CHECK에서도 빠져 있다. 관리 대상이 아닌 것을 "선택된 적 없음"으로
+     * 읽으면 저장 한 번에 그 대상이 통째로 닫힌다.
+     */
+    @Test
+    void leavesUnmanagedResourcesOpenAfterTheGuardrailIsSaved() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        CmsService cms = mock(CmsService.class);
+        when(cms.templates()).thenReturn(List.of(template()));
+        NaturalCmsResourceService resources = fenced(cms, mapper,
+                saved(NaturalCmsGuardrail.MENU, "CREATE"));
+        // siteName 은 템플릿 Handler 가 읽기 전용으로 막는다(AI05-020). 가드레일이 아니라
+        // Handler 가 막는 것이므로, 여기서는 Handler 가 여는 필드를 써야 가드레일만 본다.
+        JsonNode command = mapper.readTree("""
+                {"operation":"UPDATE","fields":{"heroTitle":"새 인사말"}}
+                """);
+
+        assertThatCode(() -> resources.validateCommand(
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"), command))
+                .doesNotThrowAnyException();
+    }
+
+    /**
+     * 닫는 것은 대상 하나다. 컨텐츠 삭제를 닫아도 메뉴 삭제는 그대로다.
+     *
+     * <p>전역 스위치 하나였을 때는 한 대상을 잠그려다 넷이 함께 잠겼다. 이 테스트가 그 회귀를 막는다.
+     *
+     * <p>저장은 언제나 열두 칸을 통째로 보내므로 관리 대상은 모두 목록에 오른다. 목록에 없는
+     * 관리 대상은 "관리자가 전부 껐다"는 뜻이지 "기본값을 따른다"가 아니다.
+     */
+    @Test
+    void closesOneResourceWithoutTouchingAnother() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(menuTree(), mapper,
+                new NaturalCmsGuardrail(true, Map.of(
+                        NaturalCmsGuardrail.MENU, Set.of("CREATE", "UPDATE", "DELETE"),
+                        NaturalCmsGuardrail.CONTENT, Set.of("CREATE", "UPDATE"))));
+
+        assertThatCode(() -> resources.validateCommand(MENU_RESOURCE,
+                mapper.readTree("{\"operation\":\"DELETE\",\"fields\":{}}")))
+                .doesNotThrowAnyException();
+    }
+
+    /** 화면이 그릴 목록은 Handler가 여는 것에서 나온다. 저장된 선택이 기준이 아니다. */
+    @Test
+    void reportsWhatTheHandlersCurrentlyOpen() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                mock(CmsService.class), mapper, NaturalCmsGuardrail.unconfigured());
+
+        List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
+
+        assertThat(open).extracting(NaturalCmsResourceService.OpenResource::resourceKey)
+                .containsExactly("MENU", "BOARD", "BOARD_POST", "CONTENT");
+        assertThat(open.get(0).fields())
+                .contains("name", "path", "parentId", "displayOrder", "position",
+                        "targetType", "targetId");
+        assertThat(open.get(3).fields()).containsExactlyInAnyOrder("title", "body");
+    }
+
+    /**
+     * 닿을 수 없는 나머지 대상은 자기를 뺀 전부다.
+     *
+     * <p>근거는 판정 지시문이 아니라 Handler 고정이다. 대상이 정해지면 그 Handler 하나만
+     * 쓰이므로 다른 대상의 표에 닿을 코드 경로가 없다. 그래서 설정 화면이 「할 수 없다」고
+     * 말해도 과장이 아니다.
+     */
+    @Test
+    void reportsTheOtherResourcesEachTargetCannotReach() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                mock(CmsService.class), mapper, NaturalCmsGuardrail.unconfigured());
+
+        List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
+
+        assertThat(open.get(0).excludes())
+                .containsExactlyInAnyOrder("BOARD", "BOARD_POST", "CONTENT", "TEMPLATE");
+        // 게시판과 게시물은 서로를 뺀다. 한 화면이지만 Handler 가 다르다.
+        assertThat(open.get(1).excludes())
+                .containsExactlyInAnyOrder("MENU", "BOARD_POST", "CONTENT", "TEMPLATE");
+        assertThat(open.get(2).excludes())
+                .containsExactlyInAnyOrder("MENU", "BOARD", "CONTENT", "TEMPLATE");
+        // 자기 자신은 넣지 않는다.
+        assertThat(open.get(3).excludes()).doesNotContain("CONTENT");
+    }
+
+    /**
+     * 가드레일이 어디에 있는지와 그 대상에만 걸리는 제약.
+     *
+     * <p>Handler 이름은 클래스에서 읽는다. 목록을 따로 적어 두면 Handler 를 바꿀 때 화면이
+     * 옛 이름을 계속 보여준다. 숫자가 붙는 제약은 상한을 함께 실어 화면이 그 값을 적지 않게 한다.
+     */
+    @Test
+    void reportsWhereEachGuardrailLivesAndWhatOnlyItLocks() {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        NaturalCmsResourceService resources = fenced(
+                mock(CmsService.class), mapper, NaturalCmsGuardrail.unconfigured());
+
+        List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
+
+        assertThat(open.get(0).handlerName()).isEqualTo("MenuHandler");
+        assertThat(open.get(0).dataTable()).isEqualTo("app.cms_menu");
+        assertThat(open.get(0).locks())
+                .extracting(NaturalCmsResourceService.Lock::key)
+                .contains("MENU_DELETE_CASCADE");
+        assertThat(open.get(0).locks())
+                .filteredOn(lock -> "MENU_DELETE_CASCADE".equals(lock.key()))
+                .extracting(NaturalCmsResourceService.Lock::value)
+                .containsExactly(10);
+        // 게시판과 게시물은 한 화면이지만 Handler 도 표도 다르다.
+        assertThat(open.get(1).handlerName()).isEqualTo("BoardHandler");
+        assertThat(open.get(2).handlerName()).isEqualTo("PostHandler");
+        assertThat(open.get(2).dataTable()).isEqualTo("app.cms_post");
     }
 }

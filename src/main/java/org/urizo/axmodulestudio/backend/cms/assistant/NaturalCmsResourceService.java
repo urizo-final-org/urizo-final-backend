@@ -2,6 +2,7 @@ package org.urizo.axmodulestudio.backend.cms.assistant;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -60,16 +61,19 @@ public final class NaturalCmsResourceService {
     private final CmsService cmsService;
     private final CmsRequestValidator requestValidator;
     private final ObjectMapper objectMapper;
+    private final NaturalCmsGuardrailStore guardrails;
     private final Map<String, ResourceHandler<?>> handlers;
     private final ResourceHandler<CmsRequests.PostRequest> posts;
 
     public NaturalCmsResourceService(
             CmsService cmsService,
             CmsRequestValidator requestValidator,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            NaturalCmsGuardrailStore guardrails) {
         this.cmsService = cmsService;
         this.requestValidator = requestValidator;
         this.objectMapper = objectMapper;
+        this.guardrails = guardrails;
         this.handlers = Map.of(
                 "MENU", new MenuHandler(),
                 "BOARD", new BoardHandler(),
@@ -83,8 +87,133 @@ public final class NaturalCmsResourceService {
         return "BOARD".equals(resource.type()) && POST_ID.matcher(resource.id()).matches();
     }
 
+    /** 필드 선택의 저장 단위. 게시물은 계약상 BOARD지만 필드를 따로 연다. */
+    private static String resourceKey(NaturalCmsContract.ResourceRef resource) {
+        return isPost(resource) ? NaturalCmsGuardrail.BOARD_POST : resource.type();
+    }
+
+    /**
+     * 지금 코드가 여는 대상·동작·필드. 설정 화면은 저장된 선택이 아니라 이 목록을 기준으로 그린다.
+     *
+     * <p>{@code excludes}는 이 대상의 Job이 닿을 수 없는 나머지 대상이다. 판정 지시문의 제외
+     * 문장이 아니라 <b>Handler 고정</b>이 근거다 — 대상이 정해지면 그 Handler 하나만 쓰이므로
+     * 다른 대상의 표에 닿을 코드 경로가 없다. 지시문은 모델이 무시하면 지나가지만 이쪽은
+     * 모델과 무관하게 성립하므로, 설정 화면이 「할 수 없다」고 말해도 과장이 아니다.
+     */
+    public record OpenResource(
+            String resourceKey,
+            Set<String> operations,
+            Set<String> fields,
+            Set<String> excludes,
+            String handlerName,
+            String dataTable,
+            List<Lock> locks) { }
+
+    /**
+     * 그 대상에만 걸리는 잠금.
+     *
+     * <p>키만 내려주고 문구는 화면이 만든다. 서버가 한글을 들고 있으면 화면의 다른 라벨과 말이
+     * 어긋나고, 화면이 목록을 들고 있으면 코드가 바뀔 때 화면이 거짓말을 한다. 숫자가 붙는
+     * 잠금은 {@code value}로 실어 화면이 상한을 따로 적지 않게 한다.
+     */
+    public record Lock(String key, Integer value) { }
+
+    /**
+     * 자연어 CMS가 다루는 대상 전부.
+     *
+     * <p>가드레일이 관리하는 넷에 템플릿을 더한다. 템플릿은 설정 대상이 아니지만 「메뉴 화면에서
+     * 템플릿을 바꿀 수 있나」는 관리자가 실제로 하는 질문이라 목록에는 있어야 한다.
+     */
+    private static final List<String> ALL_RESOURCES = List.of(
+            NaturalCmsGuardrail.MENU, NaturalCmsGuardrail.BOARD,
+            NaturalCmsGuardrail.BOARD_POST, NaturalCmsGuardrail.CONTENT, "TEMPLATE");
+
+    /** 승인 뒤 값이 실제로 쓰이는 표. 다른 대상의 표에 닿을 코드 경로는 없다. */
+    private static final Map<String, String> DATA_TABLES = Map.of(
+            NaturalCmsGuardrail.MENU, "app.cms_menu",
+            NaturalCmsGuardrail.BOARD, "app.cms_board",
+            NaturalCmsGuardrail.BOARD_POST, "app.cms_post",
+            NaturalCmsGuardrail.CONTENT, "app.cms_content");
+
+    /**
+     * 그 대상의 Handler 안에만 있는 제약.
+     *
+     * <p>동작을 켜 두어도 여전히 걸리는 것들이라 체크박스와 성격이 다르다. 사람이 관리 화면에서
+     * 하는 것보다 AI 가 좁다는 사실이 여기서 드러난다 — 게시판 삭제가 그 예다.
+     */
+    private static final Map<String, List<Lock>> LOCKS = Map.of(
+            NaturalCmsGuardrail.MENU, List.of(
+                    new Lock("MENU_DELETE_CASCADE", MAX_COMMAND_ROWS),
+                    new Lock("MENU_POSITION_ORDINAL", null),
+                    new Lock("MENU_LINK_TARGET_ONLY", null)),
+            NaturalCmsGuardrail.BOARD, List.of(
+                    new Lock("BOARD_DELETE_EMPTY_ONLY", null)),
+            NaturalCmsGuardrail.BOARD_POST, List.of(
+                    new Lock("POST_BOARD_BOUND", null),
+                    new Lock("POST_NO_BOARD_MOVE", null)),
+            NaturalCmsGuardrail.CONTENT, List.of(
+                    new Lock("CONTENT_BODY_ALLOWLIST", null),
+                    new Lock("CONTENT_IMAGE_SOURCE", null)));
+
+    /**
+     * 가드레일이 관리하는 대상의 현재 열림 상태.
+     *
+     * <p>목록 자체는 저장하지 않는다. 저장하는 것은 선택뿐이므로 Handler가 동작을 늘리거나
+     * 줄이면 이 목록이 따라 바뀌고, 사라진 동작이 옛 목록에서 계속 제공되는 일이 없다.
+     */
+    public List<OpenResource> openResources() {
+        List<OpenResource> open = new ArrayList<>();
+        open.add(openResource(NaturalCmsGuardrail.MENU, handlers.get("MENU")));
+        open.add(openResource(NaturalCmsGuardrail.BOARD, handlers.get("BOARD")));
+        open.add(openResource(NaturalCmsGuardrail.BOARD_POST, posts));
+        open.add(openResource(NaturalCmsGuardrail.CONTENT, handlers.get("CONTENT")));
+        return List.copyOf(open);
+    }
+
+    private static OpenResource openResource(String resourceKey, ResourceHandler<?> handler) {
+        Set<String> others = new LinkedHashSet<>(ALL_RESOURCES);
+        others.remove(resourceKey);
+        return new OpenResource(
+                resourceKey,
+                Set.copyOf(handler.operations()),
+                Set.copyOf(handler.fields().keySet()),
+                Set.copyOf(others),
+                // 목록을 따로 적지 않는다. Handler 를 바꾸면 이름이 따라 바뀐다.
+                handler.getClass().getSimpleName(),
+                DATA_TABLES.get(resourceKey),
+                LOCKS.getOrDefault(resourceKey, List.of()));
+    }
+
+    /**
+     * 모델에게 주는 현재 상태.
+     *
+     * <p>가드레일은 여기서 걸리지 않는다. 관리자가 정하는 단위가 대상별 동작이라 필드를
+     * 빼야 할 이유가 없고, 동작은 명령서 검증이 막는다.
+     */
     public ObjectNode snapshot(NaturalCmsContract.ResourceRef resource) {
         return handler(resource).snapshot(resource.id());
+    }
+
+    /**
+     * 이 대상에서 지금 실행할 수 있는 동작.
+     *
+     * <p>판정 단계가 범위 문장을 만들 때 쓴다. 닫힌 동작을 범위에 넣어 두면 모델이 가능하다고
+     * 판정했다가 명령 단계에서 막혀, 관리자는 「미리보기를 받지 못했습니다」만 보게 된다.
+     * 막는 것은 검증이고 이 목록은 <b>왜 안 되는지 말할 수 있게</b> 하는 쪽이다.
+     */
+    public Set<String> operations(NaturalCmsContract.ResourceRef resource) {
+        ResourceHandler<?> handler = handler(resource);
+        return guardrails.current().operations(resourceKey(resource), handler.operations());
+    }
+
+    /**
+     * 코드가 이 대상에 연 동작. 가드레일을 거치지 않는다.
+     *
+     * <p>「관리자가 껐다」와 「코드가 애초에 열지 않았다」를 가르는 데 쓴다. 템플릿은 등록·삭제가
+     * 없는데 껐다고 말하면 켤 수 있는 것처럼 들린다. 목록을 따로 적지 않고 Handler 에게 묻는다.
+     */
+    public Set<String> openedOperations(NaturalCmsContract.ResourceRef resource) {
+        return Set.copyOf(handler(resource).operations());
     }
 
     /**
@@ -114,7 +243,7 @@ public final class NaturalCmsResourceService {
         if (recorded.path("fields") instanceof ObjectNode fields) {
             handler.normalize(fields);
         }
-        validated(handler, resource.id(), parse(resource.type(), handler, recorded, null, requestText));
+        validated(handler, resource.id(), parse(resource, handler, recorded, null, requestText));
         return recorded;
     }
 
@@ -139,7 +268,7 @@ public final class NaturalCmsResourceService {
             throw new NaturalCmsException("CMS_PREVIEW_STALE",
                     "미리보기 이후 템플릿이 변경됐습니다. 다시 요청해 주세요.", HttpStatus.CONFLICT);
         }
-        return saveChecked(template, resource.id(), parse(resource.type(), template,
+        return saveChecked(template, resource.id(), parse(resource, template,
                 command, Objects.requireNonNull(actorId), requestText));
     }
 
@@ -153,7 +282,7 @@ public final class NaturalCmsResourceService {
         Objects.requireNonNull(actorId, "actorId is required");
         ResourceHandler<?> handler = handler(resource);
         return saveChecked(
-                handler, resource.id(), parse(resource.type(), handler, command, actorId, ""));
+                handler, resource.id(), parse(resource, handler, command, actorId, ""));
     }
 
     private <R> JsonNode saveChecked(ResourceHandler<R> handler, String id, Command command) {
@@ -187,9 +316,17 @@ public final class NaturalCmsResourceService {
      * 명령서를 구조만 보고 갈라둔다. 값이 맞는지는 병합 뒤 기존 CMS 검증이 본다.
      *
      * <p>리소스마다 열린 operation이 다르다. 열리지 않은 종류는 여기서 끊는다.
+     *
+     * <p>{@code type}이 아니라 {@code resource}를 받는다. 가드레일은 게시판과 게시물을 갈라
+     * 저장하는데 그 둘은 계약상 같은 {@code BOARD}라 id 모양을 봐야 구분된다.
      */
-    private static Command parse(
-            String type, ResourceHandler<?> handler, JsonNode command, UUID actorId, String requestText) {
+    private Command parse(
+            NaturalCmsContract.ResourceRef resource,
+            ResourceHandler<?> handler,
+            JsonNode command,
+            UUID actorId,
+            String requestText) {
+        String type = resource.type();
         if (command == null
                 || !command.isObject()
                 || !names(command).equals(Set.of("operation", "fields"))
@@ -197,10 +334,17 @@ public final class NaturalCmsResourceService {
             throw invalidCommand(
                     "The Natural CMS command is not an approved " + type + " command.");
         }
+        // 코드가 연 것과 관리자가 허용한 것의 교집합. 설정은 좁히기만 하고 넓히지 못한다.
         String operation = command.path("operation").asText();
-        if (!handler.operations().contains(operation)) {
+        Set<String> operations = guardrails.current()
+                .operations(resourceKey(resource), handler.operations());
+        if (!operations.contains(operation)) {
+            if (handler.operations().contains(operation)) {
+                throw notAllowed(NaturalCmsRefusal.OPERATION_NOT_ALLOWED,
+                        type + " " + operation + " is closed by the current guardrail.");
+            }
             throw invalidCommand(type + " accepts these operations only: "
-                    + String.join(", ", new TreeSet<>(handler.operations())) + ".");
+                    + String.join(", ", new TreeSet<>(operations)) + ".");
         }
         JsonNode fields = command.path("fields");
         Set<String> given = names(fields);
@@ -210,9 +354,10 @@ public final class NaturalCmsResourceService {
             }
             return new Command(operation, fields, actorId, requestText);
         }
-        if (given.isEmpty() || !handler.fields().keySet().containsAll(given)) {
+        Set<String> allowed = handler.fields().keySet();
+        if (given.isEmpty() || !allowed.containsAll(given)) {
             throw invalidCommand(type + " " + operation + " accepts these fields only: "
-                    + String.join(", ", new TreeSet<>(handler.fields().keySet())) + ".");
+                    + String.join(", ", new TreeSet<>(allowed)) + ".");
         }
         for (String name : given) {
             if (!handler.fields().get(name).accepts(fields.path(name))) {
@@ -225,6 +370,17 @@ public final class NaturalCmsResourceService {
     private static NaturalCmsException invalidCommand(String message) {
         return new NaturalCmsException(
                 "CMS_COMMAND_INVALID", message, HttpStatus.UNPROCESSABLE_ENTITY);
+    }
+
+    /**
+     * 울타리가 막은 거절. 명령 모양은 맞지만 관리자가 닫아 둔 것을 건드렸다.
+     *
+     * <p>모양이 틀린 명령과 코드를 나누는 이유는 설정을 바꾸면 통과한다는 점이 다르기 때문이다.
+     * 화면은 이 구분으로 "요청을 바꾸세요"와 "관리자에게 문의하세요"를 가려 말한다.
+     */
+    private static NaturalCmsException notAllowed(NaturalCmsRefusal refusal, String message) {
+        return new NaturalCmsException(
+                refusal.code(), message, HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
     private static long numericId(String id, String type) {

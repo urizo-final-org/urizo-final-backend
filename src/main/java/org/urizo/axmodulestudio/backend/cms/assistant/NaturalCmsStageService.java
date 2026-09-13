@@ -4,9 +4,13 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -127,6 +131,15 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId) {
         requireStatus(job, "ACTIVE");
+        Set<String> opened = resources.openedOperations(job.resource());
+        Set<String> open = resources.operations(job.resource());
+        Set<String> closed = closedOperations(opened, open);
+        if (open.isEmpty()) {
+            // 물어볼 것이 없다. 모델을 부르면 토큰만 쓰고 같은 답이 온다.
+            return refused(job, stage, resultId,
+                    "이 화면은 가드레일 설정에서 모든 동작이 꺼져 있어 AI 가 바꿀 수 있는 것이 없습니다.",
+                    closed);
+        }
         ObjectNode currentState = resources.snapshot(job.resource());
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(job, stage, ModelUseCase.CHAT);
@@ -134,6 +147,20 @@ public final class NaturalCmsStageService {
                 job, stage, resultId, 1, List.of(),
                 initialMessages(job, currentState, false), modelBindings);
         ModelOutcome outcome = parseAnalyze(turn.assistant().content());
+        // 판정은 모델이 하지만 가드레일은 서버가 건다.
+        //
+        // 포트를 가리지 않는다. `feasible`로 오면 명령 단계에서 예외가 나고 Job 이 ACTIVE 로 남아
+        // 화면이 「미리보기를 받지 못했습니다」로 끝나므로 뒤집어야 한다. `infeasible`로 와도
+        // 가로채야 한다 — 그 payload 에는 refusalCode 가 없어 화면이 모델이 쓴 문장을 그대로
+        // 띄운다. 지시문이 「가드레일 때문이라고 사유에 적어라」라고 시켜 모델이 자주 그렇게
+        // 오는데, 그 문장은 매번 달라서 같은 설정에 걸린 요청이 다른 말로 거절된다.
+        String requested = outcome.value().path("operation").asText("");
+        if (closed.contains(requested)) {
+            return refused(job, stage, resultId,
+                    "가드레일 설정에서 이 화면의 「" + koreanOperation(requested)
+                            + "」 동작이 꺼져 있습니다.",
+                    Set.of(requested));
+        }
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
                 resultId,
@@ -144,6 +171,38 @@ public final class NaturalCmsStageService {
                 null,
                 null,
                 outcome.value());
+    }
+
+    /**
+     * 가드레일이 막았다고 판정한다.
+     *
+     * <p>모델이 쓴 사유와 자리는 같지만 {@code refusalCode}가 붙는다. 화면이 「지금 코드로도
+     * 안 되는 것」과 「관리자가 끈 것」을 가려 말해야 하기 때문이다. 앞쪽은 요청을 고치면
+     * 되지만 뒤쪽은 최고 관리자에게 문의할 일이다.
+     */
+    private NaturalCmsContract.StageExecutionResponse refused(
+            NaturalCmsContract.JobResponse job,
+            NaturalCmsContract.StageExecutionRequest stage,
+            UUID resultId,
+            String reason,
+            Set<String> closed) {
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("refusalCode", NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        payload.put("reason", reason);
+        // 화면이 「등록·수정」처럼 이름을 대려면 어느 동작이 막혔는지가 필요하다. 사유 문장에서
+        // 다시 뽑아내게 하면 문구를 고칠 때마다 화면이 깨진다. 키로 싣고 한글은 화면이 만든다.
+        ArrayNode operations = payload.putArray("closedOperations");
+        closed.forEach(operations::add);
+        return new NaturalCmsContract.StageExecutionResponse(
+                NaturalCmsContract.SCHEMA_VERSION,
+                resultId,
+                stage.handlerKey(),
+                "infeasible",
+                job.resource(),
+                null,
+                null,
+                null,
+                payload);
     }
 
     private NaturalCmsContract.StageExecutionResponse preview(
@@ -359,7 +418,9 @@ public final class NaturalCmsStageService {
         }
         String instruction = commandStage
                 ? commandInstruction(job.resource())
-                : feasibilityInstruction(job.resource());
+                : feasibilityInstruction(job.resource(),
+                        resources.openedOperations(job.resource()),
+                        resources.operations(job.resource()));
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
@@ -487,7 +548,85 @@ public final class NaturalCmsStageService {
      * <p>실제로 메뉴 화면에서 게시글 등록 요청이 통과해 명령 단계에서 계약 밖 형식으로 멈췄다.
      * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
      */
-    private static String feasibilityInstruction(NaturalCmsContract.ResourceRef resource) {
+    /**
+     * 관리자가 끈 동작을 범위 밖으로 덧붙이고, 요청이 필요로 하는 동작을 받아 낸다.
+     *
+     * <p>막는 것은 명령서 검증이다. 다만 그 층은 예외를 던질 뿐이라 Job이 {@code ACTIVE}로 남고
+     * 화면은 「미리보기를 받지 못했습니다」로 끝난다. 판정 단계는 {@code infeasible} 포트가 있어
+     * 사유를 남기고 정상 반려되므로, 닫힌 동작은 여기서 걸러야 관리자가 이유를 본다.
+     *
+     * <p>문장만으로는 모자랐다. 삭제를 끄면 지시를 따랐지만 수정을 끄니 같은 화면에서 그대로
+     * {@code feasible}을 냈다. 「이 화면이 바꾸는 것」이 바로 위에 적혀 있어 문장끼리 부딪힌다.
+     * 그래서 {@code payload.operation}으로 요청이 필요로 하는 동작을 받아, 판정을 뒤집는 일은
+     * {@link #analyze}가 직접 한다. 이 문장은 그 값을 얻어 내기 위한 것이고 판정 근거가 아니다.
+     */
+    private static String guardrailNote(Set<String> opened, Set<String> open) {
+        Set<String> closed = closedOperations(opened, open);
+        // 동작 이름은 닫힌 것이 없어도 요구한다. 서버가 그 값으로 판정을 뒤집으므로, 가드레일을
+        // 아무것도 끄지 않은 화면에서 갑자기 새 필드가 생기면 그때부터 모델이 헷갈린다.
+        String reportOperation =
+                " Always put in payload.operation exactly one of CREATE, UPDATE or DELETE —"
+                + " the kind of change this request needs — whichever port you choose."
+                + " Report what the request asks for, not what you think is allowed.";
+        if (closed.isEmpty()) {
+            return reportOperation;
+        }
+        List<String> english = new ArrayList<>();
+        for (String operation : closed) {
+            english.add(switch (operation) {
+                case "CREATE" -> "creating";
+                case "UPDATE" -> "changing";
+                case "DELETE" -> "deleting";
+                default -> operation.toLowerCase(Locale.ROOT);
+            });
+        }
+        return " The administrator has switched off " + String.join(" and ", english)
+                + " on this screen. A request that needs any of those is infeasible no matter"
+                + " how ordinary it sounds or how clearly it falls inside the scope above;"
+                + " say in payload.reason that the guardrail setting turned it off."
+                + reportOperation;
+    }
+
+    /** 등록 · 수정 · 삭제 순. 키를 알파벳순으로 세우면 등록·삭제·수정이 된다. */
+    private static final List<String> OPERATION_ORDER = List.of("CREATE", "UPDATE", "DELETE");
+
+    /**
+     * 코드가 열었는데 관리자가 끈 동작.
+     *
+     * <p>코드가 애초에 열지 않은 동작은 빼야 한다. 템플릿은 등록·삭제가 없는데 「관리자가
+     * 껐다」고 말하면 켤 수 있는 것처럼 들린다.
+     *
+     * <p>순서를 지킨다. 이 목록은 지시문의 영어 문장과 화면이 읽는 {@code closedOperations}로
+     * 둘 다 나간다. 알파벳순으로 두었더니 「switched off deleting and changing」이 됐다.
+     */
+    private static Set<String> closedOperations(Set<String> opened, Set<String> open) {
+        Set<String> closed = new LinkedHashSet<>();
+        for (String operation : OPERATION_ORDER) {
+            if (opened.contains(operation) && !open.contains(operation)) {
+                closed.add(operation);
+            }
+        }
+        // 코드가 여는 동작이 셋뿐이라 위 순서로 다 잡히지만, 새 동작이 생겨도 사라지지 않게 한다.
+        new TreeSet<>(opened).forEach(operation -> {
+            if (!open.contains(operation)) {
+                closed.add(operation);
+            }
+        });
+        return closed;
+    }
+
+    /** 서버가 만드는 사유 문장에만 쓴다. 화면 문구는 화면이 자기 라벨로 만든다. */
+    private static String koreanOperation(String operation) {
+        return switch (operation) {
+            case "CREATE" -> "등록";
+            case "UPDATE" -> "수정";
+            case "DELETE" -> "삭제";
+            default -> operation;
+        };
+    }
+
+    private static String feasibilityInstruction(
+            NaturalCmsContract.ResourceRef resource, Set<String> opened, Set<String> open) {
         String scope = "the selected content's title and body only";
         String excluded = "writing posts, editing article bodies, templates and members";
         /** 리소스별로 덧붙이는 단서. 범위 문장에 섞으면 조건이 전체로 번진다. */
@@ -495,6 +634,15 @@ public final class NaturalCmsStageService {
         if ("MENU".equals(resource.type())) {
             scope = "menus only: a menu's name, path, parent, order among siblings, and which "
                     + "content or board it links to. Creating and deleting a menu is included";
+            // 다른 세 화면은 나머지 대상을 하나씩 제외하는데 메뉴만 기본값을 써서 게시판과
+            // 컨텐츠가 빠져 있었다. 메뉴 화면에서 게시판을 만들어 달라는 요청이 판정에서
+            // 걸러지지 않고 명령 단계까지 내려갔다.
+            //
+            // `themselves`가 필요하다. 메뉴 범위에 `어느 컨텐츠나 게시판에 연결하는지`가
+            // 있어서, 목적어 없이 제외하면 모델이 연결 변경까지 범위 밖으로 읽는다.
+            // 게시판 분기가 삭제 조건을 문장에 섞었다가 이름 변경까지 막았던 것과 같은 함정이다.
+            excluded = "writing or editing posts, creating or changing boards and static "
+                    + "content pages themselves, templates and members";
         }
         else if (NaturalCmsResourceService.isPost(resource)) {
             // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
@@ -545,6 +693,8 @@ public final class NaturalCmsStageService {
             excluded = "finding an image that was neither attached nor already in the body, "
                     + "writing posts, boards, menus, templates and members";
         }
+        // 다섯 화면이 각자 범위와 제외 목록을 갖는다. 남은 기본값은 이제 아무도 쓰지 않지만,
+        // 새 대상이 분기 없이 들어왔을 때 전부 허용되는 것보다 좁게 두는 편이 안전하다.
         else if ("TEMPLATE".equals(resource.type())) {
             scope = "only the selected template identified by resource.id: layout (CLASSIC, MINIMAL, BOLD),"
                     + " primary colour, Header and Footer text, main title and description, button text and"
@@ -565,7 +715,7 @@ public final class NaturalCmsStageService {
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "
                 + "Anything else is infeasible even when it sounds related, including "
-                + excluded + ". When the port is "
+                + excluded + "." + guardrailNote(opened, open) + " When the port is "
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
                 + "screen cannot do. A request this screen can do stays feasible even when it "
                 + "needs several fields or a confirmation."

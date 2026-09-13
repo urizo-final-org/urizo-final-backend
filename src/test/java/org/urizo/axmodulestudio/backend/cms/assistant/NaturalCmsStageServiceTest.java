@@ -729,6 +729,67 @@ class NaturalCmsStageServiceTest {
                 .contains("payload.operation exactly one of CREATE, UPDATE or DELETE");
     }
 
+    /**
+     * 모델이 스스로 반려해도 문구는 우리 것을 쓴다.
+     *
+     * <p>지시문이 「가드레일 때문이라고 사유에 적어라」라고 시키므로 모델이 자주 {@code
+     * infeasible}로 온다. 그 payload 에는 {@code refusalCode}가 없어 화면이 모델 문장을 그대로
+     * 띄우고, 그 문장은 매번 달라진다. 같은 설정에 걸린 요청이 다른 말로 거절되면 관리자는
+     * 무엇이 원인인지 알 수 없다.
+     */
+    @Test
+    void stampsTheRefusalEvenWhenTheModelAlreadyCalledItInfeasible() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.resources.openedOperations(menu))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(menu)).thenReturn(Set.of("CREATE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse("""
+                {"port":"infeasible","payload":{"operation":"UPDATE",
+                 "reason":"이 화면은 관리자 설정으로 인해 메뉴 이름 변경을 수행할 수 없습니다."}}
+                """, List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().path("refusalCode").asText())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        assertThat(response.payload().path("closedOperations").toString())
+                .isEqualTo("[\"UPDATE\"]");
+        // 모델 문장은 버린다. 화면은 코드를 보고 자기 고정 문구를 쓴다.
+        assertThat(response.payload().path("reason").asText())
+                .doesNotContain("수행할 수 없습니다");
+    }
+
+    /**
+     * 가드레일과 무관한 반려는 모델 문장을 그대로 둔다.
+     *
+     * <p>「이 화면은 게시판을 만들 수 없습니다」처럼 범위를 짚어 주는 말은 모델이 더 잘 쓴다.
+     * 전부 고정 문구로 덮으면 관리자가 요청을 어떻게 고쳐야 하는지 알 수 없다.
+     */
+    @Test
+    void keepsTheModelsOwnReasonWhenTheGuardrailIsNotWhatBlockedIt() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse("""
+                {"port":"infeasible","payload":{"operation":"CREATE",
+                 "reason":"이 화면에서는 게시판을 만들 수 없습니다."}}
+                """, List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().has("refusalCode")).isFalse();
+        assertThat(response.payload().path("reason").asText())
+                .isEqualTo("이 화면에서는 게시판을 만들 수 없습니다.");
+    }
+
     /** 켜져 있는 동작은 그대로 통과한다. 되는 요청을 막으면 가드레일이 아니라 고장이다. */
     @Test
     void letsAnOpenOperationThroughEvenWhenAnotherOneIsClosed() throws Exception {

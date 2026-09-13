@@ -147,11 +147,15 @@ public final class NaturalCmsStageService {
                 job, stage, resultId, 1, List.of(),
                 initialMessages(job, currentState, false), modelBindings);
         ModelOutcome outcome = parseAnalyze(turn.assistant().content());
-        // 판정은 모델이 하지만 가드레일은 서버가 건다. 모델이 닫힌 동작을 `feasible`로 보내면
-        // 명령 단계에서 예외가 나고 Job 이 ACTIVE 로 남아 화면은 「미리보기를 받지 못했습니다」
-        // 로 끝난다. 여기서 뒤집어야 관리자가 무엇이 막혔는지 본다.
+        // 판정은 모델이 하지만 가드레일은 서버가 건다.
+        //
+        // 포트를 가리지 않는다. `feasible`로 오면 명령 단계에서 예외가 나고 Job 이 ACTIVE 로 남아
+        // 화면이 「미리보기를 받지 못했습니다」로 끝나므로 뒤집어야 한다. `infeasible`로 와도
+        // 가로채야 한다 — 그 payload 에는 refusalCode 가 없어 화면이 모델이 쓴 문장을 그대로
+        // 띄운다. 지시문이 「가드레일 때문이라고 사유에 적어라」라고 시켜 모델이 자주 그렇게
+        // 오는데, 그 문장은 매번 달라서 같은 설정에 걸린 요청이 다른 말로 거절된다.
         String requested = outcome.value().path("operation").asText("");
-        if ("feasible".equals(outcome.port()) && closed.contains(requested)) {
+        if (closed.contains(requested)) {
             return refused(job, stage, resultId,
                     "가드레일 설정에서 이 화면의 「" + koreanOperation(requested)
                             + "」 동작이 꺼져 있습니다.",

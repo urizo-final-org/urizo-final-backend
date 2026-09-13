@@ -54,17 +54,23 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                 request.provider(), request.modelId(), useCase);
         ProviderChatAdapter adapter = adapterRegistry.require(request.provider());
         Instant deadline = earlier(request.deadline(), clock.instant().plus(registration.timeout()));
+        ProviderChatRequest boundedRequest = new ProviderChatRequest(request.provider(), request.modelId(),
+                request.messages(), request.tools(), request.responseFormat(), deadline, request.inferenceSettings());
 
         int completedAttempts = 0;
         while (true) {
-            if (!clock.instant().isBefore(deadline)) {
+            if (Thread.currentThread().isInterrupted() || !clock.instant().isBefore(deadline)) {
                 throw new ProviderGatewayException(
                         ModelGatewayErrorCode.MODEL_TIMEOUT,
                         "Model provider deadline exceeded.");
             }
             completedAttempts++;
             try {
-                ProviderChatResponse response = adapter.chat(registration, request);
+                ProviderChatResponse response = adapter.chat(registration, boundedRequest);
+                if (!clock.instant().isBefore(deadline)) {
+                    throw new ProviderGatewayException(ModelGatewayErrorCode.MODEL_TIMEOUT,
+                            "Model provider deadline exceeded.");
+                }
                 if (!response.finishReason().completed()) {
                     // Which ending it was, in the message. The stored turn keeps only the
                     // failure code, and every non-"stop" ending a provider has - a filter,

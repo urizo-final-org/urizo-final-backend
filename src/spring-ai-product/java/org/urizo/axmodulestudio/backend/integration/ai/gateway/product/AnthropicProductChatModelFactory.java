@@ -25,8 +25,21 @@ final class AnthropicProductChatModelFactory implements ProductChatModelFactory 
     @Override
     public ProductChatModelSession open(
             String credential, String modelId, int maxOutputTokens) {
+        return open(credential, modelId, maxOutputTokens, java.time.Duration.ofSeconds(60));
+    }
+
+    @Override
+    public ProductChatModelSession open(String credential, String modelId, int maxOutputTokens,
+            java.time.Duration timeout) {
+        org.springframework.http.client.SimpleClientHttpRequestFactory http =
+                new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        int timeoutMillis = (int) Math.max(1, Math.min(Integer.MAX_VALUE, timeout.toMillis()));
+        http.setConnectTimeout(timeoutMillis);
+        http.setReadTimeout(timeoutMillis);
         AnthropicApi api = AnthropicApi.builder()
                 .apiKey(credential)
+                .restClientBuilder(org.springframework.web.client.RestClient.builder().requestFactory(http))
+                .responseErrorHandler(new ProductProviderErrors(provider()))
                 .build();
         AnthropicChatOptions options = AnthropicChatOptions.builder()
                 .model(modelId)

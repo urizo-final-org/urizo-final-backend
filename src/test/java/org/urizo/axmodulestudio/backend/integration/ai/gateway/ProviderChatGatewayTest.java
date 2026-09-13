@@ -128,7 +128,7 @@ class ProviderChatGatewayTest {
                         ProviderChatMessage.Role.USER, "Read the approved diff.")),
                 List.of(new ProviderToolDefinition(
                         "read_diff", "Read the approved diff.", schema)),
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(30));
 
         assertThatThrownBy(() -> gateway.chat(request))
                 .isInstanceOfSatisfying(CapabilityRegistrationException.class, failure ->
@@ -139,12 +139,70 @@ class ProviderChatGatewayTest {
                 org.mockito.ArgumentMatchers.any());
     }
 
+
+    @Test
+    void passesTheProviderDeadlineToTheTransportAndRejectsLateSuccess() {
+        java.util.concurrent.atomic.AtomicReference<Instant> now = new java.util.concurrent.atomic.AtomicReference<>(NOW);
+        Clock moving = new Clock() {
+            public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+            public Clock withZone(java.time.ZoneId zone) { return this; }
+            public Instant instant() { return now.get(); }
+        };
+        ProviderChatGateway bounded = new ProviderChatGateway(
+                new ProviderCapabilityRegistry(ProviderLane.PRODUCT, ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)), new ProviderChatAdapterRegistry(List.of(adapter)), moving);
+        ProviderChatRequest original = new ProviderChatRequest(ModelProvider.OPENAI,
+                registration.modelId(), "fixture", NOW.plusSeconds(60));
+        when(adapter.chat(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()))
+                .thenAnswer(invocation -> {
+                    ProviderChatRequest sent = invocation.getArgument(1);
+                    assertThat(sent.deadline()).isEqualTo(NOW.plusSeconds(30));
+                    now.set(NOW.plusSeconds(31));
+                    return response("late");
+                });
+        assertThatThrownBy(() -> bounded.chat(original)).isInstanceOfSatisfying(
+                ProviderGatewayException.class,
+                error -> assertThat(error.code()).isEqualTo(ModelGatewayErrorCode.MODEL_TIMEOUT));
+        verify(adapter, times(1)).chat(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void exhaustedRetryBudgetAndPermanentErrorsHaveBoundedCalls() {
+        ProviderChatRequest request = request("fixture");
+        when(adapter.chat(registration, request)).thenThrow(
+                new ProviderFailure(ProviderFailureKind.RATE_LIMITED, Duration.ofMillis(1)));
+        assertThatThrownBy(() -> gateway.chat(request)).isInstanceOf(ProviderGatewayException.class);
+        verify(adapter, times(2)).chat(registration, request);
+        assertThat(retryDelays).containsExactly(Duration.ofMillis(1));
+        org.mockito.Mockito.clearInvocations(adapter);
+        retryDelays.clear();
+        org.mockito.Mockito.doThrow(new ProviderFailure(ProviderFailureKind.BILLING, null))
+                .when(adapter).chat(registration, request);
+        assertThatThrownBy(() -> gateway.chat(request)).isInstanceOf(ProviderGatewayException.class);
+        verify(adapter, times(1)).chat(registration, request);
+        assertThat(retryDelays).isEmpty();
+    }
+
+    @Test
+    void interruptedExecutionDoesNotMakeAnotherProviderCall() {
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> gateway.chat(request("fixture")))
+                    .isInstanceOf(ProviderGatewayException.class);
+            verify(adapter, times(0)).chat(org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any());
+            assertThat(Thread.currentThread().isInterrupted()).isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+
     private static ProviderChatRequest request(String prompt) {
         return new ProviderChatRequest(
                 ModelProvider.OPENAI,
                 Stage2ProviderModels.OPENAI_CHAT,
                 prompt,
-                NOW.plusSeconds(60));
+                NOW.plusSeconds(30));
     }
 
     private static ProviderChatResponse response(String content) {

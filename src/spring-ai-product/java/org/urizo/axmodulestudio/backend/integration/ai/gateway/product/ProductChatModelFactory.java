@@ -8,4 +8,9 @@ interface ProductChatModelFactory {
 
     ProductChatModelSession open(
             String credential, String modelId, int maxOutputTokens);
+
+    default ProductChatModelSession open(String credential, String modelId,
+            int maxOutputTokens, java.time.Duration timeout) {
+        return open(credential, modelId, maxOutputTokens);
+    }
 }

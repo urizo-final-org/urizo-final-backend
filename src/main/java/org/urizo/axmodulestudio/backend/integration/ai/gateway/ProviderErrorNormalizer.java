@@ -1,6 +1,10 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway;
 
 import java.time.Duration;
+import java.net.SocketTimeoutException;
+import java.net.ConnectException;
+import java.net.UnknownHostException;
+import java.net.http.HttpTimeoutException;
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
 
@@ -11,11 +15,20 @@ public final class ProviderErrorNormalizer {
 
     public NormalizedProviderError normalize(Throwable failure) {
         Objects.requireNonNull(failure, "failure is required");
-        if (failure instanceof ProviderFailure providerFailure) {
-            return normalize(providerFailure.kind(), providerFailure.retryAfter());
-        }
-        if (failure instanceof TimeoutException) {
-            return normalize(ProviderFailureKind.TIMEOUT, null);
+        // SDKs and HTTP clients wrap transport errors. Bound traversal, never copy raw causes.
+        Throwable current = failure;
+        for (int depth = 0; current != null && depth < 16; depth++, current = current.getCause()) {
+            if (current instanceof ProviderFailure providerFailure) {
+                return normalize(providerFailure.kind(), providerFailure.retryAfter());
+            }
+            if (current instanceof TimeoutException || current instanceof SocketTimeoutException
+                    || current instanceof HttpTimeoutException) {
+                return normalize(ProviderFailureKind.TIMEOUT, null);
+            }
+            if (current instanceof ConnectException || current instanceof UnknownHostException
+                    || current instanceof java.net.SocketException) {
+                return normalize(ProviderFailureKind.UNAVAILABLE, null);
+            }
         }
         if (failure instanceof TransientAiException) {
             return normalize(ProviderFailureKind.TRANSIENT, null);
@@ -28,6 +41,12 @@ public final class ProviderErrorNormalizer {
 
     private NormalizedProviderError normalize(ProviderFailureKind kind, Duration requestedRetryAfter) {
         return switch (kind) {
+            // Keep the public error contract stable; these need a different configured
+            // candidate, not another attempt with the same credential/model.
+            case AUTHENTICATION -> configurationFailure("Model provider authentication failed.");
+            case BILLING -> configurationFailure("Model provider billing or credit is unavailable.");
+            case QUOTA -> configurationFailure("Model provider quota is exhausted.");
+            case MODEL_ACCESS -> configurationFailure("Configured model access is unavailable.");
             case RATE_LIMITED -> retryable(
                     ModelGatewayErrorCode.MODEL_RATE_LIMITED,
                     "Model provider rate limit reached.",
@@ -54,6 +73,11 @@ public final class ProviderErrorNormalizer {
                     false,
                     null);
         };
+    }
+
+    private static NormalizedProviderError configurationFailure(String message) {
+        return new NormalizedProviderError(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED,
+                message, false, null);
     }
 
     private static NormalizedProviderError retryable(

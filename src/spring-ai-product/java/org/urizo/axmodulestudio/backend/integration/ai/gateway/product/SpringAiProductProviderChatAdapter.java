@@ -66,6 +66,16 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     private final ProviderCredentialResolver credentialResolver;
     private final Map<ModelProvider, ProductChatModelFactory> factories;
     private final Clock clock;
+    // Provenance only for calls actually produced by another provider in this adapter.
+    // Gemini documents this marker for imported tool history; unknown/mutated Gemini
+    // history must never acquire it as a substitute for a missing native signature.
+    private final Map<String, StoredThoughtSignature> importedToolCalls =
+            new LinkedHashMap<>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, StoredThoughtSignature> eldest) {
+                    return size() > MAX_THOUGHT_SIGNATURES;
+                }
+            };
     private final Map<ThoughtSignatureKey, StoredThoughtSignature> thoughtSignatures =
             new LinkedHashMap<>(16, 0.75f, true) {
                 @Override
@@ -113,11 +123,20 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             byte[] credentialBytes = lease.copySecret();
             try {
                 String credential = new String(credentialBytes, StandardCharsets.US_ASCII);
+                Duration remaining = Duration.between(clock.instant(), request.deadline());
+                if (remaining.isNegative() || remaining.isZero()) {
+                    throw new ProviderFailure(ProviderFailureKind.TIMEOUT, null);
+                }
                 try (ProductChatModelSession session = factory.open(
                         credential,
                         registration.modelId(),
-                        registration.maxOutputTokens())) {
-                    ChatResponse response = session.chatModel().call(prompt(registration, request));
+                        registration.maxOutputTokens(), remaining)) {
+                    ChatResponse response;
+                    try {
+                        response = session.chatModel().call(prompt(registration, request));
+                    } catch (RuntimeException failure) {
+                        throw ProductProviderErrors.sanitizeGoogle(failure);
+                    }
                     return response(request, response, startedAt);
                 }
             }
@@ -312,6 +331,17 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         String content = mergedContent.toString();
         List<ProviderChatMessage.ToolCall> toolCalls = nativeToolCalls(
                 request, content, mergedNativeCalls);
+        if (request.provider() == ModelProvider.OPENAI || request.provider() == ModelProvider.ANTHROPIC) {
+            synchronized (importedToolCalls) {
+                for (int index = 0; index < toolCalls.size(); index++) {
+                    ProviderChatMessage.ToolCall call = toolCalls.get(index);
+                    importedToolCalls.put(call.id(), new StoredThoughtSignature(
+                            "skip_thought_signature_validator".getBytes(StandardCharsets.UTF_8),
+                            clock.instant().plus(THOUGHT_SIGNATURE_TTL), call.name(),
+                            argumentsDigest(call.arguments()), index));
+                }
+            }
+        }
         storeThoughtSignatures(request, output, toolCalls);
         String compatibleContent = request.legacyToolEnvelope()
                 ? legacyEnvelope(content, toolCalls) : content;
@@ -499,6 +529,11 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 ThoughtSignatureKey key = new ThoughtSignatureKey(
                         request.provider(), request.modelId(), call.id());
                 StoredThoughtSignature stored = thoughtSignatures.get(key);
+                if (stored == null) {
+                    synchronized (importedToolCalls) {
+                        stored = importedToolCalls.get(call.id());
+                    }
+                }
                 if (stored == null || !clock.instant().isBefore(stored.expiresAt())) {
                     thoughtSignatures.remove(key);
                     return List.of();

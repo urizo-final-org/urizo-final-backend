@@ -114,6 +114,10 @@ public class CodingModelTurnService {
                 request.jobId(), request.traceId(), profileVersionId, nodeId)) {
             ProviderGatewayException lastFailure = null;
             for (ProviderModelRegistration selected : candidates) {
+                if (Thread.currentThread().isInterrupted() || !clock.instant().isBefore(request.deadlineAt())) {
+                    throw new ProviderGatewayException(ModelGatewayErrorCode.MODEL_TIMEOUT,
+                            "Model turn deadline exceeded or execution interrupted.");
+                }
                 try {
                     return executeSelected(request, toolMode, selected);
                 }

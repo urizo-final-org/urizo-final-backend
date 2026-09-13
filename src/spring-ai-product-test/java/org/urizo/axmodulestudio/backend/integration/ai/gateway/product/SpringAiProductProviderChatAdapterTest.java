@@ -221,7 +221,7 @@ class SpringAiProductProviderChatAdapterTest {
     void restoresGeminiThoughtSignaturesOnlyInsideTheNativeFollowUpPrompt() throws Exception {
         byte[] signature = { 1, 2, 3, 4 };
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(ModelProvider.GOOGLE_GENAI)).thenAnswer(ignored ->
                 ProviderCredentialLease.fromBytes(
@@ -463,7 +463,7 @@ class SpringAiProductProviderChatAdapterTest {
     void normalizesSpringAiProviderFailuresWithoutLeakingRawMessages() {
         String rawValue = "raw-provider-or-secret-value-must-not-leak";
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(ModelProvider.OPENAI)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
                 ModelProvider.OPENAI,
@@ -512,7 +512,7 @@ class SpringAiProductProviderChatAdapterTest {
     void rejectsUnknownNativeCallsThroughTheSafeGatewayEnvelope() {
         String rawProviderId = "raw-provider-call-id-must-not-leak";
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(ModelProvider.OPENAI)).thenAnswer(ignored ->
                 ProviderCredentialLease.fromBytes(
@@ -556,7 +556,7 @@ class SpringAiProductProviderChatAdapterTest {
     @Test
     void bridgesTheExistingStrictEnvelopeWithoutSendingItsSchemaPrompt() throws Exception {
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(ModelProvider.OPENAI)).thenAnswer(ignored ->
                 ProviderCredentialLease.fromBytes(
@@ -603,7 +603,7 @@ class SpringAiProductProviderChatAdapterTest {
 
     private static void verifiesMockContract(ModelProvider provider, String modelId) {
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         ProviderCredentialLease lease = ProviderCredentialLease.fromBytes(
                 provider,
@@ -701,7 +701,7 @@ class SpringAiProductProviderChatAdapterTest {
     private static void verifiesNativeToolContract(ModelProvider provider, String modelId)
             throws Exception {
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(provider)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
                 provider, FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
@@ -759,7 +759,7 @@ class SpringAiProductProviderChatAdapterTest {
     private static void verifiesNativeStructuredOutputContract(
             ModelProvider provider, String modelId) throws Exception {
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         ChatModel chatModel = mock(ChatModel.class);
         when(resolver.resolve(provider)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
                 provider, FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
@@ -1006,9 +1006,77 @@ class SpringAiProductProviderChatAdapterTest {
         }
     }
 
+
+    @org.junit.jupiter.params.ParameterizedTest
+    @org.junit.jupiter.params.provider.CsvSource({
+            "OPENAI,ANTHROPIC", "OPENAI,GOOGLE_GENAI", "ANTHROPIC,OPENAI",
+            "ANTHROPIC,GOOGLE_GENAI", "GOOGLE_GENAI,OPENAI", "GOOGLE_GENAI,ANTHROPIC"})
+    void preservesNativeToolHistoryAcrossProviders(ModelProvider firstProvider, ModelProvider nextProvider)
+            throws Exception {
+        ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
+        when(resolver.resolve(org.mockito.ArgumentMatchers.any())).thenAnswer(invocation ->
+                ProviderCredentialLease.fromBytes(invocation.getArgument(0),
+                        FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
+        ChatModel firstModel = mock(ChatModel.class);
+        ChatModel nextModel = mock(ChatModel.class);
+        when(firstModel.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(
+                firstProvider == ModelProvider.GOOGLE_GENAI
+                        ? geminiReadFileCall("README.md", new byte[] {1, 2, 3})
+                        : nativeResponse("native-id", "read_file", "{\"path\":\"README.md\"}"));
+        when(nextModel.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(response());
+        ProductChatModelFactory firstFactory = new ProductChatModelFactory() {
+            public ModelProvider provider() { return firstProvider; }
+            public ProductChatModelSession open(String credential, String modelId, int tokens) {
+                return new ProductChatModelSession(firstModel, () -> { });
+            }
+        };
+        ProductChatModelFactory nextFactory = new ProductChatModelFactory() {
+            public ModelProvider provider() { return nextProvider; }
+            public ProductChatModelSession open(String credential, String modelId, int tokens) {
+                return new ProductChatModelSession(nextModel, () -> { });
+            }
+        };
+        SpringAiProductProviderChatAdapter adapter = new SpringAiProductProviderChatAdapter(
+                resolver, List.of(firstFactory, nextFactory), Clock.fixed(NOW, ZoneOffset.UTC));
+        ProviderChatRequest initial = nativeRequest(firstProvider, "fixture-first");
+        ProviderChatResponse issued = adapter.chat(toolRegistration(firstProvider, "fixture-first"), initial);
+        ProviderChatMessage.ToolCall call = issued.toolCalls().get(0);
+        ProviderChatRequest next = new ProviderChatRequest(nextProvider, "fixture-next", List.of(
+                initial.messages().get(0), ProviderChatMessage.assistant("", issued.toolCalls()),
+                ProviderChatMessage.tool(call.id(), call.name(), "{\"content\":\"fixture\"}")),
+                initial.tools(), NOW.plusSeconds(30));
+        assertThat(adapter.chat(toolRegistration(nextProvider, "fixture-next"), next).content()).isEqualTo("OK");
+        ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
+        verify(nextModel).call(prompt.capture());
+        AssistantMessage history = (AssistantMessage) prompt.getValue().getInstructions().get(1);
+        assertThat(history.getToolCalls().get(0).id()).isEqualTo(call.id());
+        assertThat(history.getToolCalls().get(0).arguments()).isEqualTo(call.arguments());
+        ToolResponseMessage result = (ToolResponseMessage) prompt.getValue().getInstructions().get(2);
+        assertThat(result.getResponses().get(0).id()).isEqualTo(call.id());
+        if (nextProvider == ModelProvider.GOOGLE_GENAI) {
+            GoogleGenAiChatModel.GeminiRequest nativeRequest = createGeminiProviderRequest(prompt.getValue());
+            assertThat(nativeRequest.contents().get(1).parts().orElseThrow().get(0)
+                    .thoughtSignature().orElseThrow()).isEqualTo(
+                            "skip_thought_signature_validator".getBytes(StandardCharsets.UTF_8));
+            org.mockito.Mockito.clearInvocations(nextModel);
+            ProviderChatMessage.ToolCall mutated = new ProviderChatMessage.ToolCall(
+                    call.id(), call.name(), "{\"path\":\"different.md\"}");
+            ProviderChatRequest altered = new ProviderChatRequest(nextProvider, "fixture-next", List.of(
+                    initial.messages().get(0), ProviderChatMessage.assistant("", List.of(mutated)),
+                    ProviderChatMessage.tool(call.id(), call.name(), "{\"content\":\"fixture\"}")),
+                    initial.tools(), NOW.plusSeconds(30));
+            adapter.chat(toolRegistration(nextProvider, "fixture-next"), altered);
+            verify(nextModel).call(prompt.capture());
+            assertThat(assistantMetadata(prompt.getValue())).doesNotContainKey("thoughtSignatures");
+        } else {
+            assertThat(history.getMetadata()).doesNotContainKey("thoughtSignatures");
+        }
+    }
+
+
     private static SpringAiProductProviderChatAdapter geminiAdapter(ChatModel chatModel) {
         ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
-        ProductChatModelFactory factory = mock(ProductChatModelFactory.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
         when(resolver.resolve(ModelProvider.GOOGLE_GENAI)).thenAnswer(ignored ->
                 ProviderCredentialLease.fromBytes(
                         ModelProvider.GOOGLE_GENAI,

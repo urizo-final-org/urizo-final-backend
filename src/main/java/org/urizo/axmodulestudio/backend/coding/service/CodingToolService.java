@@ -17,6 +17,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -1167,6 +1168,70 @@ public final class CodingToolService {
     static final int MAX_READ_FILE_CONTENT_CHARACTERS = 24_000;
 
     /**
+     * What a refused whole-file read hands back besides the numbers: the file's top-level
+     * declarations with their line numbers, so the next read can be the right range on the
+     * first try. Measured on Job 45593ba8: refused on a 558-line screen file, the model
+     * answered by reading lines 130-300 and then 1-130 - the whole first half - although the
+     * edit landed on lines 162 and 230; the 1-130 read alone was replayed on fifteen later
+     * answers for 46,620 tokens. The same file's outline is 24 lines.
+     *
+     * <p>The patterns are deliberately shallow - one line at column zero (plus Java's four-
+     * space members and Python's four-space methods), no parsing - and only for source
+     * files. A README or a JSON file gets the plain refusal.
+     */
+    static final int MAX_OUTLINE_ENTRIES = 60;
+    private static final int MAX_OUTLINE_LINE_CHARACTERS = 80;
+    private static final Pattern SCRIPT_DECLARATION = Pattern.compile(
+            "^(?:export\\s+)?(?:default\\s+)?(?:async\\s+)?"
+                    + "(?:function|class|interface|type|enum|const|let|var)\\b");
+    private static final Pattern JVM_DECLARATION = Pattern.compile(
+            "^(?: {4})?(?:public|private|protected|static|abstract|final|sealed|class|"
+                    + "interface|record|enum|@\\w+|fun|val|var)\\b");
+    private static final Pattern PYTHON_DECLARATION = Pattern.compile(
+            "^(?: {4})?(?:async\\s+)?(?:def|class)\\b");
+
+    static String fileOutline(String path, String[] lines) {
+        Pattern declaration = outlinePattern(path);
+        if (declaration == null) {
+            return "";
+        }
+        StringBuilder outline = new StringBuilder();
+        int listed = 0;
+        int matched = 0;
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index].endsWith("\r")
+                    ? lines[index].substring(0, lines[index].length() - 1) : lines[index];
+            if (!declaration.matcher(line).find()) {
+                continue;
+            }
+            matched++;
+            if (listed == MAX_OUTLINE_ENTRIES) {
+                continue;
+            }
+            listed++;
+            String shown = line.length() > MAX_OUTLINE_LINE_CHARACTERS
+                    ? line.substring(0, MAX_OUTLINE_LINE_CHARACTERS) : line;
+            outline.append('\n').append(index + 1).append(": ").append(shown);
+        }
+        if (listed == 0) {
+            return "";
+        }
+        String more = matched > listed ? "\n... and " + (matched - listed) + " more" : "";
+        return " Outline (line: declaration):" + outline + more;
+    }
+
+    private static Pattern outlinePattern(String path) {
+        int dot = path.lastIndexOf('.');
+        String extension = dot < 0 ? "" : path.substring(dot + 1).toLowerCase(Locale.ROOT);
+        return switch (extension) {
+            case "ts", "tsx", "js", "jsx", "mjs", "cjs" -> SCRIPT_DECLARATION;
+            case "java", "kt" -> JVM_DECLARATION;
+            case "py" -> PYTHON_DECLARATION;
+            default -> null;
+        };
+    }
+
+    /**
      * The model names the range it wants; slicing is arithmetic over the file, so the
      * server does it. Lines are split on bare newline so CRLF content round-trips byte
      * for byte - oldText copied out of a slice still matches the real file.
@@ -1181,7 +1246,8 @@ public final class CodingToolService {
             throw validation("The file is " + content.length() + " characters over "
                     + lines.length + " lines - too large to read whole. Call read_file "
                     + "again with startLine and endLine (1-based, inclusive) around the "
-                    + "region you need; search_code matches carry the line numbers.");
+                    + "region you need; search_code matches carry the line numbers."
+                    + fileOutline(arguments.path("path").asText(""), lines));
         }
         int start = arguments.has("startLine") ? arguments.path("startLine").asInt() : 1;
         int end = arguments.has("endLine")

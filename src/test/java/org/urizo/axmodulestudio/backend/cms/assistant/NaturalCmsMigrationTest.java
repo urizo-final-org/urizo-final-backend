@@ -168,7 +168,10 @@ class NaturalCmsMigrationTest {
                         "pipelineAttempt", "stateVersion", "status", "requestText",
                         "resource", "structuredCommand", "previewId", "previewHash",
                         "previewValid", "approvalDecision", "approvalFeedback",
-                        "createdAt", "updatedAt");
+                        "createdAt", "updatedAt",
+                        // AI05-020 이 더했다. Orchestrator 의 allowed 에도 같은 작업에서 함께
+                        // 넣었다 — 늘려야 할 때는 그렇게 두 저장소를 같이 고쳐야 한다.
+                        "preview");
     }
 
     /** 쓰이지 않게 된 필드 선택 표는 같은 리비전에서 지운다. 앞선 파일은 체크섬 때문에 못 고친다. */

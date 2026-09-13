@@ -1,6 +1,7 @@
 package org.urizo.axmodulestudio.backend.cms.dto;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 public final class CmsResponses {
@@ -48,7 +49,13 @@ public final class CmsResponses {
             String name,
             String description,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            String displayType,
+            String regionGroupKey,
+            String categoryGroupKey) {
+        public BoardView(long id, String name, String description, Instant createdAt, Instant updatedAt) {
+            this(id, name, description, createdAt, updatedAt, "LIST", null, null);
+        }
     }
 
     public record PostView(
@@ -59,7 +66,21 @@ public final class CmsResponses {
             String title,
             String body,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            Long thumbnailImageId,
+            String thumbnailAlt,
+            Long regionCodeId,
+            Long categoryCodeId) {
+        public PostView(long id, long boardId, UUID authorId, String authorName, String title,
+                        String body, Instant createdAt, Instant updatedAt) {
+            this(id, boardId, authorId, authorName, title, body, createdAt, updatedAt, null, "", null, null);
+        }
+    }
+
+    public record CodeGroupView(String key, String label, int displayOrder, boolean enabled) {
+    }
+
+    public record CodeView(long id, String groupKey, String value, String label, int displayOrder, boolean enabled) {
     }
 
     public record TemplateView(
@@ -75,7 +96,34 @@ public final class CmsResponses {
             String heroButtonLabel,
             String heroButtonUrl,
             boolean active,
-            Instant updatedAt) {
+            Instant updatedAt,
+            List<String> heroImageUrls, List<TemplateHeroImage> heroImages) {
+        public TemplateView {
+            heroImageUrls = heroImageUrls == null
+                    ? (heroImageUrl == null || heroImageUrl.isBlank() ? List.of() : List.of(heroImageUrl))
+                    : List.copyOf(heroImageUrls);
+            heroImages = heroImages == null
+                    ? heroImageUrls.stream().map(url -> new TemplateHeroImage(url, "", "")).toList()
+                    : List.copyOf(heroImages);
+            heroImageUrls = heroImages.stream().map(TemplateHeroImage::url).toList();
+            heroImageUrl = heroImageUrls.isEmpty() ? "" : heroImageUrls.get(0);
+        }
+
+        public TemplateView(String key, String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl,
+                boolean active, Instant updatedAt, List<String> heroImageUrls) {
+            this(key, layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, active, updatedAt, heroImageUrls, null);
+        }
+
+        public TemplateView(String key, String layout, String primaryColor, String siteName,
+                String headerText, String footerText, String heroImageUrl, String heroTitle,
+                String heroSubtitle, String heroButtonLabel, String heroButtonUrl,
+                boolean active, Instant updatedAt) {
+            this(key, layout, primaryColor, siteName, headerText, footerText, heroImageUrl,
+                    heroTitle, heroSubtitle, heroButtonLabel, heroButtonUrl, active, updatedAt, null);
+        }
     }
 
     public record SiteSettingsView(

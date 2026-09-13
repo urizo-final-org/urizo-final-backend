@@ -31,6 +31,7 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderToolDefinition;
 import org.urizo.axmodulestudio.backend.integration.ai.mcp.McpPlatformClient;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
@@ -105,8 +106,8 @@ class NaturalCmsStageServiceTest {
                                  "heroButtonUrl":null,"active":true,
                                  "updatedAt":"2026-08-30T08:00:00Z"}
                                 """),
-                        Set.of("layout", "primaryColor", "siteName", "headerText",
-                                "footerText", "heroImageUrl", "heroTitle", "heroSubtitle",
+                        Set.of("layout", "primaryColor", "headerText",
+                                "footerText", "heroImages", "heroTitle", "heroSubtitle",
                                 "heroButtonLabel", "heroButtonUrl")));
 
         for (PromptCase promptCase : cases) {
@@ -118,6 +119,8 @@ class NaturalCmsStageServiceTest {
             when(harness.models.executeNaturalCms(any(), any())).thenReturn(
                     toolResponse("validate_cms_command", command));
             when(harness.resources.validateCommand(eq(promptCase.resource()), any()))
+                    .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+            when(harness.resources.validateCommand(eq(promptCase.resource()), any(), any()))
                     .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
             stubPreviewTools(harness, promptCase.currentState());
 
@@ -148,6 +151,17 @@ class NaturalCmsStageServiceTest {
             assertThat(request.getValue().toolSchemas())
                     .singleElement()
                     .satisfies(schema -> {
+                        // Exercise the real gateway parser and digest check, not only the mocked model.
+                        var definition = ProviderToolDefinition.fromContract(schema);
+                        assertThat(definition.schemaDigest()).isEqualTo(
+                                NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS.get("validate_cms_command"));
+                        if ("TEMPLATE".equals(type)) {
+                            assertThat(definition.normalizeArguments("""
+                                    {"command":{"operation":"UPDATE","fields":{"heroImages":[
+                                      {"url":"/api/site/images/5","title":"Photo","description":"Caption"}
+                                    ]}}}
+                                    """)).contains("heroImages", "/api/site/images/5");
+                        }
                         assertThat(schema.path("name").asText())
                                 .isEqualTo("validate_cms_command");
                         JsonNode commandSchema = schema.path("inputSchema")
@@ -340,6 +354,32 @@ class NaturalCmsStageServiceTest {
     }
 
     @Test
+    void templateApplyUsesTheSavedPreviewInsideTheAtomicStoreBoundary() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        var resource = new NaturalCmsContract.ResourceRef("TEMPLATE", "CLASSIC");
+        var command = mapper.readTree("{\"operation\":\"UPDATE\",\"fields\":{\"heroImages\":[]}}");
+        ObjectNode before = mapper.createObjectNode().put("id", "CLASSIC");
+        ObjectNode preview = mapper.createObjectNode().put("previewId", PREVIEW.toString()).put("previewHash", PREVIEW_HASH);
+        preview.set("resource", mapper.valueToTree(resource)); preview.set("command", command); preview.set("before", before);
+        var job = new NaturalCmsContract.JobResponse("1.0", JOB, TRACE, PROFILE, 1, 1, "WAITING_APPROVAL",
+                "사진 연결 해제", resource, command, PREVIEW, PREVIEW_HASH, true, "APPROVED", null, NOW, NOW, preview);
+        Harness harness = new Harness(job);
+        when(harness.resources.validateCommand(resource, command, job.requestText())).thenReturn(command);
+        when(harness.resources.snapshot(resource)).thenReturn(before);
+        when(harness.mcp.callTool(eq("revalidate_cms_preview"), any())).thenReturn(structured(mapper.createObjectNode().put("valid", true)));
+        ObjectNode ready = mapper.createObjectNode().put("applyReady", true); ready.set("command", command);
+        when(harness.mcp.callTool(eq("apply_cms_preview"), any())).thenReturn(structured(ready));
+        when(harness.resources.applyApprovedTemplate(resource, command, ACTOR, job.requestText(), before)).thenReturn(before);
+        assertThat(harness.service.execute("Bearer worker", JOB, 1, RESULT, stageRequest("cms.apply", RESULT)).resultPort()).isEqualTo("applied");
+        verify(harness.resources).applyApprovedTemplate(resource, command, ACTOR, job.requestText(), before);
+        verify(harness.resources, never()).apply(any(), any(), any());
+        preview.put("previewHash", "tampered");
+        assertThat(job.preview().path("previewHash").asText()).isEqualTo(PREVIEW_HASH);
+        ((ObjectNode) job.preview()).put("previewHash", "tampered again");
+        assertThat(job.preview().path("previewHash").asText()).isEqualTo(PREVIEW_HASH);
+    }
+
+    @Test
     void handlerResultFailureDoesNotLeaveCmsMutationOutsideTheAtomicStoreBoundary()
             throws Exception {
         Harness harness = new Harness(approvedJob());
@@ -468,7 +508,9 @@ class NaturalCmsStageServiceTest {
                 .contains("Create one POST command with operation CREATE, UPDATE or DELETE")
                 .contains("CREATE sends title and body")
                 .contains("never send a board field")
-                .contains("headings (##)");
+                .contains("ProseMirror document")
+                .contains("thumbnailImageId")
+                .contains("reference.codes");
     }
 
     /**

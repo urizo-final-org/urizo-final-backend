@@ -267,7 +267,7 @@ public final class NaturalCmsStageService {
         Set<String> allowedTools = nodeTools(
                 toolPolicy, stage.nodeId(), Set.of(),
                 Set.of("revalidate_cms_preview", "apply_cms_preview"));
-        JsonNode command = resources.validateCommand(job.resource(), job.structuredCommand());
+        JsonNode command = validatedCommand(job, job.structuredCommand());
         ObjectNode currentState = resources.snapshot(job.resource());
         ObjectNode arguments = baseArguments(job.resource(), currentState);
         arguments.set("command", command.deepCopy());
@@ -295,7 +295,20 @@ public final class NaturalCmsStageService {
             UUID resultId,
             JsonNode command,
             UUID actorId) {
-        JsonNode applied = resources.apply(job.resource(), command, actorId);
+        JsonNode applied;
+        if ("TEMPLATE".equals(job.resource().type())) {
+            JsonNode preview = job.preview();
+            if (preview == null || !preview.path("previewId").asText().equals(job.previewId().toString())
+                    || !preview.path("previewHash").asText().equals(job.previewHash())
+                    || !preview.path("resource").equals(objectMapper.valueToTree(job.resource()))
+                    || !preview.path("command").equals(command)) {
+                throw contract("승인한 템플릿 미리보기와 명령이 일치하지 않습니다.");
+            }
+            applied = resources.applyApprovedTemplate(job.resource(), command, actorId,
+                    job.requestText(), preview.path("before"));
+        } else {
+            applied = resources.apply(job.resource(), command, actorId);
+        }
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("status", "APPLIED");
         payload.set("resource", applied);
@@ -362,16 +375,20 @@ public final class NaturalCmsStageService {
         context.set("currentState", currentState.deepCopy());
         if (commandStage) {
             ArrayNode editableFields = context.putArray("editableFields");
-            currentState.fieldNames().forEachRemaining(name -> {
-                if (!RESOURCE_METADATA_FIELDS.contains(name)) {
-                    editableFields.add(name);
-                }
-            });
+            if ("TEMPLATE".equals(job.resource().type())) {
+                TemplateCommandPolicy.FIELDS.stream().sorted().forEach(editableFields::add);
+            } else {
+                currentState.fieldNames().forEachRemaining(name -> {
+                    if (!RESOURCE_METADATA_FIELDS.contains(name)) editableFields.add(name);
+                });
+            }
         }
         if (job.approvalFeedback() != null) {
             context.put("approvalFeedback", job.approvalFeedback());
         }
-        ObjectNode reference = resources.promptContext(job.resource());
+        ObjectNode reference = "TEMPLATE".equals(job.resource().type())
+                ? resources.templateReference(job.resource(), job.requestText())
+                : resources.promptContext(job.resource());
         if (reference != null && !reference.isEmpty()) {
             context.set("reference", reference);
         }
@@ -404,15 +421,13 @@ public final class NaturalCmsStageService {
         String emptyDelete =
                 " DELETE carries no fields and its fields object stays empty.";
         if (NaturalCmsResourceService.isPost(resource)) {
-            return "Create one POST command with operation CREATE, UPDATE or DELETE. "
-                    + "Call validate_cms_command exactly once with that command. "
-                    + "fields may use only names from editableFields."
-                    + changedFieldsOnly
-                    + " CREATE sends title and body."
-                    + emptyDelete
-                    + " The post stays in the board it is already in, so never send a board"
-                    + " field. A body may use headings (##), emphasis (**text**) and list"
-                    + " items (-) only.";
+            return commandInstruction(new NaturalCmsContract.ResourceRef("CONTENT", "new"))
+                    .replace("Create one CONTENT command", "Create one POST command")
+                    + " The post stays in its board; never send a board field."
+                    + " thumbnailImageId is a separate CMS image id, not a body image."
+                    + " Take thumbnail ids only from the current thumbnail, body images or attached image URLs."
+                    + " regionCodeId and categoryCodeId come only from reference.codes in the board's matching group."
+                    + " Never invent ids or create codes. Null explicitly clears an optional image or classification.";
         }
         if ("BOARD".equals(resourceType)) {
             return "Create one BOARD command with operation CREATE, UPDATE or DELETE. "
@@ -422,7 +437,9 @@ public final class NaturalCmsStageService {
                     + " CREATE sends at least name and leaves description out when the request"
                     + " does not give one."
                     + emptyDelete
-                    + " A board that still has posts cannot be deleted.";
+                    + " A board that still has posts cannot be deleted."
+                    + " displayType is LIST or CARD. regionGroupKey and categoryGroupKey are optional"
+                    + " keys from reference.codeGroups only. Never create or invent groups.";
         }
         if ("CONTENT".equals(resourceType)) {
             // 본문이 Tiptap Document(JSON)다. 모델이 트리를 지어내지 않도록 현재 문서를 고쳐
@@ -458,6 +475,27 @@ public final class NaturalCmsStageService {
                     + " the key."
                     + " CREATE sends title and body, and its body is a new document."
                     + emptyDelete;
+        }
+        if ("TEMPLATE".equals(resourceType)) {
+            return "Create one TEMPLATE UPDATE command. "
+                    + "Call validate_cms_command exactly once with that command. "
+                    + "fields may use only names from editableFields."
+                    + changedFieldsOnly
+                    + " The selected resource.id is fixed. Never select another template or modify its key."
+                    + " layout is CLASSIC, MINIMAL or BOLD; primaryColor is #RRGGBB."
+                    + " heroButtonUrl is empty or one of reference.buttonPaths; no new menus or pages."
+                    + " heroImages is an ordered array of at most five objects, each with exactly"
+                    + " url, title and description as strings. Its first item is the representative image."
+                    + " Start from currentState.heroImages, preserve every unrequested photo and caption,"
+                    + " and send the complete resulting array only when images change."
+                    + " Keep title and description with their image when reordering. Empty strings clear captions;"
+                    + " an empty array unlinks all photos but never deletes uploaded files."
+                    + " Use only exact URLs from reference.availableImageUrls. Attached photos were already"
+                    + " uploaded by the user, so adding or replacing them is supported. Never invent image URLs."
+                    + " Image titles are at most 120 characters; descriptions at most 240."
+                    + " siteName, active, main-site template selection and public paths are read-only."
+                    + " Never change menus, codes, content, boards, roles, source code or guardrails."
+                    + " No raw HTML, CSS or JavaScript; wording is plain text.";
         }
         if (!"MENU".equals(resourceType)) {
             return "Create one " + resourceType + " UPDATE command. "
@@ -538,12 +576,16 @@ public final class NaturalCmsStageService {
         else if (NaturalCmsResourceService.isPost(resource)) {
             // 게시물 화면에서는 글쓰기가 범위 안이다. 공통 문구를 그대로 쓰면 전부 거부된다.
             scope = "the posts of the selected board: writing a new post and changing or "
-                    + "deleting a post's title and body";
+                    + "deleting a post's title and rich-text body, using supported headings, lists,"
+                    + " quotes, dividers, bold, italic, strike, underline, colours and links;"
+                    + " placing, moving or removing already uploaded body images and a separate thumbnail,"
+                    + " and choosing region/category codes from reference.codes."
+                    + " Attached images are already uploaded, so asking to upload or add them is included";
             excluded = "changing the board itself, menus, static content pages, templates "
-                    + "and members";
+                    + "and members, finding unattached images, inventing or creating codes";
         }
         else if ("BOARD".equals(resource.type())) {
-            scope = "boards only: creating a board, changing a board's name or description, "
+            scope = "boards only: creating a board, changing a board's name, description, LIST/CARD display type or existing code group bindings, "
                     + "and deleting a board";
             excluded = "writing or editing posts, menus, static content pages, templates "
                     + "and members";
@@ -580,8 +622,24 @@ public final class NaturalCmsStageService {
             excluded = "finding an image that was neither attached nor already in the body, "
                     + "writing posts, boards, menus, templates and members";
         }
-        // 네 화면이 각자 제외 목록을 갖게 됐으므로 남은 기본값은 템플릿 전용이다.
-        // 템플릿은 아직 자연어 어시스턴트가 열려 있지 않아 이 경로로 오지 않는다.
+        // 다섯 화면이 각자 범위와 제외 목록을 갖는다. 남은 기본값은 이제 아무도 쓰지 않지만,
+        // 새 대상이 분기 없이 들어왔을 때 전부 허용되는 것보다 좁게 두는 편이 안전하다.
+        else if ("TEMPLATE".equals(resource.type())) {
+            scope = "only the selected template identified by resource.id: layout (CLASSIC, MINIMAL, BOLD),"
+                    + " primary colour, Header and Footer text, main title and description, button text and"
+                    + " an existing path from reference.buttonPaths, and up to five images with each image's"
+                    + " title, short description, order, replacement or unlinking. Photos already in the"
+                    + " template or explicitly attached to this request are available; attached photos have"
+                    + " already been uploaded, so asking to add or upload them means placing them here";
+            excluded = "other templates, creating or deleting templates, menus, codes, content pages,"
+                    + " boards or posts, members or roles, siteName or public site paths, switching the"
+                    + " main site's template, source code, guardrails, arbitrary HTML/CSS/JavaScript,"
+                    + " image generation, web image search and unattached images";
+            note = " Reject the whole request when it also asks for an excluded change; never silently"
+                    + " perform only the allowed part. Distinguish a requested change from plain wording:"
+                    + " mentioning menus or codes inside a banner title does not change those resources."
+                    + " Requests to edit a different template are infeasible even if its fields would be valid.";
+        }
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
                 + "payload must be an object. This screen changes " + scope + ". "
@@ -603,7 +661,9 @@ public final class NaturalCmsStageService {
     private JsonNode validatedCommand(
             NaturalCmsContract.JobResponse job, JsonNode proposal) {
         try {
-            return resources.validateCommand(job.resource(), proposal);
+            return "TEMPLATE".equals(job.resource().type())
+                    ? resources.validateCommand(job.resource(), proposal, job.requestText())
+                    : resources.validateCommand(job.resource(), proposal);
         }
         catch (NaturalCmsException failure) {
             String command = encode(proposal);

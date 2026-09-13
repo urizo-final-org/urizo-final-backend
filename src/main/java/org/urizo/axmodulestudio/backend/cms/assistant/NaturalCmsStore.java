@@ -446,7 +446,7 @@ public final class NaturalCmsStore {
                 SELECT job_id, trace_id, profile_version_id, pipeline_attempt, state_version,
                        status, request_text, resource_type, resource_id, structured_command,
                        preview_id, preview_hash, preview_valid, approval_decision,
-                       approval_feedback, created_at, updated_at
+                       approval_feedback, created_at, updated_at, preview_payload
                 FROM app.natural_cms_job WHERE job_id = ?
                 """ + (lock ? " FOR UPDATE" : "");
         List<NaturalCmsContract.JobResponse> rows = database.query(sql,
@@ -458,9 +458,8 @@ public final class NaturalCmsStore {
                         new NaturalCmsContract.ResourceRef(rs.getString(8), rs.getString(9)),
                         parse(rs.getString(10)), rs.getObject(11, UUID.class),
                         rs.getString(12), rs.getBoolean(13), rs.getString(14),
-                        rs.getString(15),
-                        rs.getTimestamp(16).toInstant(),
-                        rs.getTimestamp(17).toInstant()),
+                        rs.getString(15), rs.getTimestamp(16).toInstant(),
+                        rs.getTimestamp(17).toInstant(), parse(rs.getString(18))),
                 jobId);
         if (rows.size() != 1) {
             throw new NaturalCmsException(

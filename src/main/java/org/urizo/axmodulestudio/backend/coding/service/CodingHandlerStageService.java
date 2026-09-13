@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -62,6 +63,14 @@ public final class CodingHandlerStageService {
      * and its re-verify; still a bound the recorded runs fit under, not a proven ceiling.
      */
     private static final int MAX_MODEL_TURNS = 24;
+    /**
+     * How many target files the code stage outlines before its first answer. Every outline
+     * rides along on every answer - up to 60 declaration lines, about 350 tokens each - so
+     * the analyst's "one file too many" is not outlined without end.
+     */
+    private static final int MAX_OUTLINED_TARGET_FILES = 3;
+    /** Tool sequence numbers of those reads, clear of the answers' own 1 to 24. */
+    private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
     /**
      * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
      * of it, so a request of ten thousand characters or a change touching a thousand files is
@@ -108,6 +117,31 @@ public final class CodingHandlerStageService {
     private static final Set<String> CODE_TOOLS = Set.of(
             "read_file", "search_code", "read_diff", "apply_patch");
     /**
+     * Every tool result is re-sent with every later answer, and that replay - not the
+     * turns themselves - is where the code stage spends its tokens. Measured on Job
+     * 45593ba8: 20 answers, 263,279 input tokens, of which 238,539 (91%) were earlier
+     * results replayed; the two largest reads alone, 3,806 and 3,108 tokens, were carried
+     * by 16 and 15 later answers for 107,516. The model did not use them for the edit
+     * either: before each apply_patch it re-read the exact 10-15 lines it was about to
+     * replace (turns 14-17), and oldText came from those small reads. So once a read or
+     * search is older than the last few, its body is folded down to this note and the
+     * model is told to read again if it needs the text. The same run replayed with three
+     * kept comes to 99,840 tokens; with every folded read re-read once, 169,782.
+     *
+     * <p>Only read_file and search_code fold. read_diff stays: it is the edit's reference
+     * point and small (3,950 bytes on the same Job). The review stage is left alone -
+     * it reads the diff on its first answer and judges on its last, and the fold would
+     * take the judgement's evidence away.
+     *
+     * <p>A JSON object, because the turn service forwards an object body untouched and
+     * wraps anything else.
+     */
+    static final String FOLDED_TOOL_CONTENT =
+            "{\"content\":\"[folded: this result was shown earlier and is no longer in "
+                    + "the conversation. Call the same tool again - read_file with "
+                    + "startLine and endLine - when you need its exact text.]\"}";
+    private static final Set<String> FOLDABLE_TOOLS = Set.of("read_file", "search_code");
+    /**
      * The files that declare a dependency. Lock files are included: a library arrives through
      * one just as surely as through the manifest that names it.
      */
@@ -144,13 +178,35 @@ public final class CodingHandlerStageService {
      */
     private final int maxRunnerPolls;
     private final Duration runnerPollInterval;
+    /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
+    private final int toolHistoryKeep;
 
     /**
-     * Two constructors mean Spring cannot guess, and without this it looks for a no-arg
-     * one and fails the whole context at startup. The second exists so a test can shorten
-     * the runner poll; production takes these defaults.
+     * Three constructors mean Spring cannot guess, and without the annotation it looks for
+     * a no-arg one and fails the whole context at startup. The annotated one takes the
+     * configured fold depth; the eleven-argument one keeps the tests' wiring unchanged
+     * with the production default; the full one exists so a test can shorten the runner
+     * poll or set the fold depth.
      */
     @Autowired
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, 120, Duration.ofMillis(500), toolHistoryKeep);
+    }
+
     CodingHandlerStageService(
             CodingHandlerResultService results,
             CodingToolService tools,
@@ -165,7 +221,27 @@ public final class CodingHandlerStageService {
             Clock clock) {
         this(results, tools, modelGuard, models, runner, deploymentAdapter,
                 profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
-                clock, 120, Duration.ofMillis(500));
+                clock, 120, Duration.ofMillis(500), 3);
+    }
+
+    /** Shortened runner poll with the production fold depth - the runner-stage tests use this. */
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, maxRunnerPolls, runnerPollInterval, 3);
     }
 
     CodingHandlerStageService(
@@ -181,7 +257,9 @@ public final class CodingHandlerStageService {
             ObjectMapper objectMapper,
             Clock clock,
             int maxRunnerPolls,
-            Duration runnerPollInterval) {
+            Duration runnerPollInterval,
+            int toolHistoryKeep) {
+        this.toolHistoryKeep = toolHistoryKeep;
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -265,7 +343,9 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate) {
         CodingModelTurnContract.Response response = modelTurn(
                 authorization, jobId, resultId, request, authority, aggregate,
-                1, List.of(), initialMessages(request.handlerKey(), aggregate),
+                1, List.of(),
+                initialMessages(request.handlerKey(), aggregate, false,
+                        objectMapper.createArrayNode()),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -351,8 +431,16 @@ public final class CodingHandlerStageService {
             throw forbidden("The Coding Job does not allow tool calling.");
         }
         List<JsonNode> schemas = toolSchemas(allowedTools);
-        List<JsonNode> messages = new ArrayList<>(
-                initialMessages(request.handlerKey(), aggregate));
+        List<ProviderModelRegistration> modelBindings =
+                modelBindings(authority, request, schemas.isEmpty()
+                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
+        boolean foldHistory = foldsToolHistory(modelBindings);
+        ArrayNode targetOutlines = "coding.code".equals(request.handlerKey())
+                && allowedTools.contains("read_file")
+                ? targetFileOutlines(authorization, jobId, request, authority, aggregate, resultId)
+                : objectMapper.createArrayNode();
+        List<JsonNode> messages = new ArrayList<>(initialMessages(
+                request.handlerKey(), aggregate, foldHistory, targetOutlines));
         JsonNode latestDiff = null;
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
@@ -360,10 +448,10 @@ public final class CodingHandlerStageService {
         // could not land one - and only this tells them apart.
         boolean patchAttempted = false;
         CodingModelTurnContract.Response modelResponse = null;
-        List<ProviderModelRegistration> modelBindings =
-                modelBindings(authority, request, schemas.isEmpty()
-                        ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
+            if (foldHistory) {
+                foldOldToolResults(messages, request.handlerKey());
+            }
             CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, messages,
@@ -1390,7 +1478,9 @@ public final class CodingHandlerStageService {
 
     private List<JsonNode> initialMessages(
             String handlerKey,
-            CodingHandlerContract.AttemptAggregateResponse aggregate) {
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            boolean foldHistory,
+            ArrayNode targetFileOutlines) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1465,6 +1555,11 @@ public final class CodingHandlerStageService {
                         item.set("payload", result.payload().deepCopy());
                     }
                 });
+        // The code stage's map of its target files: line counts and declaration lines only.
+        // Left out when there is nothing to show, so every other stage's context is unchanged.
+        if (!targetFileOutlines.isEmpty()) {
+            context.set("targetFileOutlines", targetFileOutlines);
+        }
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
                 .filter(decision -> decision.feedback() != null)
@@ -1594,8 +1689,15 @@ public final class CodingHandlerStageService {
                         // tokens were re-sent on each of the eight answers that followed,
                         // 46k tokens for a file no edit touched. Every read is permanent
                         // conversation weight, so files are opened one at a time.
-                        + "this change from the guardrail's own list: open the first "
-                        + "targetFile with read_file and start editing. Open a later "
+                        + "this change from the guardrail's own list: start with the first "
+                        + "targetFile. "
+                        // Measured on Job 45593ba8: refused a whole 558-line screen file, the
+                        // model read lines 1-130 and 130-300 to land two edits at 162 and 230,
+                        // and both reads rode along on fifteen later answers.
+                        + "targetFileOutlines, when present, gives each target file's line "
+                        + "count and the line numbers of its declarations: pick the declaration "
+                        + "the change belongs to and read_file only that range with startLine "
+                        + "and endLine, not the whole file. Open a later "
                         + "targetFile only when the requested change does not belong in the "
                         + "files already read - every file you read is re-sent with every "
                         + "later answer, so an unneeded read keeps costing until the stage "
@@ -1620,6 +1722,7 @@ public final class CodingHandlerStageService {
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
                         + "recovered. "
+                        + foldingHint(foldHistory)
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -1781,6 +1884,136 @@ public final class CodingHandlerStageService {
         return objectMapper.createObjectNode()
                 .put("role", "assistant")
                 .put("content", content.isBlank() ? "(a tool call that was refused)" : content);
+    }
+
+    /**
+     * An outline of each target file the analyst named, read by the server before the code
+     * stage's first answer: the line count and the declaration lines, never the text.
+     *
+     * <p>The analyst has no tools, so it names files but not lines, and the model used to open
+     * the first file whole to find its place - a read that then rides along on every later
+     * answer. This read goes through the same tool gateway as the model's own, so the fence
+     * and the execution record apply unchanged, and it sits in the first user message, which
+     * is never rewritten.
+     *
+     * <p>A file within the whole-read limit comes back as text and is outlined here; a larger
+     * one is refused, and that refusal already carries the line count and the outline. Any
+     * other refusal - a file the change will create, or one past the workspace's 48 KiB read
+     * limit - leaves that file out rather than failing the stage: the outline is a head start,
+     * not a precondition.
+     */
+    private ArrayNode targetFileOutlines(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId) {
+        ArrayNode outlines = objectMapper.createArrayNode();
+        CodingHandlerContract.HandlerResultResponse analysis =
+                latestResultOrNull(aggregate, "coding.analyze", "feasible");
+        if (analysis == null || analysis.payload() == null) {
+            return outlines;
+        }
+        List<String> targets = new ArrayList<>();
+        for (JsonNode target : analysis.payload().path("targetFiles")) {
+            if (target.isTextual() && !target.asText().isBlank()
+                    && targets.size() < MAX_OUTLINED_TARGET_FILES) {
+                targets.add(target.asText());
+            }
+        }
+        for (int index = 0; index < targets.size(); index++) {
+            String path = targets.get(index);
+            String outline;
+            try {
+                JsonNode read = executeDeterministicTool(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        TARGET_OUTLINE_SEQUENCE_BASE + index, "read_file",
+                        objectMapper.createObjectNode().put("path", path));
+                // Counted the way read_file counts, so a later ranged read lands on these lines.
+                String[] lines = read.path("content").asText("").split("\n", -1);
+                outline = lines.length + " lines." + CodingToolService.fileOutline(path, lines);
+            }
+            catch (CodingToolException refused) {
+                if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
+                        || !String.valueOf(refused.getMessage())
+                                .contains("too large to read whole")) {
+                    continue;
+                }
+                outline = refused.getMessage();
+            }
+            outlines.addObject().put("path", path).put("outline", outline);
+        }
+        return outlines;
+    }
+
+    /**
+     * Whether the code stage may fold its tool history under these bindings: a fold depth
+     * above zero and a binding to decide it from. Every provider tolerates a rewritten
+     * history now, so the decision is the depth alone.
+     *
+     * <p>Gemini did not until AI04-027. The shared adapter stored each turn's thought
+     * signatures under a key hashed from the whole earlier conversation (its correlationId),
+     * so changing an old tool body changed the key of every call after it, the signatures
+     * came back empty, and Gemini refused the unsigned function calls - MODEL_RESPONSE_INVALID
+     * on the first turn that folded (measured 2026-09-11). The adapter now keys each signature
+     * by the tool call id it was issued with, which a fold does not touch; Job 99748158 then
+     * ran nineteen Gemini turns with no refusal. Claude and OpenAI store no such signature and
+     * always folded safely. Setting the fold depth to zero still disables folding everywhere.
+     */
+    private boolean foldsToolHistory(List<ProviderModelRegistration> modelBindings) {
+        return toolHistoryKeep > 0
+                && !modelBindings.isEmpty();
+    }
+
+    /**
+     * Folds every read_file/search_code result older than the last {@code toolHistoryKeep}
+     * of them, in the code stage only. The tool message keeps its ids and result metadata,
+     * and the assistant message that asked for it keeps the call's arguments, so the model
+     * still sees what it read and where - only the body is gone. Already-folded messages
+     * are left as they are, so the same message is never rewritten twice and the request
+     * digest of a retried turn stays what it was.
+     */
+    private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
+        if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
+            return;
+        }
+        int kept = 0;
+        for (int index = messages.size() - 1; index >= 0; index--) {
+            JsonNode message = messages.get(index);
+            if (!"tool".equals(message.path("role").textValue())
+                    || !FOLDABLE_TOOLS.contains(toolNameBefore(messages, index))) {
+                continue;
+            }
+            if (++kept <= toolHistoryKeep
+                    || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
+                continue;
+            }
+            ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
+        }
+    }
+
+    /**
+     * Said out loud in the code stage prompt, because a model that finds a folded body
+     * where it expects a file would otherwise copy oldText from memory - and apply_patch
+     * refuses text that does not match the file exactly.
+     */
+    private String foldingHint(boolean foldHistory) {
+        if (!foldHistory) {
+            return "";
+        }
+        return "Only your last " + toolHistoryKeep + " read_file and search_code results "
+                + "stay in the conversation; older ones are folded to a short note. Before "
+                + "apply_patch, read_file the exact lines you will replace so oldText is "
+                + "copied from a fresh read, never from memory. ";
+    }
+
+    /** The tool message carries no name; the assistant message right before it does. */
+    private static String toolNameBefore(List<JsonNode> messages, int toolIndex) {
+        if (toolIndex == 0) {
+            return "";
+        }
+        return messages.get(toolIndex - 1).path("toolCalls").path(0).path("name").asText("");
     }
 
     /**

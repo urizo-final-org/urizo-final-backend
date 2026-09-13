@@ -20,7 +20,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * <p>저장 입구는 {@link #problem}으로 막는다. 허용한 부품만 통과하며, 이것이 마크다운 3문법
  * 제한을 대신하는 가드레일이다. 사람이 쓰든 모델이 쓰든 같은 검사를 탄다.
  *
- * <p>게시물은 이 클래스를 쓰지 않는다. 마크다운과 {@code RichText}를 그대로 유지한다.
+ * <p>게시물도 같은 문서를 사용하며 옛 마크다운은 조회 시 호환 변환한다.
  */
 public final class ContentBody {
 
@@ -69,6 +69,26 @@ public final class ContentBody {
     private static final Pattern BOLD = Pattern.compile("\\*\\*([^*]+)\\*\\*");
 
     private ContentBody() {
+    }
+
+    /** Call only after problem() has accepted the document. */
+    public static Set<Long> imageIds(String body) {
+        Set<Long> ids = new java.util.HashSet<>();
+        collectImages(parse(body), ids);
+        return ids;
+    }
+
+    private static void collectImages(JsonNode node, Set<Long> ids) {
+        if (node == null) return;
+        if ("image".equals(node.path("type").asText())) {
+            String src = node.path("attrs").path("src").asText();
+            try {
+                ids.add(Long.parseLong(src.substring(src.lastIndexOf('/') + 1)));
+            } catch (NumberFormatException failure) {
+                throw CmsServiceException.invalidRequest("이미지 ID가 올바르지 않습니다.");
+            }
+        }
+        for (JsonNode child : node.path("content")) collectImages(child, ids);
     }
 
     /**

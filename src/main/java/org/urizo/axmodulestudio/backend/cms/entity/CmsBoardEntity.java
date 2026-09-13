@@ -26,6 +26,22 @@ public class CmsBoardEntity {
     @Column(name = "description", nullable = false, length = 300)
     private String description;
 
+    @Column(name = "display_type", nullable = false, length = 8)
+    private String displayType = "LIST";
+    @Column(name = "region_group_key", length = 40)
+    private String regionGroupKey;
+    @Column(name = "category_group_key", length = 40)
+    private String categoryGroupKey;
+
+    public String getDisplayType() { return displayType; }
+    public String getRegionGroupKey() { return regionGroupKey; }
+    public String getCategoryGroupKey() { return categoryGroupKey; }
+    public void changeOptions(String displayType, String regionGroupKey, String categoryGroupKey) {
+        this.displayType = displayType;
+        this.regionGroupKey = regionGroupKey;
+        this.categoryGroupKey = categoryGroupKey;
+    }
+
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
 

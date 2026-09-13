@@ -25,6 +25,7 @@ import org.springframework.web.multipart.MultipartFile;
 import org.urizo.axmodulestudio.backend.auth.service.AuthService;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.ArticleRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.BoardRequest;
+import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.PostRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.MenuRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests.TemplateRequest;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
@@ -163,7 +164,7 @@ public class CmsAdminController {
     @Transactional(transactionManager = "authJpaTransactionManager")
     public BoardView createBoard(Authentication authentication, @Valid @RequestBody BoardRequest request) {
         var actor = actor(authentication);
-        var result = cms.createBoard(request.name(), request.description());
+        var result = cms.createBoard(request);
         history.record(actor, "BOARD", String.valueOf(result.id()), "CREATE", result.name());
         return result;
     }
@@ -172,7 +173,7 @@ public class CmsAdminController {
     @Transactional(transactionManager = "authJpaTransactionManager")
     public BoardView updateBoard(Authentication authentication, @PathVariable long id, @Valid @RequestBody BoardRequest request) {
         var actor = actor(authentication);
-        var result = cms.updateBoard(id, request.name(), request.description());
+        var result = cms.updateBoard(id, request);
         history.record(actor, "BOARD", String.valueOf(id), "UPDATE", result.name());
         return result;
     }
@@ -196,9 +197,9 @@ public class CmsAdminController {
     public PostView createPost(
             Authentication authentication,
             @PathVariable long boardId,
-            @Valid @RequestBody ArticleRequest request) {
+            @Valid @RequestBody PostRequest request) {
         var actor = actor(authentication);
-        var result = cms.createPost(actor.actorId(), boardId, request.title(), request.body());
+        var result = cms.createPost(actor.actorId(), boardId, request);
         history.record(actor, "POST", String.valueOf(result.id()), "CREATE", result.title());
         return result;
     }
@@ -210,9 +211,9 @@ public class CmsAdminController {
 
     @PutMapping("/posts/{id}")
     @Transactional(transactionManager = "authJpaTransactionManager")
-    public PostView updatePost(Authentication authentication, @PathVariable long id, @Valid @RequestBody ArticleRequest request) {
+    public PostView updatePost(Authentication authentication, @PathVariable long id, @Valid @RequestBody PostRequest request) {
         var actor = actor(authentication);
-        var result = cms.updatePost(id, request.title(), request.body());
+        var result = cms.updatePost(id, request);
         history.record(actor, "POST", String.valueOf(id), "UPDATE", result.title());
         return result;
     }
@@ -239,7 +240,7 @@ public class CmsAdminController {
         var result = cms.saveTemplate(key, request.layout(), request.primaryColor(), request.siteName(),
                 request.headerText(), request.footerText(), request.heroImageUrl(),
                 request.heroTitle(), request.heroSubtitle(), request.heroButtonLabel(),
-                request.heroButtonUrl());
+                request.heroButtonUrl(), request.heroImageUrls(), request.heroImages());
         history.record(actor, "TEMPLATE", key, "SAVE", request.siteName());
         return result;
     }

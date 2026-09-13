@@ -57,7 +57,7 @@ class NaturalCmsResourceServiceTest {
 
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
-    /** 마크다운 3문법은 이제 게시물에만 남았다. 그 규칙을 확인하는 대상이다. */
+    /** 게시판 하위 게시물도 콘텐츠와 같은 편집기 문서를 사용한다. */
     private static final NaturalCmsContract.ResourceRef POST_RESOURCE =
             new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12");
 
@@ -166,15 +166,16 @@ class NaturalCmsResourceServiceTest {
      * <p>컨텐츠는 `AI05-016`으로 편집기 문서를 쓰게 되어 이 규칙을 타지 않는다.
      */
     @Test
-    void acceptsTheThreeSupportedMarkdownFormsInAPostBody() throws Exception {
+    void acceptsAnEditorDocumentConvertedFromLegacyMarkdown() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         NaturalCmsResourceService resources =
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.post(12)).thenReturn(post(12, 4, "공지", "본문"));
-        JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"body":"## 제목\\n\\n**강조** 문구입니다.\\n\\n- 항목 하나\\n- 항목 둘"}}
-                """);
+        ObjectNode command = mapper.createObjectNode().put("operation", "UPDATE");
+        command.putObject("fields").put("body",
+                org.urizo.axmodulestudio.backend.cms.service.ContentBody.toDocument("## 제목\n\n**강조** 문구\n\n- 항목"));
+
 
         assertThatCode(() -> resources.validateCommand(POST_RESOURCE, command))
                 .doesNotThrowAnyException();
@@ -196,7 +197,7 @@ class NaturalCmsResourceServiceTest {
 
         assertThatThrownBy(() -> resources.validateCommand(POST_RESOURCE, command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("headings (##)");
+                .hasMessageContaining("문서 형식");
     }
 
     @Test
@@ -230,7 +231,7 @@ class NaturalCmsResourceServiceTest {
 
         resources.apply(new NaturalCmsContract.ResourceRef("BOARD", "4"), command, AUTHOR);
 
-        verify(cms).updateBoard(4, "공지사항", null);
+        verify(cms).updateBoard(4, new CmsRequests.BoardRequest("공지사항", null));
     }
 
     @Test
@@ -241,7 +242,7 @@ class NaturalCmsResourceServiceTest {
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
         when(cms.templates()).thenReturn(java.util.List.of(template()));
         JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"siteName":"새 사이트"}}
+                {"operation":"UPDATE","fields":{"heroTitle":"새 대표 문구"}}
                 """);
 
         NaturalCmsContract.ResourceRef resource =
@@ -250,8 +251,8 @@ class NaturalCmsResourceServiceTest {
         resources.apply(resource, command, AUTHOR);
 
         verify(cms).saveTemplate(
-                "classic", "wide", "#112233", "새 사이트", "머리말", "꼬리말",
-                "/hero.png", "환영합니다", "부제", "자세히", "/about");
+                "classic", "wide", "#112233", template().siteName(), "머리말", "꼬리말",
+                "/hero.png", "새 대표 문구", "부제", "자세히", "/about", java.util.List.of("/hero.png"), template().heroImages());
     }
 
     @Test
@@ -620,7 +621,7 @@ class NaturalCmsResourceServiceTest {
 
         // 명령 단계가 이 필드 이름으로 쓸 수 있는 필드를 정하므로 빈 자리를 갖춘 틀을 준다.
         assertThat(state.fieldNames()).toIterable()
-                .containsExactlyInAnyOrder("id", "name", "description");
+                .containsExactlyInAnyOrder("id", "name", "description", "displayType", "regionGroupKey", "categoryGroupKey");
         assertThat(state.path("id").asText()).isEqualTo("new");
         assertThat(state.path("name").isNull()).isTrue();
         verify(cms, never()).board(anyLong());
@@ -630,7 +631,7 @@ class NaturalCmsResourceServiceTest {
     void createsABoardAndLeavesTheDescriptionOutWhenTheRequestGivesNone() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
-        when(cms.createBoard("자료실", null)).thenReturn(board(9, "자료실", null));
+        when(cms.createBoard(new CmsRequests.BoardRequest("자료실", null))).thenReturn(board(9, "자료실", null));
         NaturalCmsResourceService resources =
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
         JsonNode command = mapper.readTree("""
@@ -641,7 +642,7 @@ class NaturalCmsResourceServiceTest {
                 new NaturalCmsContract.ResourceRef("BOARD", "new"), command, AUTHOR);
 
         assertThat(created.path("id").asLong()).isEqualTo(9);
-        verify(cms).createBoard("자료실", null);
+        verify(cms).createBoard(new CmsRequests.BoardRequest("자료실", null));
     }
 
     @Test
@@ -706,7 +707,7 @@ class NaturalCmsResourceServiceTest {
                 new NaturalCmsContract.ResourceRef("BOARD", "4"));
 
         assertThat(context.path("posts").asInt()).isEqualTo(2);
-        assertThat(context.fieldNames()).toIterable().containsExactly("posts");
+        assertThat(context.fieldNames()).toIterable().containsExactly("posts", "codeGroups");
     }
 
     @Test
@@ -717,7 +718,7 @@ class NaturalCmsResourceServiceTest {
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
 
         assertThat(resources.promptContext(
-                new NaturalCmsContract.ResourceRef("BOARD", "new"))).isNull();
+                new NaturalCmsContract.ResourceRef("BOARD", "new")).path("posts").asInt()).isZero();
         verify(cms, never()).posts(anyLong());
     }
 
@@ -733,7 +734,7 @@ class NaturalCmsResourceServiceTest {
 
         assertThat(state.path("id").asText()).isEqualTo("board:4:post:new");
         assertThat(state.fieldNames()).toIterable()
-                .containsExactlyInAnyOrder("id", "title", "body");
+                .containsExactlyInAnyOrder("id", "title", "body", "thumbnailImageId", "thumbnailAlt", "regionCodeId", "categoryCodeId");
         verify(cms, never()).post(anyLong());
     }
 
@@ -743,13 +744,12 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         when(cms.board(4)).thenReturn(board(4, "공지사항", "안내"));
-        when(cms.createPost(AUTHOR, 4, "점검 안내", "## 안내\n\n- 항목"))
-                .thenReturn(post(21, 4, "점검 안내", "## 안내\n\n- 항목"));
+        var request = new CmsRequests.PostRequest("점검 안내", document("안내"), null, "", null, null);
+        when(cms.createPost(AUTHOR, 4, request)).thenReturn(post(21, 4, "점검 안내", "안내"));
         NaturalCmsResourceService resources =
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
-        JsonNode command = mapper.readTree("""
-                {"operation":"CREATE","fields":{"title":"점검 안내","body":"## 안내\\n\\n- 항목"}}
-                """);
+        ObjectNode command = mapper.createObjectNode().put("operation", "CREATE");
+        command.putObject("fields").put("title", "점검 안내").put("body", document("안내"));
 
         JsonNode created = resources.apply(
                 new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:new"),
@@ -757,7 +757,7 @@ class NaturalCmsResourceServiceTest {
 
         assertThat(created.path("id").asLong()).isEqualTo(21);
         verify(cms).board(4);
-        verify(cms).createPost(AUTHOR, 4, "점검 안내", "## 안내\n\n- 항목");
+        verify(cms).createPost(AUTHOR, 4, request);
     }
 
     @Test
@@ -765,7 +765,7 @@ class NaturalCmsResourceServiceTest {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         when(cms.post(12)).thenReturn(post(12, 4, "옛 제목", "옛 본문"));
-        when(cms.updatePost(12, "새 제목", "옛 본문"))
+        when(cms.updatePost(12, new CmsRequests.PostRequest("새 제목", document("옛 본문"), null, "", null, null)))
                 .thenReturn(post(12, 4, "새 제목", "옛 본문"));
         NaturalCmsResourceService resources =
                 newResources(cms, mock(CmsRequestValidator.class), mapper);
@@ -777,7 +777,7 @@ class NaturalCmsResourceServiceTest {
                 new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"),
                 command, AUTHOR);
 
-        verify(cms).updatePost(12, "새 제목", "옛 본문");
+        verify(cms).updatePost(12, new CmsRequests.PostRequest("새 제목", document("옛 본문"), null, "", null, null));
     }
 
     /** 4-4. 대상 게시물이 화면에서 연 게시판의 것이 아니면 건드리지 않는다. */
@@ -831,7 +831,7 @@ class NaturalCmsResourceServiceTest {
         assertThatThrownBy(() -> resources.validateCommand(
                 new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"), command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("fields only: body, title");
+                .hasMessageContaining("fields only: body, categoryCodeId, regionCodeId, thumbnailAlt, thumbnailImageId, title");
     }
 
     /** 게시물도 컨텐츠와 같은 렌더러를 타므로 같은 문법 제한을 받는다. */
@@ -849,7 +849,7 @@ class NaturalCmsResourceServiceTest {
         assertThatThrownBy(() -> resources.validateCommand(
                 new NaturalCmsContract.ResourceRef("BOARD", "board:4:post:12"), command))
                 .isInstanceOf(NaturalCmsException.class)
-                .hasMessageContaining("headings (##)");
+                .hasMessageContaining("문서 형식");
     }
 
     @Test
@@ -873,7 +873,7 @@ class NaturalCmsResourceServiceTest {
 
     private static PostView post(long id, long boardId, String title, String body) {
         return new PostView(
-                id, boardId, AUTHOR, "Admin", title, body,
+                id, boardId, AUTHOR, "Admin", title, org.urizo.axmodulestudio.backend.cms.service.ContentBody.toDocument(body),
                 Instant.parse("2026-08-30T00:00:00Z"), Instant.parse("2026-08-30T00:01:00Z"));
     }
 
@@ -1041,8 +1041,10 @@ class NaturalCmsResourceServiceTest {
         when(cms.templates()).thenReturn(List.of(template()));
         NaturalCmsResourceService resources = fenced(cms, mapper,
                 saved(NaturalCmsGuardrail.MENU, "CREATE"));
+        // siteName 은 템플릿 Handler 가 읽기 전용으로 막는다(AI05-020). 가드레일이 아니라
+        // Handler 가 막는 것이므로, 여기서는 Handler 가 여는 필드를 써야 가드레일만 본다.
         JsonNode command = mapper.readTree("""
-                {"operation":"UPDATE","fields":{"siteName":"새 이름"}}
+                {"operation":"UPDATE","fields":{"heroTitle":"새 인사말"}}
                 """);
 
         assertThatCode(() -> resources.validateCommand(

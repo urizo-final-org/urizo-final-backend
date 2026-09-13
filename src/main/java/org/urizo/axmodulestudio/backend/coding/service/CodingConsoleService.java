@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
@@ -67,6 +68,7 @@ public class CodingConsoleService {
     private final JdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
     private final CodingJobLifecycleService lifecycle;
+    private final CodingRunnerService runner;
 
     // app.coding_* is granted to ai_workspace only; the primary cms_app datasource cannot
     // read a single one of these tables. Unit tests mock the template and never notice, so the
@@ -74,10 +76,12 @@ public class CodingConsoleService {
     CodingConsoleService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
             ObjectMapper objectMapper,
-            CodingJobLifecycleService lifecycle) {
+            CodingJobLifecycleService lifecycle,
+            CodingRunnerService runner) {
         this.jdbc = jdbc;
         this.objectMapper = objectMapper;
         this.lifecycle = lifecycle;
+        this.runner = runner;
     }
 
     /**
@@ -142,6 +146,21 @@ public class CodingConsoleService {
                         job.stateVersion(),
                         CodingJobLifecycleContract.Status.CANCELLED,
                         null));
+        // The claim query now keeps this Job's BUILD, TEST and PREVIEW_UP out of the runner's
+        // hands, so nothing new comes up. A preview raised before the cancel is already
+        // running, though, and until now the only thing that ever took one down was the next
+        // Job's check - so an abandoned request left six containers competing for the CPU
+        // until someone else needed it. Queued after the transition, because a refused
+        // transition must not take a preview down.
+        //
+        // The task id is derived from the Job so pressing cancel twice adds one row, not two.
+        // The payload is empty on purpose: PREVIEW_DOWN carries no workspaceId anywhere, which
+        // is what keeps it out of the skip above - the one command an abandoned Job still needs.
+        runner.enqueue(
+                UUID.nameUUIDFromBytes(
+                        ("axms:coding-preview-down-on-cancel:" + jobId)
+                                .getBytes(StandardCharsets.UTF_8)),
+                "PREVIEW_DOWN", objectMapper.createObjectNode());
         return detail(jobId, role);
     }
 

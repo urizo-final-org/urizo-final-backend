@@ -189,15 +189,32 @@ public final class NaturalCmsContract {
             String approvalDecision,
             String approvalFeedback,
             Instant createdAt,
-            Instant updatedAt) {
+            Instant updatedAt,
+            JsonNode preview) {
         public JobResponse {
             requireVersion(schemaVersion);
             structuredCommand = copy(structuredCommand);
+            preview = copy(preview);
+        }
+
+        public JobResponse(String schemaVersion, UUID jobId, UUID traceId, UUID profileVersionId,
+                int pipelineAttempt, int stateVersion, String status, String requestText,
+                ResourceRef resource, JsonNode structuredCommand, UUID previewId, String previewHash,
+                boolean previewValid, String approvalDecision, String approvalFeedback,
+                Instant createdAt, Instant updatedAt) {
+            this(schemaVersion, jobId, traceId, profileVersionId, pipelineAttempt, stateVersion,
+                    status, requestText, resource, structuredCommand, previewId, previewHash,
+                    previewValid, approvalDecision, approvalFeedback, createdAt, updatedAt, null);
         }
 
         @Override
         public JsonNode structuredCommand() {
             return copy(structuredCommand);
+        }
+
+        @Override
+        public JsonNode preview() {
+            return copy(preview);
         }
     }
 

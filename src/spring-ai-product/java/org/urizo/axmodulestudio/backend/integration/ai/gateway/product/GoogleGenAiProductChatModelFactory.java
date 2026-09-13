@@ -25,8 +25,18 @@ final class GoogleGenAiProductChatModelFactory implements ProductChatModelFactor
     @Override
     public ProductChatModelSession open(
             String credential, String modelId, int maxOutputTokens) {
+        return open(credential, modelId, maxOutputTokens, java.time.Duration.ofSeconds(60));
+    }
+
+    @Override
+    public ProductChatModelSession open(String credential, String modelId, int maxOutputTokens,
+            java.time.Duration timeout) {
         Client client = Client.builder()
                 .apiKey(credential)
+                .httpOptions(com.google.genai.types.HttpOptions.builder()
+                        .timeout((int) Math.max(1, Math.min(Integer.MAX_VALUE, timeout.toMillis())))
+                        .retryOptions(com.google.genai.types.HttpRetryOptions.builder().attempts(1).build())
+                        .build())
                 .vertexAI(false)
                 .build();
         try {

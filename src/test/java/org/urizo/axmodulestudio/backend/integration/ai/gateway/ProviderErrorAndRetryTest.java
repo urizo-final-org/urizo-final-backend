@@ -15,6 +15,23 @@ class ProviderErrorAndRetryTest {
     private final ProviderRetryPolicy retryPolicy = new ProviderRetryPolicy();
 
     @Test
+    void unwrapsTransportFailuresAndDoesNotRetryBrokenCredentialsOrBilling() {
+        assertThat(normalizer.normalize(new RuntimeException(new java.net.SocketTimeoutException("secret"))).code())
+                .isEqualTo(ModelGatewayErrorCode.MODEL_TIMEOUT);
+        assertThat(normalizer.normalize(new org.springframework.web.client.ResourceAccessException(
+                "secret", new java.net.ConnectException("secret"))).code())
+                .isEqualTo(ModelGatewayErrorCode.MODEL_PROVIDER_UNAVAILABLE);
+        for (ProviderFailureKind kind : java.util.List.of(ProviderFailureKind.AUTHENTICATION,
+                ProviderFailureKind.BILLING, ProviderFailureKind.QUOTA, ProviderFailureKind.MODEL_ACCESS)) {
+            NormalizedProviderError error = normalizer.normalize(new RuntimeException("secret",
+                    new ProviderFailure(kind, Duration.ofSeconds(2))));
+            assertThat(error.retryable()).isFalse();
+            assertThat(error.code()).isEqualTo(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+            assertThat(error.toString()).doesNotContain("secret");
+        }
+    }
+
+    @Test
     void providerFailuresMapToStableRetrySemantics() {
         assertThat(normalizer.normalize(new ProviderFailure(
                 ProviderFailureKind.RATE_LIMITED,

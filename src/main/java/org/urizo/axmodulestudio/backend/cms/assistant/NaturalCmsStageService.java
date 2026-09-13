@@ -5,6 +5,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -187,7 +188,7 @@ public final class NaturalCmsStageService {
         // 화면이 「등록·수정」처럼 이름을 대려면 어느 동작이 막혔는지가 필요하다. 사유 문장에서
         // 다시 뽑아내게 하면 문구를 고칠 때마다 화면이 깨진다. 키로 싣고 한글은 화면이 만든다.
         ArrayNode operations = payload.putArray("closedOperations");
-        new TreeSet<>(closed).forEach(operations::add);
+        closed.forEach(operations::add);
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
                 resultId,
@@ -567,7 +568,7 @@ public final class NaturalCmsStageService {
             return reportOperation;
         }
         List<String> english = new ArrayList<>();
-        for (String operation : new TreeSet<>(closed)) {
+        for (String operation : closed) {
             english.add(switch (operation) {
                 case "CREATE" -> "creating";
                 case "UPDATE" -> "changing";
@@ -582,15 +583,31 @@ public final class NaturalCmsStageService {
                 + reportOperation;
     }
 
+    /** 등록 · 수정 · 삭제 순. 키를 알파벳순으로 세우면 등록·삭제·수정이 된다. */
+    private static final List<String> OPERATION_ORDER = List.of("CREATE", "UPDATE", "DELETE");
+
     /**
      * 코드가 열었는데 관리자가 끈 동작.
      *
      * <p>코드가 애초에 열지 않은 동작은 빼야 한다. 템플릿은 등록·삭제가 없는데 「관리자가
      * 껐다」고 말하면 켤 수 있는 것처럼 들린다.
+     *
+     * <p>순서를 지킨다. 이 목록은 지시문의 영어 문장과 화면이 읽는 {@code closedOperations}로
+     * 둘 다 나간다. 알파벳순으로 두었더니 「switched off deleting and changing」이 됐다.
      */
     private static Set<String> closedOperations(Set<String> opened, Set<String> open) {
-        Set<String> closed = new TreeSet<>(opened);
-        closed.removeAll(open);
+        Set<String> closed = new LinkedHashSet<>();
+        for (String operation : OPERATION_ORDER) {
+            if (opened.contains(operation) && !open.contains(operation)) {
+                closed.add(operation);
+            }
+        }
+        // 코드가 여는 동작이 셋뿐이라 위 순서로 다 잡히지만, 새 동작이 생겨도 사라지지 않게 한다.
+        new TreeSet<>(opened).forEach(operation -> {
+            if (!open.contains(operation)) {
+                closed.add(operation);
+            }
+        });
         return closed;
     }
 

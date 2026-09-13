@@ -25,6 +25,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
@@ -644,8 +646,9 @@ class NaturalCmsStageServiceTest {
                 .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
         assertThat(response.payload().path("reason").asText()).contains("가드레일 설정");
         // 화면이 「등록·수정·삭제가 꺼져 있습니다」라고 이름을 대려면 키가 필요하다.
+        // 순서도 설정 화면과 같아야 한다. 알파벳순이면 등록·삭제·수정이 된다.
         assertThat(response.payload().path("closedOperations").toString())
-                .isEqualTo("[\"CREATE\",\"DELETE\",\"UPDATE\"]");
+                .isEqualTo("[\"CREATE\",\"UPDATE\",\"DELETE\"]");
         verifyNoInteractions(harness.models);
     }
 
@@ -679,6 +682,51 @@ class NaturalCmsStageServiceTest {
         assertThat(response.payload().path("closedOperations").toString())
                 .isEqualTo("[\"UPDATE\"]");
         assertThat(response.payload().path("reason").asText()).contains("수정");
+    }
+
+    /**
+     * 네 화면 모두에서 뒤집는다.
+     *
+     * <p>처음에는 메뉴에서만 확인하고 넘어갔다가, 나머지 화면에서는 문구가 뜨지 않는 것을
+     * 관리자가 먼저 발견했다. 뒤집는 자리는 대상을 가리지 않지만 지시문은 대상마다 갈리므로,
+     * 「메뉴에서 되니 다 된다」가 성립하지 않는다. 넷을 모두 세워 둔다.
+     *
+     * <p>게시물은 계약상 {@code BOARD}지만 id 모양으로 갈라져 별도 대상이 된다.
+     */
+    @ParameterizedTest
+    @CsvSource({
+        "MENU, 3",
+        "BOARD, 4",
+        "BOARD, board:4:post:12",
+        "CONTENT, 7",
+    })
+    void refusesAClosedOperationOnEveryGuardedScreen(String type, String id) throws Exception {
+        NaturalCmsContract.ResourceRef resource = new NaturalCmsContract.ResourceRef(type, id);
+        Harness harness = new Harness(activeJob(resource));
+        when(harness.resources.snapshot(resource)).thenReturn(
+                harness.mapper.createObjectNode().put("id", id));
+        when(harness.resources.openedOperations(resource))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(resource)).thenReturn(Set.of("CREATE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"feasible\",\"payload\":{\"operation\":\"DELETE\"}}", List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().path("refusalCode").asText())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        assertThat(response.payload().path("closedOperations").toString())
+                .isEqualTo("[\"DELETE\"]");
+
+        // 지시문도 대상마다 갈리므로 닫힌 동작 안내가 넷 모두에 실렸는지 함께 본다.
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("switched off changing and deleting")
+                .contains("payload.operation exactly one of CREATE, UPDATE or DELETE");
     }
 
     /** 켜져 있는 동작은 그대로 통과한다. 되는 요청을 막으면 가드레일이 아니라 고장이다. */

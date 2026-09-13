@@ -59,7 +59,7 @@ public final class NaturalCmsGuardrailContract {
 
     /** 저장할 동작 하나. */
     public record OperationSelection(
-            @NotBlank @Pattern(regexp = "^(MENU|BOARD|BOARD_POST|CONTENT)$") String resourceKey,
+            @NotBlank @Pattern(regexp = "^(MENU|BOARD|BOARD_POST|CONTENT|TEMPLATE)$") String resourceKey,
             @NotBlank @Pattern(regexp = "^(CREATE|UPDATE|DELETE)$") String operation,
             boolean enabled) { }
 
@@ -70,8 +70,8 @@ public final class NaturalCmsGuardrailContract {
      * 동작을 전부 담아 보낸다. 저장이 끝나면 {@code configured}가 켜지고, 그때부터 목록에 없는
      * 동작은 꺼짐으로 읽힌다.
      *
-     * <p>상한은 대상 넷 × 동작 셋이다. 화면이 여는 것보다 많이 보낼 이유가 없다.
+     * <p>상한은 CRUD 대상 넷 × 동작 셋 + 템플릿 수정 하나다.
      */
     public record SaveRequest(
-            @NotNull @Size(max = 12) List<@Valid OperationSelection> operations) { }
+            @NotNull @Size(max = 13) List<@Valid OperationSelection> operations) { }
 }

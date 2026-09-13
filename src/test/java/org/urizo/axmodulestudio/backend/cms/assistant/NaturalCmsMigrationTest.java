@@ -9,6 +9,19 @@ import java.nio.file.Path;
 import org.junit.jupiter.api.Test;
 
 class NaturalCmsMigrationTest {
+    @Test
+    void templateGuardrailUsesAForwardMigrationAndPreservesPreviousChoices() throws IOException {
+        String sql = Files.readString(Path.of("src/main/resources/db/migration/"
+                + "V20260913145252641__allow_template_update_guardrail.sql"));
+        assertThat(sql)
+                .contains("'MENU', 'BOARD', 'BOARD_POST', 'CONTENT', 'TEMPLATE'")
+                .contains("resource_type <> 'TEMPLATE' OR operation = 'UPDATE'")
+                .contains("SELECT gen_random_uuid(), 'TEMPLATE', 'UPDATE', TRUE")
+                .contains("WHERE configured")
+                .contains("ON CONFLICT (resource_type, operation) DO NOTHING")
+                .doesNotContain("DELETE FROM", "DROP TABLE", "UPDATE app.natural_cms_rule");
+    }
+
 
     @Test
     void migrationCreatesOnlyTheCmsJobAndResultBoundary() throws IOException {

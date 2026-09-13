@@ -130,10 +130,14 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId) {
         requireStatus(job, "ACTIVE");
-        if (resources.operations(job.resource()).isEmpty()) {
+        Set<String> opened = resources.openedOperations(job.resource());
+        Set<String> open = resources.operations(job.resource());
+        Set<String> closed = closedOperations(opened, open);
+        if (open.isEmpty()) {
             // 물어볼 것이 없다. 모델을 부르면 토큰만 쓰고 같은 답이 온다.
             return refused(job, stage, resultId,
-                    "이 화면은 가드레일 설정에서 모든 동작이 꺼져 있어 AI 가 바꿀 수 있는 것이 없습니다.");
+                    "이 화면은 가드레일 설정에서 모든 동작이 꺼져 있어 AI 가 바꿀 수 있는 것이 없습니다.",
+                    closed);
         }
         ObjectNode currentState = resources.snapshot(job.resource());
         List<ProviderModelRegistration> modelBindings =
@@ -142,6 +146,16 @@ public final class NaturalCmsStageService {
                 job, stage, resultId, 1, List.of(),
                 initialMessages(job, currentState, false), modelBindings);
         ModelOutcome outcome = parseAnalyze(turn.assistant().content());
+        // 판정은 모델이 하지만 가드레일은 서버가 건다. 모델이 닫힌 동작을 `feasible`로 보내면
+        // 명령 단계에서 예외가 나고 Job 이 ACTIVE 로 남아 화면은 「미리보기를 받지 못했습니다」
+        // 로 끝난다. 여기서 뒤집어야 관리자가 무엇이 막혔는지 본다.
+        String requested = outcome.value().path("operation").asText("");
+        if ("feasible".equals(outcome.port()) && closed.contains(requested)) {
+            return refused(job, stage, resultId,
+                    "가드레일 설정에서 이 화면의 「" + koreanOperation(requested)
+                            + "」 동작이 꺼져 있습니다.",
+                    Set.of(requested));
+        }
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
                 resultId,
@@ -165,10 +179,15 @@ public final class NaturalCmsStageService {
             NaturalCmsContract.JobResponse job,
             NaturalCmsContract.StageExecutionRequest stage,
             UUID resultId,
-            String reason) {
+            String reason,
+            Set<String> closed) {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("refusalCode", NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
         payload.put("reason", reason);
+        // 화면이 「등록·수정」처럼 이름을 대려면 어느 동작이 막혔는지가 필요하다. 사유 문장에서
+        // 다시 뽑아내게 하면 문구를 고칠 때마다 화면이 깨진다. 키로 싣고 한글은 화면이 만든다.
+        ArrayNode operations = payload.putArray("closedOperations");
+        new TreeSet<>(closed).forEach(operations::add);
         return new NaturalCmsContract.StageExecutionResponse(
                 NaturalCmsContract.SCHEMA_VERSION,
                 resultId,
@@ -525,33 +544,64 @@ public final class NaturalCmsStageService {
      * 무엇을 바꿀 수 있는 화면인지와 무엇이 범위 밖인지를 함께 준다.
      */
     /**
-     * 관리자가 끈 동작을 범위 밖으로 덧붙인다.
+     * 관리자가 끈 동작을 범위 밖으로 덧붙이고, 요청이 필요로 하는 동작을 받아 낸다.
      *
      * <p>막는 것은 명령서 검증이다. 다만 그 층은 예외를 던질 뿐이라 Job이 {@code ACTIVE}로 남고
      * 화면은 「미리보기를 받지 못했습니다」로 끝난다. 판정 단계는 {@code infeasible} 포트가 있어
      * 사유를 남기고 정상 반려되므로, 닫힌 동작은 여기서 걸러야 관리자가 이유를 본다.
      *
-     * <p>코드가 애초에 열지 않은 동작은 적지 않는다. 템플릿은 등록·삭제가 없는데 「관리자가
-     * 껐다」고 말하면 켤 수 있는 것처럼 들린다.
+     * <p>문장만으로는 모자랐다. 삭제를 끄면 지시를 따랐지만 수정을 끄니 같은 화면에서 그대로
+     * {@code feasible}을 냈다. 「이 화면이 바꾸는 것」이 바로 위에 적혀 있어 문장끼리 부딪힌다.
+     * 그래서 {@code payload.operation}으로 요청이 필요로 하는 동작을 받아, 판정을 뒤집는 일은
+     * {@link #analyze}가 직접 한다. 이 문장은 그 값을 얻어 내기 위한 것이고 판정 근거가 아니다.
      */
     private static String guardrailNote(Set<String> opened, Set<String> open) {
-        List<String> closed = new ArrayList<>();
-        for (String operation : new TreeSet<>(opened)) {
-            if (!open.contains(operation)) {
-                closed.add(switch (operation) {
-                    case "CREATE" -> "creating";
-                    case "UPDATE" -> "changing";
-                    case "DELETE" -> "deleting";
-                    default -> operation.toLowerCase(Locale.ROOT);
-                });
-            }
-        }
+        Set<String> closed = closedOperations(opened, open);
+        // 동작 이름은 닫힌 것이 없어도 요구한다. 서버가 그 값으로 판정을 뒤집으므로, 가드레일을
+        // 아무것도 끄지 않은 화면에서 갑자기 새 필드가 생기면 그때부터 모델이 헷갈린다.
+        String reportOperation =
+                " Always put in payload.operation exactly one of CREATE, UPDATE or DELETE —"
+                + " the kind of change this request needs — whichever port you choose."
+                + " Report what the request asks for, not what you think is allowed.";
         if (closed.isEmpty()) {
-            return "";
+            return reportOperation;
         }
-        return " The administrator has switched off " + String.join(" and ", closed)
-                + " on this screen, so a request that needs it is infeasible; say in"
-                + " payload.reason that the guardrail setting turned it off.";
+        List<String> english = new ArrayList<>();
+        for (String operation : new TreeSet<>(closed)) {
+            english.add(switch (operation) {
+                case "CREATE" -> "creating";
+                case "UPDATE" -> "changing";
+                case "DELETE" -> "deleting";
+                default -> operation.toLowerCase(Locale.ROOT);
+            });
+        }
+        return " The administrator has switched off " + String.join(" and ", english)
+                + " on this screen. A request that needs any of those is infeasible no matter"
+                + " how ordinary it sounds or how clearly it falls inside the scope above;"
+                + " say in payload.reason that the guardrail setting turned it off."
+                + reportOperation;
+    }
+
+    /**
+     * 코드가 열었는데 관리자가 끈 동작.
+     *
+     * <p>코드가 애초에 열지 않은 동작은 빼야 한다. 템플릿은 등록·삭제가 없는데 「관리자가
+     * 껐다」고 말하면 켤 수 있는 것처럼 들린다.
+     */
+    private static Set<String> closedOperations(Set<String> opened, Set<String> open) {
+        Set<String> closed = new TreeSet<>(opened);
+        closed.removeAll(open);
+        return closed;
+    }
+
+    /** 서버가 만드는 사유 문장에만 쓴다. 화면 문구는 화면이 자기 라벨로 만든다. */
+    private static String koreanOperation(String operation) {
+        return switch (operation) {
+            case "CREATE" -> "등록";
+            case "UPDATE" -> "수정";
+            case "DELETE" -> "삭제";
+            default -> operation;
+        };
     }
 
     private static String feasibilityInstruction(

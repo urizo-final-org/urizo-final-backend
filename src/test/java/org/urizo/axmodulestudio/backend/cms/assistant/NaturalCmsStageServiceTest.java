@@ -643,7 +643,87 @@ class NaturalCmsStageServiceTest {
         assertThat(response.payload().path("refusalCode").asText())
                 .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
         assertThat(response.payload().path("reason").asText()).contains("가드레일 설정");
+        // 화면이 「등록·수정·삭제가 꺼져 있습니다」라고 이름을 대려면 키가 필요하다.
+        assertThat(response.payload().path("closedOperations").toString())
+                .isEqualTo("[\"CREATE\",\"DELETE\",\"UPDATE\"]");
         verifyNoInteractions(harness.models);
+    }
+
+    /**
+     * 판정을 뒤집는 것은 서버다.
+     *
+     * <p>지시문만으로는 모자랐다. 삭제를 끄면 모델이 따랐지만 수정을 끄니 같은 화면에서 그대로
+     * {@code feasible}을 냈다. 바로 위에 「이 화면은 제목과 본문을 바꾼다」가 적혀 있어 문장끼리
+     * 부딪힌다. 그대로 두면 명령 단계에서 예외가 나고 Job이 {@code ACTIVE}로 남아 화면은
+     * 「미리보기를 받지 못했습니다」로 끝난다.
+     */
+    @Test
+    void refusesWhenTheModelCallsAClosedOperationFeasible() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.resources.openedOperations(menu))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(menu)).thenReturn(Set.of("CREATE", "DELETE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"feasible\",\"payload\":{\"operation\":\"UPDATE\"}}", List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().path("refusalCode").asText())
+                .isEqualTo(NaturalCmsRefusal.OPERATION_NOT_ALLOWED.code());
+        // 요청이 막힌 동작만 싣는다. 등록·삭제는 켜져 있으므로 화면이 그것까지 말하면 안 된다.
+        assertThat(response.payload().path("closedOperations").toString())
+                .isEqualTo("[\"UPDATE\"]");
+        assertThat(response.payload().path("reason").asText()).contains("수정");
+    }
+
+    /** 켜져 있는 동작은 그대로 통과한다. 되는 요청을 막으면 가드레일이 아니라 고장이다. */
+    @Test
+    void letsAnOpenOperationThroughEvenWhenAnotherOneIsClosed() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.resources.openedOperations(menu))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(menu)).thenReturn(Set.of("CREATE", "DELETE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"feasible\",\"payload\":{\"operation\":\"DELETE\"}}", List.of()));
+
+        NaturalCmsContract.StageExecutionResponse response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(response.resultPort()).isEqualTo("feasible");
+    }
+
+    /**
+     * 동작 이름은 아무것도 꺼져 있지 않아도 요구한다.
+     *
+     * <p>끈 것이 있을 때만 물어보면, 관리자가 무언가를 끄는 순간 모델이 처음 보는 필드를 받는다.
+     * 그때 헷갈리면 가드레일이 가장 필요한 순간에 판정이 흔들린다.
+     */
+    @Test
+    void feasibilityPromptAlwaysAsksWhichOperationTheRequestNeeds() throws Exception {
+        NaturalCmsContract.ResourceRef menu = new NaturalCmsContract.ResourceRef("MENU", "3");
+        Harness harness = new Harness(activeJob(menu));
+        when(harness.resources.snapshot(menu)).thenReturn(
+                harness.mapper.createObjectNode().put("id", 3));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(
+                modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+
+        harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("payload.operation exactly one of CREATE, UPDATE or DELETE")
+                .doesNotContain("switched off");
     }
 
     /**

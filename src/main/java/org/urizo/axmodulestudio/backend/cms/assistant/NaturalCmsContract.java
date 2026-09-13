@@ -55,9 +55,18 @@ public final class NaturalCmsContract {
      *             「관리자에게 문의하세요」를 가려 말하려면 분류가 필요하다
      * @param reason 모델이 쓴 한글 사유. 범위 밖 요청은 이 문장이 이미 정확하다
      */
-    public record RefusalResponse(String schemaVersion, String code, String reason) {
+    /**
+     * 가드레일이 막은 요청의 사유.
+     *
+     * <p>{@code operations}는 이 요청이 막힌 동작({@code CREATE}·{@code UPDATE}·{@code DELETE})이다.
+     * 화면이 「등록」·「수정」·「삭제」로 옮겨 적어야 관리자가 무엇을 다시 켜야 하는지 안다.
+     * 서버는 키만 싣고 한글은 화면이 만든다.
+     */
+    public record RefusalResponse(
+            String schemaVersion, String code, String reason, List<String> operations) {
         public RefusalResponse {
             requireVersion(schemaVersion);
+            operations = operations == null ? List.of() : List.copyOf(operations);
         }
     }
 

@@ -24,15 +24,15 @@ record NaturalCmsGuardrail(
     static final String BOARD = "BOARD";
     static final String BOARD_POST = "BOARD_POST";
     static final String CONTENT = "CONTENT";
+    static final String TEMPLATE = "TEMPLATE";
 
     /**
      * 이 가드레일이 관리하는 대상.
      *
      * <p>여기 없는 대상은 설정을 저장한 뒤에도 코드가 연 그대로 둔다. 관리 대상이 아닌 것을
-     * "선택된 적 없음"으로 읽으면 저장 한 번에 그 대상이 통째로 닫힌다. TEMPLATE이 그 경우이고,
-     * 저장 표의 CHECK도 같은 넷으로 닫혀 있다.
+     * "선택된 적 없음"으로 읽으면 저장 한 번에 그 대상이 통째로 닫힌다.
      */
-    static final Set<String> MANAGED = Set.of(MENU, BOARD, BOARD_POST, CONTENT);
+    static final Set<String> MANAGED = Set.of(MENU, BOARD, BOARD_POST, CONTENT, TEMPLATE);
 
     NaturalCmsGuardrail {
         Objects.requireNonNull(allowedOperations, "allowedOperations is required");

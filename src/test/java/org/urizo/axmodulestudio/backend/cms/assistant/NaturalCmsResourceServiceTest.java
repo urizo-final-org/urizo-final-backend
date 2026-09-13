@@ -24,6 +24,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsRequests;
 import org.urizo.axmodulestudio.backend.cms.dto.CmsResponses.BoardView;
@@ -1028,14 +1029,9 @@ class NaturalCmsResourceServiceTest {
         assertThat(state.has("parentId")).isTrue();
     }
 
-    /**
-     * 가드레일이 관리하지 않는 대상은 저장 뒤에도 코드가 연 그대로다.
-     *
-     * <p>TEMPLATE은 선택 표의 CHECK에서도 빠져 있다. 관리 대상이 아닌 것을 "선택된 적 없음"으로
-     * 읽으면 저장 한 번에 그 대상이 통째로 닫힌다.
-     */
+    /** 템플릿도 저장 후 선택이 없으면 닫힌다. */
     @Test
-    void leavesUnmanagedResourcesOpenAfterTheGuardrailIsSaved() throws Exception {
+    void closesTemplateUpdateWhenNotSelected() throws Exception {
         ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         CmsService cms = mock(CmsService.class);
         when(cms.templates()).thenReturn(List.of(template()));
@@ -1047,9 +1043,11 @@ class NaturalCmsResourceServiceTest {
                 {"operation":"UPDATE","fields":{"heroTitle":"새 인사말"}}
                 """);
 
-        assertThatCode(() -> resources.validateCommand(
+        assertThatThrownBy(() -> resources.validateCommand(
                 new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"), command))
-                .doesNotThrowAnyException();
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo("CMS_OPERATION_NOT_ALLOWED");
     }
 
     /**
@@ -1073,6 +1071,56 @@ class NaturalCmsResourceServiceTest {
                 .doesNotThrowAnyException();
     }
 
+    @ParameterizedTest
+    @CsvSource({
+        "MENU, 3, MENU, CREATE", "MENU, 3, MENU, UPDATE", "MENU, 3, MENU, DELETE",
+        "CONTENT, 7, CONTENT, CREATE", "CONTENT, 7, CONTENT, UPDATE", "CONTENT, 7, CONTENT, DELETE",
+        "BOARD, 4, BOARD, CREATE", "BOARD, 4, BOARD, UPDATE", "BOARD, 4, BOARD, DELETE",
+        "BOARD, board:4:post:12, BOARD_POST, CREATE",
+        "BOARD, board:4:post:12, BOARD_POST, UPDATE",
+        "BOARD, board:4:post:12, BOARD_POST, DELETE",
+        "TEMPLATE, classic, TEMPLATE, UPDATE"
+    })
+    void disabledOperationsCannotValidateOrReachCmsMutation(
+            String type, String id, String key, String operation) {
+        ObjectMapper mapper = new ObjectMapper();
+        CmsService cms = mock(CmsService.class);
+        NaturalCmsGuardrailStore policy = guardrails(saved(key, operation));
+        NaturalCmsResourceService resources = new NaturalCmsResourceService(
+                cms, mock(CmsRequestValidator.class), mapper, policy);
+        var ref = new NaturalCmsContract.ResourceRef(type, id);
+        // Previously enabled (including after a preview), then disabled before applying.
+        resources.requireOperationAllowed(ref, operation);
+        when(policy.current()).thenReturn(new NaturalCmsGuardrail(true, Map.of()));
+        ObjectNode command = mapper.createObjectNode().put("operation", operation);
+        command.putObject("fields");
+        assertThatThrownBy(() -> resources.validateCommand(ref, command))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("가드레일 설정")
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo("CMS_OPERATION_NOT_ALLOWED");
+        assertThatThrownBy(() -> resources.apply(ref, command, AUTHOR))
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo("CMS_OPERATION_NOT_ALLOWED");
+        org.mockito.Mockito.verifyNoInteractions(cms);
+    }
+
+    @Test
+    void boardAndPostSettingsAreIndependentAndTemplateUpdateCanBeReenabled() {
+        ObjectMapper mapper = new ObjectMapper();
+        NaturalCmsResourceService resources = fenced(mock(CmsService.class), mapper,
+                new NaturalCmsGuardrail(true, Map.of(
+                        "BOARD", Set.of("UPDATE"), "BOARD_POST", Set.of("DELETE"),
+                        "TEMPLATE", Set.of("UPDATE"))));
+        assertThat(resources.operations(new NaturalCmsContract.ResourceRef("BOARD", "4")))
+                .containsExactly("UPDATE");
+        assertThat(resources.operations(POST_RESOURCE)).containsExactly("DELETE");
+        assertThatCode(() -> resources.requireOperationAllowed(
+                new NaturalCmsContract.ResourceRef("TEMPLATE", "classic"), "UPDATE"))
+                .doesNotThrowAnyException();
+    }
+
     /** 화면이 그릴 목록은 Handler가 여는 것에서 나온다. 저장된 선택이 기준이 아니다. */
     @Test
     void reportsWhatTheHandlersCurrentlyOpen() {
@@ -1083,7 +1131,9 @@ class NaturalCmsResourceServiceTest {
         List<NaturalCmsResourceService.OpenResource> open = resources.openResources();
 
         assertThat(open).extracting(NaturalCmsResourceService.OpenResource::resourceKey)
-                .containsExactly("MENU", "BOARD", "BOARD_POST", "CONTENT");
+                .containsExactly("MENU", "BOARD", "BOARD_POST", "CONTENT", "TEMPLATE");
+        assertThat(open.get(4).operations()).containsExactly("UPDATE");
+        assertThat(open.get(4).dataTable()).isEqualTo("app.cms_template");
         assertThat(open.get(0).fields())
                 .contains("name", "path", "parentId", "displayOrder", "position",
                         "targetType", "targetId");

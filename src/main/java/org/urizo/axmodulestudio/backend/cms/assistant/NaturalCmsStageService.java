@@ -143,10 +143,17 @@ public final class NaturalCmsStageService {
         ObjectNode currentState = resources.snapshot(job.resource());
         List<ProviderModelRegistration> modelBindings =
                 modelBindings(job, stage, ModelUseCase.CHAT);
-        CodingModelTurnContract.Response turn = modelTurn(
-                job, stage, resultId, 1, List.of(),
-                initialMessages(job, currentState, false), modelBindings);
-        ModelOutcome outcome = parseAnalyze(turn.assistant().content());
+        ModelOutcome outcome;
+        try {
+            CodingModelTurnContract.Response turn = modelTurn(
+                    job, stage, resultId, 1, List.of(),
+                    initialMessages(job, currentState, false), modelBindings);
+            outcome = parseAnalyze(turn.assistant().content());
+        }
+        catch (NaturalCmsException failure) {
+            log.warn("Natural CMS analysis failed: jobId={} code={}", job.jobId(), failure.code());
+            throw failure;
+        }
         // 판정은 모델이 하지만 가드레일은 서버가 건다.
         //
         // 포트를 가리지 않는다. `feasible`로 오면 명령 단계에서 예외가 나고 Job 이 ACTIVE 로 남아
@@ -155,7 +162,8 @@ public final class NaturalCmsStageService {
         // 띄운다. 지시문이 「가드레일 때문이라고 사유에 적어라」라고 시켜 모델이 자주 그렇게
         // 오는데, 그 문장은 매번 달라서 같은 설정에 걸린 요청이 다른 말로 거절된다.
         String requested = outcome.value().path("operation").asText("");
-        if (closed.contains(requested)) {
+        // 모델 응답을 기다리는 동안 관리자가 설정을 바꿀 수 있다.
+        if (closedOperations(opened, resources.operations(job.resource())).contains(requested)) {
             return refused(job, stage, resultId,
                     "가드레일 설정에서 이 화면의 「" + koreanOperation(requested)
                             + "」 동작이 꺼져 있습니다.",
@@ -421,6 +429,27 @@ public final class NaturalCmsStageService {
                 : feasibilityInstruction(job.resource(),
                         resources.openedOperations(job.resource()),
                         resources.operations(job.resource()));
+        if (commandStage) {
+            instruction += " Tool arguments have exactly one top-level command object."
+                    + " Inside command, operation and fields are siblings."
+                    + " Never put operation, command, resource or editableFields inside fields.";
+            if ("CONTENT".equals(job.resource().type())
+                    || NaturalCmsResourceService.isPost(job.resource())) {
+                // 예시는 실제 직렬화로 만들며, 명령을 보정하거나 서버 검증을 건너뛰지 않는다.
+                ObjectNode example = context.putObject("createExample").putObject("command");
+                example.put("operation", "CREATE");
+                ObjectNode fields = example.putObject("fields");
+                fields.put("title", "요청한 제목");
+                ObjectNode document = objectMapper.createObjectNode().put("type", "doc");
+                document.putArray("content").addObject().put("type", "paragraph")
+                        .putArray("content").addObject().put("type", "text").put("text", "요청한 본문");
+                fields.put("body", encode(document));
+                instruction += " createExample demonstrates the Tool argument structure, not user data."
+                        + " For CREATE supply both the requested title and body, even when currentState is empty."
+                        + " Encode the document as a JSON string once; do not double-escape it."
+                        + " For UPDATE send only changed fields; for DELETE send an empty fields object.";
+            }
+        }
         return List.of(
                 objectMapper.createObjectNode().put("role", "system").put("content", instruction),
                 objectMapper.createObjectNode().put("role", "user")
@@ -568,6 +597,19 @@ public final class NaturalCmsStageService {
                 " Always put in payload.operation exactly one of CREATE, UPDATE or DELETE —"
                 + " the kind of change this request needs — whichever port you choose."
                 + " Report what the request asks for, not what you think is allowed.";
+        // OFF인 다른 동작 때문에 허용된 등록까지 거부하지 않도록 각 동작의 상태를 분리한다.
+        String independentOperations = " Guardrail permission for this target: "
+                + OPERATION_ORDER.stream()
+                        .filter(opened::contains)
+                        .map(operation -> operation + "=" + (open.contains(operation) ? "ON" : "OFF"))
+                        .collect(java.util.stream.Collectors.joining(", "))
+                + ". Each operation is independent. CREATE means adding a new resource;"
+                + " UPDATE means editing an existing resource; DELETE means removing one."
+                + " Creating initial fields is CREATE, not UPDATE. An OFF setting for UPDATE or"
+                + " DELETE does not forbid CREATE. Never claim an ON operation is disabled."
+                + " Evaluate only the requested operation against its own setting; still enforce"
+                + " the target boundary and field rules.";
+        reportOperation += independentOperations;
         if (closed.isEmpty()) {
             return reportOperation;
         }
@@ -713,7 +755,10 @@ public final class NaturalCmsStageService {
         }
         return "Decide whether this request can be done on this screen. Return only JSON with "
                 + "exactly fields port and payload; port must be feasible or infeasible and "
-                + "payload must be an object. This screen changes " + scope + ". "
+                + "payload must be an object. Example shape:"
+                + " {\"port\":\"feasible\",\"payload\":{\"operation\":\"UPDATE\"}}."
+                + " Use the actual requested operation; do not add other top-level keys or prose."
+                + " This screen changes " + scope + ". "
                 + "Anything else is infeasible even when it sounds related, including "
                 + excluded + "." + guardrailNote(opened, open) + " When the port is "
                 + "infeasible put a short Korean sentence in payload.reason saying what this "
@@ -791,7 +836,8 @@ public final class NaturalCmsStageService {
     private List<JsonNode> previewToolSchemas() {
         ObjectNode schema = objectMapper.createObjectNode();
         schema.put("name", "validate_cms_command");
-        schema.put("description", "Submit one Natural CMS UPDATE command.");
+        schema.put("description", "Submit one Natural CMS CREATE, UPDATE or DELETE command."
+                + " operation and fields are siblings inside command; operation never belongs in fields.");
         schema.put("schemaDigest", NaturalCmsToolContract.MODEL_TOOL_SCHEMA_DIGESTS
                 .get("validate_cms_command"));
         ObjectNode input = schema.putObject("inputSchema");

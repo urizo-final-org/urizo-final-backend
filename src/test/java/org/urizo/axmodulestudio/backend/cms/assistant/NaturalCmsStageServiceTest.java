@@ -3,6 +3,7 @@ package org.urizo.axmodulestudio.backend.cms.assistant;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -187,6 +188,43 @@ class NaturalCmsStageServiceTest {
             assertThat(editableFields)
                     .containsExactlyInAnyOrderElementsOf(promptCase.editableFields());
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"CONTENT,new", "BOARD,board:4:post:new"})
+    void createExampleKeepsOperationOutsideFieldsAndEncodesBodyOnce(String type, String id)
+            throws Exception {
+        var resource = new NaturalCmsContract.ResourceRef(type, id);
+        Harness harness = new Harness(activeJob(resource));
+        ObjectNode state = harness.mapper.createObjectNode().put("id", id);
+        state.putNull("title");
+        state.putNull("body");
+        when(harness.resources.snapshot(resource)).thenReturn(state);
+        JsonNode proposed = harness.mapper.readTree(
+                "{\"operation\":\"CREATE\",\"fields\":{\"title\":\"검증\",\"body\":\"본문\"}}");
+        when(harness.models.executeNaturalCms(any(), any()))
+                .thenReturn(toolResponse("validate_cms_command", proposed));
+        when(harness.resources.validateCommand(eq(resource), any())).thenReturn(proposed);
+        stubPreviewTools(harness, state);
+
+        assertThat(harness.service.execute("Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.preview", RESULT)).resultPort()).isEqualTo("ready");
+        var request = ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(request.capture(), any());
+        String instruction = request.getValue().messages().get(0).path("content").asText();
+        assertThat(instruction).contains("operation and fields are siblings")
+                .contains("do not double-escape").contains("both the requested title and body");
+        JsonNode context = harness.mapper.readTree(
+                request.getValue().messages().get(1).path("content").asText());
+        JsonNode example = context.path("createExample").path("command");
+        assertThat(example.path("operation").asText()).isEqualTo("CREATE");
+        assertThat(example.path("fields").size()).isEqualTo(2);
+        assertThat(example.path("fields").has("operation")).isFalse();
+        JsonNode body = harness.mapper.readTree(example.path("fields").path("body").asText());
+        assertThat(body.path("type").asText()).isEqualTo("doc");
+        assertThat(body.path("content").get(0).path("content").get(0).path("text").asText())
+                .isEqualTo("요청한 본문");
+        ProviderToolDefinition.fromContract(request.getValue().toolSchemas().get(0));
     }
 
     @Test
@@ -790,6 +828,31 @@ class NaturalCmsStageServiceTest {
                 .isEqualTo("이 화면에서는 게시판을 만들 수 없습니다.");
     }
 
+    @ParameterizedTest
+    @CsvSource({"MENU, new", "CONTENT, new", "BOARD, new", "BOARD, board:4:post:new"})
+    void createPermissionIsExplicitlyIndependentOfDisabledUpdateAndDelete(String type, String id)
+            throws Exception {
+        var resource = new NaturalCmsContract.ResourceRef(type, id);
+        Harness harness = new Harness(activeJob(resource));
+        when(harness.resources.snapshot(resource)).thenReturn(harness.mapper.createObjectNode());
+        when(harness.resources.openedOperations(resource))
+                .thenReturn(Set.of("CREATE", "UPDATE", "DELETE"));
+        when(harness.resources.operations(resource)).thenReturn(Set.of("CREATE"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"feasible\",\"payload\":{\"operation\":\"CREATE\"}}", List.of()));
+
+        var response = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        var turn = ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("CREATE=ON, UPDATE=OFF, DELETE=OFF")
+                .contains("Creating initial fields is CREATE, not UPDATE")
+                .contains("Never claim an ON operation is disabled");
+        assertThat(response.resultPort()).isEqualTo("feasible");
+    }
+
     /** 켜져 있는 동작은 그대로 통과한다. 되는 요청을 막으면 가드레일이 아니라 고장이다. */
     @Test
     void letsAnOpenOperationThroughEvenWhenAnotherOneIsClosed() throws Exception {
@@ -928,6 +991,53 @@ class NaturalCmsStageServiceTest {
                 .map(message -> message.path("content").asText())
                 .findFirst()
                 .orElse("");
+    }
+
+    @Test
+    void templateUpdateDisabledRefusesWithoutModelOrMcp() throws Exception {
+        var template = new NaturalCmsContract.ResourceRef("TEMPLATE", "3");
+        Harness harness = new Harness(activeJob(template));
+        when(harness.resources.openedOperations(template)).thenReturn(Set.of("UPDATE"));
+        when(harness.resources.operations(template)).thenReturn(Set.of());
+        var response = harness.service.execute("Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.analyze", RESULT));
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().path("refusalCode").asText()).isEqualTo("CMS_OPERATION_NOT_ALLOWED");
+        assertThat(response.payload().path("closedOperations").toString()).isEqualTo("[\"UPDATE\"]");
+        verifyNoInteractions(harness.models, harness.mcp);
+    }
+
+    @Test
+    void rereadsGuardrailAfterModelReturnsBeforeAcceptingItsDecision() throws Exception {
+        Harness harness = new Harness(activeJob());
+        when(harness.resources.snapshot(RESOURCE)).thenReturn(harness.mapper.createObjectNode());
+        when(harness.resources.operations(RESOURCE))
+                .thenReturn(Set.of("UPDATE"), Set.of());
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"feasible\",\"payload\":{\"operation\":\"UPDATE\"}}", List.of()));
+        var response = harness.service.execute("Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.analyze", RESULT));
+        assertThat(response.resultPort()).isEqualTo("infeasible");
+        assertThat(response.payload().path("refusalCode").asText()).isEqualTo("CMS_OPERATION_NOT_ALLOWED");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"MENU, 3", "CONTENT, 7", "BOARD, 4", "BOARD, board:4:post:12", "TEMPLATE, 3"})
+    void policyChangedAfterApprovalStopsApplyBeforeMcpAndDatabase(String type, String id) throws Exception {
+        var ref = new NaturalCmsContract.ResourceRef(type, id);
+        JsonNode command = new ObjectMapper().readTree("{\"operation\":\"UPDATE\",\"fields\":{\"title\":\"New\"}}");
+        Harness harness = new Harness(job("WAITING_APPROVAL", command, PREVIEW, PREVIEW_HASH, true, ref));
+        NaturalCmsException denied = new NaturalCmsException("CMS_OPERATION_NOT_ALLOWED",
+                "가드레일 설정에 의해 수정 차단", org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY);
+        when(harness.resources.validateCommand(eq(ref), any())).thenThrow(denied);
+        when(harness.resources.validateCommand(eq(ref), any(), any())).thenThrow(denied);
+        assertThatThrownBy(() -> harness.service.execute("Bearer worker", JOB, 1, RESULT,
+                stageRequest("cms.apply", RESULT)))
+                .isInstanceOf(NaturalCmsException.class)
+                .extracting(failure -> ((NaturalCmsException) failure).code())
+                .isEqualTo("CMS_OPERATION_NOT_ALLOWED");
+        verifyNoInteractions(harness.models, harness.mcp);
+        verify(harness.store, never()).recordApplied(any(), any(), anyInt(), any(), anyInt(), any());
     }
 
     private static NaturalCmsContract.JobResponse activeJob() throws Exception {

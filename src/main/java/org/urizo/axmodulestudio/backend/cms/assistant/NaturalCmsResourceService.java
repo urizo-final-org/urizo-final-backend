@@ -121,8 +121,7 @@ public final class NaturalCmsResourceService {
     /**
      * 자연어 CMS가 다루는 대상 전부.
      *
-     * <p>가드레일이 관리하는 넷에 템플릿을 더한다. 템플릿은 설정 대상이 아니지만 「메뉴 화면에서
-     * 템플릿을 바꿀 수 있나」는 관리자가 실제로 하는 질문이라 목록에는 있어야 한다.
+     * <p>게시물은 게시판과 별도 설정하고 템플릿은 수정만 제공한다.
      */
     private static final List<String> ALL_RESOURCES = List.of(
             NaturalCmsGuardrail.MENU, NaturalCmsGuardrail.BOARD,
@@ -133,7 +132,8 @@ public final class NaturalCmsResourceService {
             NaturalCmsGuardrail.MENU, "app.cms_menu",
             NaturalCmsGuardrail.BOARD, "app.cms_board",
             NaturalCmsGuardrail.BOARD_POST, "app.cms_post",
-            NaturalCmsGuardrail.CONTENT, "app.cms_content");
+            NaturalCmsGuardrail.CONTENT, "app.cms_content",
+            NaturalCmsGuardrail.TEMPLATE, "app.cms_template");
 
     /**
      * 그 대상의 Handler 안에만 있는 제약.
@@ -153,7 +153,10 @@ public final class NaturalCmsResourceService {
                     new Lock("POST_NO_BOARD_MOVE", null)),
             NaturalCmsGuardrail.CONTENT, List.of(
                     new Lock("CONTENT_BODY_ALLOWLIST", null),
-                    new Lock("CONTENT_IMAGE_SOURCE", null)));
+                    new Lock("CONTENT_IMAGE_SOURCE", null)),
+            NaturalCmsGuardrail.TEMPLATE, List.of(
+                    new Lock("TEMPLATE_UPDATE_ONLY", null),
+                    new Lock("TEMPLATE_SELECTED_TARGET_ONLY", null)));
 
     /**
      * 가드레일이 관리하는 대상의 현재 열림 상태.
@@ -167,6 +170,7 @@ public final class NaturalCmsResourceService {
         open.add(openResource(NaturalCmsGuardrail.BOARD, handlers.get("BOARD")));
         open.add(openResource(NaturalCmsGuardrail.BOARD_POST, posts));
         open.add(openResource(NaturalCmsGuardrail.CONTENT, handlers.get("CONTENT")));
+        open.add(openResource(NaturalCmsGuardrail.TEMPLATE, handlers.get("TEMPLATE")));
         return List.copyOf(open);
     }
 
@@ -336,16 +340,7 @@ public final class NaturalCmsResourceService {
         }
         // 코드가 연 것과 관리자가 허용한 것의 교집합. 설정은 좁히기만 하고 넓히지 못한다.
         String operation = command.path("operation").asText();
-        Set<String> operations = guardrails.current()
-                .operations(resourceKey(resource), handler.operations());
-        if (!operations.contains(operation)) {
-            if (handler.operations().contains(operation)) {
-                throw notAllowed(NaturalCmsRefusal.OPERATION_NOT_ALLOWED,
-                        type + " " + operation + " is closed by the current guardrail.");
-            }
-            throw invalidCommand(type + " accepts these operations only: "
-                    + String.join(", ", new TreeSet<>(operations)) + ".");
-        }
+        requireOperationAllowed(resource, operation);
         JsonNode fields = command.path("fields");
         Set<String> given = names(fields);
         if ("DELETE".equals(operation)) {
@@ -365,6 +360,26 @@ public final class NaturalCmsResourceService {
             }
         }
         return new Command(operation, fields, actorId, requestText);
+    }
+
+    /** 승인과 최종 반영 모두 저장된 현재 설정을 다시 읽는다. CMS 데이터를 변경하지 않는다. */
+    void requireOperationAllowed(NaturalCmsContract.ResourceRef resource, String operation) {
+        ResourceHandler<?> handler = handler(resource);
+        Set<String> allowed = guardrails.current().operations(resourceKey(resource), handler.operations());
+        if (allowed.contains(operation)) {
+            return;
+        }
+        if (handler.operations().contains(operation)) {
+            String label = switch (operation) {
+                case "CREATE" -> "등록";
+                case "DELETE" -> "삭제";
+                default -> "수정";
+            };
+            throw notAllowed(NaturalCmsRefusal.OPERATION_NOT_ALLOWED,
+                    "현재 가드레일 설정에 의해 「" + label + "」 요청이 차단되었습니다. 반영하지 않았습니다.");
+        }
+        throw invalidCommand(resource.type() + " accepts these operations only: "
+                + String.join(", ", new TreeSet<>(allowed)) + ".");
     }
 
     private static NaturalCmsException invalidCommand(String message) {

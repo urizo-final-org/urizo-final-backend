@@ -160,6 +160,28 @@ class NaturalCmsStoreTest {
         verifyNoInteractions(harness.productJdbc, harness.productTransactionManager);
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void rejectsApprovalBeforeAnyWriteWhenTheGuardrailChangedAfterPreview() {
+        Harness harness = new Harness();
+        var waiting = job(JOB_ID, 1, 1, "WAITING_APPROVAL", null, null);
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null && sql.contains("FROM app.natural_cms_job")),
+                any(RowMapper.class), eq(JOB_ID))).thenReturn(List.of(waiting));
+        org.mockito.Mockito.doThrow(new NaturalCmsException("CMS_OPERATION_NOT_ALLOWED",
+                "현재 가드레일 설정에 의해 수정 요청이 차단되었습니다.",
+                org.springframework.http.HttpStatus.UNPROCESSABLE_ENTITY))
+                .when(harness.resources).requireOperationAllowed(eq(RESOURCE), any());
+        assertThatThrownBy(() -> harness.store.decide(ACTOR, JOB_ID,
+                new NaturalCmsContract.ApprovalDecisionRequest("1.0", PREVIEW_ID,
+                        PREVIEW_HASH, "APPROVED", null)))
+                .isInstanceOf(NaturalCmsException.class)
+                .hasMessageContaining("가드레일 설정");
+        assertThat(harness.updates).isEmpty();
+        verify(harness.codingTransactionManager).rollback(harness.codingTransactionStatus);
+        verifyNoInteractions(harness.productJdbc, harness.productTransactionManager);
+    }
+
     @ParameterizedTest
     @MethodSource("analyzeOutcomes")
     @SuppressWarnings("unchecked")
@@ -337,6 +359,7 @@ class NaturalCmsStoreTest {
         private final PlatformTransactionManager productTransactionManager =
                 mock(PlatformTransactionManager.class);
         private final ObjectMapper objectMapper = new ObjectMapper();
+        private final NaturalCmsResourceService resources = mock(NaturalCmsResourceService.class);
         private final NaturalCmsStore store;
 
         private Harness() {
@@ -354,7 +377,7 @@ class NaturalCmsStoreTest {
                     productJdbc,
                     productTransactionManager,
                     objectMapper,
-                    Clock.fixed(NOW, ZoneOffset.UTC));
+                    Clock.fixed(NOW, ZoneOffset.UTC), resources);
         }
 
         private void verifyCommittedCodingTransaction() {

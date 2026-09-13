@@ -45,6 +45,39 @@ class NaturalCmsGuardrailAdminServiceTest {
         return resources;
     }
 
+    @Test
+    void acceptsThirteenSelectionsButPersistsOnlyTemplateUpdate() {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        var resources = new NaturalCmsResourceService(
+                mock(org.urizo.axmodulestudio.backend.cms.service.CmsService.class),
+                mock(org.urizo.axmodulestudio.backend.cms.service.CmsRequestValidator.class),
+                mapper, mock(NaturalCmsGuardrailStore.class));
+        JdbcTemplate jdbc = emptyDatabase();
+        when(jdbc.update(anyString())).thenReturn(1);
+        var service = new NaturalCmsGuardrailAdminService(jdbc, directTransactions(), resources);
+        var choices = new java.util.ArrayList<NaturalCmsGuardrailContract.OperationSelection>();
+        resources.openResources().forEach(resource -> resource.operations().forEach(operation ->
+                choices.add(new NaturalCmsGuardrailContract.OperationSelection(
+                        resource.resourceKey(), operation, !resource.resourceKey().equals("TEMPLATE")))));
+        var request = new NaturalCmsGuardrailContract.SaveRequest(choices);
+        try (var factory = jakarta.validation.Validation.buildDefaultValidatorFactory()) {
+            assertThat(choices).hasSize(13);
+            assertThat(factory.getValidator().validate(request)).isEmpty();
+        }
+        service.save(request);
+        verify(jdbc).update(org.mockito.ArgumentMatchers.contains("INSERT INTO app.natural_cms_operation_selection"),
+                any(), eq("TEMPLATE"), eq("UPDATE"), eq(false));
+        service.save(new NaturalCmsGuardrailContract.SaveRequest(List.of(
+                new NaturalCmsGuardrailContract.OperationSelection("TEMPLATE", "CREATE", true),
+                new NaturalCmsGuardrailContract.OperationSelection("TEMPLATE", "DELETE", true))));
+        verify(jdbc, never()).update(org.mockito.ArgumentMatchers.contains("INSERT INTO app.natural_cms_operation_selection"),
+                any(), eq("TEMPLATE"), eq("CREATE"), any());
+        verify(jdbc, never()).update(org.mockito.ArgumentMatchers.contains("INSERT INTO app.natural_cms_operation_selection"),
+                any(), eq("TEMPLATE"), eq("DELETE"), any());
+        var template = service.view().resources().get(4);
+        assertThat(template.operations()).containsExactly(new NaturalCmsGuardrailContract.Operation("UPDATE", true));
+    }
+
     /** 트랜잭션 껍데기만 벗긴다. 이 테스트가 보는 것은 안에서 무엇을 쓰느냐다. */
     @SuppressWarnings("unchecked")
     private static TransactionTemplate directTransactions() {

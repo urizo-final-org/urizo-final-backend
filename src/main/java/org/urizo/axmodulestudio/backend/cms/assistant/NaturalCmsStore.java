@@ -45,6 +45,7 @@ public final class NaturalCmsStore {
     private final TransactionTemplate productTransactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final NaturalCmsResourceService resources;
 
     NaturalCmsStore(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
@@ -53,7 +54,8 @@ public final class NaturalCmsStore {
             @Qualifier("authJpaTransactionManager")
             PlatformTransactionManager productTransactionManager,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            NaturalCmsResourceService resources) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc is required");
         this.transactions = Objects.requireNonNull(transactions, "transactions are required");
         this.productJdbc = Objects.requireNonNull(productJdbc, "productJdbc is required");
@@ -61,6 +63,7 @@ public final class NaturalCmsStore {
                 productTransactionManager, "productTransactionManager is required"));
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
+        this.resources = Objects.requireNonNull(resources, "resources is required");
     }
 
     public NaturalCmsContract.JobResponse create(
@@ -322,6 +325,12 @@ public final class NaturalCmsStore {
                     return job;
                 }
                 throw conflict("Natural CMS preview already has another decision.");
+            }
+            // 미리보기 이후 설정을 껐으면 승인/Outbox를 기록하기 전에 명확히 차단한다.
+            // 승인 후 설정 변경도 실제 apply 경로가 다시 검사한다. 반려는 항상 가능하다.
+            if ("APPROVED".equals(request.decision())) {
+                resources.requireOperationAllowed(job.resource(),
+                        job.structuredCommand() == null ? "" : job.structuredCommand().path("operation").asText());
             }
             Instant decidedAt = clock.instant();
             int updated = jdbc.update("""

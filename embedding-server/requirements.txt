@@ -5,9 +5,9 @@
 # 서버는 하나도 쓰지 않는다. 아래는 실제로 돌고 있는 venv에서 확인한 버전이다.
 #
 # torch는 PyPI 기본 인덱스에 +cpu 빌드가 없다. CPU 인덱스에서 먼저 설치할 것:
-#   uv pip install --python venv/Scripts/python.exe torch==2.13.0+cpu \
+#   venv/Scripts/python.exe -m pip install torch==2.13.0+cpu \
 #       --index-url https://download.pytorch.org/whl/cpu
-#   uv pip install --python venv/Scripts/python.exe -r requirements.txt
+#   venv/Scripts/python.exe -m pip install -r requirements.txt
 
 # 임베딩 값에 직접 영향을 주는 것들. 버전을 올리면 DB에 저장된 v8 벡터 500건의
 # 기준선이 무효가 될 수 있다 — 올리기 전에 rag/embed_bge.py의 경고를 먼저 읽을 것.

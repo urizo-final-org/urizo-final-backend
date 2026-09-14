@@ -28,6 +28,17 @@ RAG 전체 실행 순서는 [`../docs/RAG_LOCAL_SETUP.md`](../docs/RAG_LOCAL_SET
 | GPU | **불필요.** CPU 전용 구성이다 |
 | 최초 기동 | 모델 로드 약 8초 (다운로드는 별도) |
 
+## 0. Python 3.11 확인
+
+```bash
+py -0          # Windows: 설치된 버전 목록
+python --version
+```
+
+3.11이 없으면 [python.org](https://www.python.org/downloads/release/python-31115/)에서
+받거나 `winget install Python.Python.3.11`로 설치한다. 다른 버전으로도 서버는 뜨지만
+`requirements.txt`의 고정 버전이 3.11 기준으로 검증된 조합이다.
+
 ## 1. 모델 받기
 
 `rag/embed_bge.py`는 `SentenceTransformer("BAAI/bge-m3")`를 revision 없이 부른다.
@@ -53,12 +64,20 @@ hf download BAAI/bge-m3 --revision 5617a9f61b028005a4858fdac845db406aefb181
 이 디렉터리에서 실행한다.
 
 ```bash
-python -m venv venv
-uv pip install --python venv/Scripts/python.exe torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python venv/Scripts/python.exe -r requirements.txt
+py -3.11 -m venv venv
+venv/Scripts/python.exe -m pip install torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
+venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
 torch를 먼저 CPU 인덱스에서 받는 이유는 PyPI 기본 인덱스에 `+cpu` 빌드가 없어서다.
+torch만 약 200 MB라 이 단계가 몇 분 걸린다.
+
+`uv`가 이미 있으면 더 빠르다(없으면 설치할 필요 없다 — 위 pip로 충분하다).
+
+```bash
+uv pip install --python venv/Scripts/python.exe torch==2.13.0+cpu --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python venv/Scripts/python.exe -r requirements.txt
+```
 
 ## 3. 실행
 

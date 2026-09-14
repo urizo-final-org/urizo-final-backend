@@ -57,6 +57,7 @@ class NaturalCmsStoreTest {
     private static final String PREVIEW_HASH = "sha256:"
             + "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String AUTHORIZATION = "Bearer natural-cms-service";
+    private static final String CANCEL_REASON = "단계 사이에서 멎어 담당자가 닫았습니다.";
     private static final NaturalCmsContract.ResourceRef RESOURCE =
             new NaturalCmsContract.ResourceRef("CONTENT", "7");
     private static final AuthenticatedActor ACTOR =
@@ -244,11 +245,186 @@ class NaturalCmsStoreTest {
         UpdateCall transition = harness.updateContaining("UPDATE app.natural_cms_job");
         assertThat(normalize(transition.sql()))
                 .contains("SET status = ?, updated_at = ?")
-                .contains("WHERE job_id = ? AND status <> 'COMPLETED'");
+                .contains("WHERE job_id = ? AND status NOT IN ('COMPLETED', 'REJECTED')");
         assertThat(transition.arguments())
                 .containsExactly(expectedStatus, Timestamp.from(NOW), JOB_ID);
         harness.verifyCommittedCodingTransaction();
         verifyNoInteractions(harness.productJdbc, harness.productTransactionManager);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void cancelClosesAStalledActiveJobWithoutPuttingItBackOnTheQueue() {
+        Harness harness = new Harness();
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_job")
+                        && sql.contains("FOR UPDATE")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(JOB_ID, 1, 1, "ACTIVE", null, null)));
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_job")
+                        && !sql.contains("FOR UPDATE")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(JOB_ID, 1, 2, "REJECTED", "REJECTED", CANCEL_REASON)));
+
+        NaturalCmsContract.JobResponse cancelled = harness.store.cancel(
+                ACTOR,
+                JOB_ID,
+                new NaturalCmsContract.CancelJobRequest(
+                        NaturalCmsContract.SCHEMA_VERSION, CANCEL_REASON));
+
+        assertThat(cancelled.status()).isEqualTo("REJECTED");
+        assertThat(cancelled.stateVersion()).isEqualTo(2);
+        // 닫은 Job을 Queue에 다시 넣으면 Worker가 도로 집어 든다. 쓰기는 이 하나뿐이어야 한다.
+        assertThat(harness.updates).hasSize(1);
+        UpdateCall close = harness.updates.get(0);
+        assertThat(normalize(close.sql()))
+                .contains("UPDATE app.natural_cms_job")
+                .contains("SET status = 'REJECTED', approval_decision = 'REJECTED'")
+                .contains("preview_valid = FALSE")
+                .contains("state_version = state_version + 1")
+                .contains("WHERE job_id = ? AND status IN ('ACTIVE', 'WAITING_APPROVAL')");
+        // 끝내는 경로이므로 다시 돌리지 않는다. 시도 횟수를 올리면 재시도로 오인된다.
+        assertThat(normalize(close.sql())).doesNotContain("pipeline_attempt");
+        assertThat(close.arguments())
+                .containsExactly(CANCEL_REASON, ACTOR_ID, Timestamp.from(NOW), JOB_ID);
+        harness.verifyCommittedCodingTransaction();
+        verifyNoInteractions(harness.productJdbc, harness.productTransactionManager);
+    }
+
+    /**
+     * 승인 대기에서 멎은 Job도 닫는다.
+     *
+     * <p>{@code decide}의 반려는 {@code approval_decision}만 세우고 종결은 {@code cms.discard}
+     * 단계가 한다. 파이프라인이 멎으면 반려해도 상태가 {@code WAITING_APPROVAL}에 머물러
+     * 미종료로 남는다. 취소는 그 단계를 거치지 않고 끝낸다.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void cancelAlsoClosesAJobStuckWaitingForApproval() {
+        Harness harness = new Harness();
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_job")
+                        && sql.contains("FOR UPDATE")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(JOB_ID, 2, 3, "WAITING_APPROVAL", null, null)));
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_job")
+                        && !sql.contains("FOR UPDATE")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(JOB_ID, 2, 4, "REJECTED", "REJECTED", CANCEL_REASON)));
+
+        NaturalCmsContract.JobResponse cancelled = harness.store.cancel(
+                ACTOR,
+                JOB_ID,
+                new NaturalCmsContract.CancelJobRequest(
+                        NaturalCmsContract.SCHEMA_VERSION, CANCEL_REASON));
+
+        assertThat(cancelled.status()).isEqualTo("REJECTED");
+        assertThat(cancelled.pipelineAttempt()).isEqualTo(2);
+        assertThat(harness.updates).hasSize(1);
+        harness.verifyCommittedCodingTransaction();
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(strings = {"COMPLETED", "REJECTED"})
+    @SuppressWarnings("unchecked")
+    void cancelRefusesAJobThatIsAlreadyClosed(String status) {
+        Harness harness = new Harness();
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null && sql.contains("FROM app.natural_cms_job")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(JOB_ID, 1, 1, status, null, null)));
+
+        assertThatThrownBy(() -> harness.store.cancel(
+                ACTOR,
+                JOB_ID,
+                new NaturalCmsContract.CancelJobRequest(
+                        NaturalCmsContract.SCHEMA_VERSION, CANCEL_REASON)))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code())
+                                .isEqualTo("NATURAL_CMS_STATE_CONFLICT"));
+        assertThat(harness.updates).isEmpty();
+        verify(harness.codingTransactionManager).rollback(harness.codingTransactionStatus);
+    }
+
+    @Test
+    void cancelRequiresACmsAdministratorBeforeReadingTheJob() {
+        Harness harness = new Harness();
+        NaturalCmsContract.CancelJobRequest request = new NaturalCmsContract.CancelJobRequest(
+                NaturalCmsContract.SCHEMA_VERSION, CANCEL_REASON);
+
+        assertThatThrownBy(() -> harness.store.cancel(
+                new AuthenticatedActor(ACTOR_ID, "viewer", AdminRole.GENERAL_USER),
+                JOB_ID, request))
+                .isInstanceOfSatisfying(NaturalCmsException.class,
+                        failure -> assertThat(failure.code()).isEqualTo("FORBIDDEN"));
+        assertThatThrownBy(() -> harness.store.cancel(null, JOB_ID, request))
+                .isInstanceOf(NaturalCmsException.class);
+        assertThat(harness.updates).isEmpty();
+        verifyNoInteractions(harness.codingTransactionManager);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void discardOnlyRetriesTheJobThatAPersonJustRejected() {
+        Harness harness = new Harness();
+        NaturalCmsContract.StageExecutionResponse response =
+                new NaturalCmsContract.StageExecutionResponse(
+                        NaturalCmsContract.SCHEMA_VERSION,
+                        RESULT_ID,
+                        "cms.discard",
+                        "retry",
+                        RESOURCE,
+                        null,
+                        null,
+                        null,
+                        harness.objectMapper.createObjectNode().put("outcome", "retry"));
+        NaturalCmsContract.HandlerResult stored = new NaturalCmsContract.HandlerResult(
+                RESULT_ID, JOB_ID, TRACE_ID, 1, "cms.discard", "retry", RESOURCE,
+                null, null, null, response.payload(), NOW);
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.coding_service_credential")),
+                any(RowMapper.class),
+                any(byte[].class),
+                eq(Timestamp.from(NOW)),
+                eq(Timestamp.from(NOW))))
+                .thenReturn(List.of(CREDENTIAL_ID));
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_job")
+                        && sql.contains("FOR UPDATE")),
+                any(RowMapper.class),
+                eq(JOB_ID)))
+                .thenReturn(List.of(job(
+                        JOB_ID, 1, 1, "WAITING_APPROVAL", "REJECTED", "다시 해주세요")));
+        when(harness.jdbc.query(
+                argThat(sql -> sql != null
+                        && sql.contains("FROM app.natural_cms_handler_result")),
+                any(RowMapper.class),
+                eq(JOB_ID),
+                eq(1),
+                eq(RESULT_ID)))
+                .thenReturn(List.of(), List.of(stored));
+
+        harness.store.record(AUTHORIZATION, JOB_ID, 1, response);
+
+        UpdateCall transition = harness.updateContaining("UPDATE app.natural_cms_job");
+        // 닫은 Job도 approval_decision은 'REJECTED'다. 상태까지 봐야 되살아나지 않는다.
+        assertThat(normalize(transition.sql()))
+                .contains("WHERE job_id = ? AND approval_decision = 'REJECTED'"
+                        + " AND status = 'WAITING_APPROVAL'");
+        harness.verifyCommittedCodingTransaction();
     }
 
     private static Stream<Arguments> firstDecisions() {

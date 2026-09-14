@@ -99,6 +99,29 @@ public final class NaturalCmsContract {
         }
     }
 
+    /**
+     * 멎은 Job을 닫는 요청.
+     *
+     * <p>파이프라인이 멎은 Job은 {@link ApprovalDecisionRequest}로 닫을 수 없다. 미리보기가
+     * 없으면 결정 자체가 성립하지 않고, 미리보기가 있어도 반려의 종결은 다음 단계가 하기
+     * 때문이다. 그렇게 남은 Job 하나가 CMS 일괄 가져오기까지 막는다. 그래서 단계를 거치지
+     * 않고 닫는 경로를 따로 둔다.
+     *
+     * <p>{@code reason}은 선택이 아니다. 사람이 닫은 Job과 파이프라인이 판정한 Job을 나중에
+     * 구별하려면 누가 왜 닫았는지가 남아야 한다. DB의 반려 사유 제약도 같은 값을 요구한다.
+     */
+    public record CancelJobRequest(
+            String schemaVersion,
+            @NotBlank @Size(max = 2_000) String reason) {
+        public CancelJobRequest {
+            requireVersion(schemaVersion);
+            reason = reason == null ? null : reason.trim();
+            if (reason == null || reason.isBlank()) {
+                throw new IllegalArgumentException("Natural CMS cancel reason is required.");
+            }
+        }
+    }
+
     public record StageExecutionRequest(
             String schemaVersion,
             @NotNull UUID traceId,

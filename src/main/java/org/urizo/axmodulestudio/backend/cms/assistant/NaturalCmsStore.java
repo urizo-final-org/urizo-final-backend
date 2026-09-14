@@ -356,6 +356,53 @@ public final class NaturalCmsStore {
         return decided;
     }
 
+    /**
+     * 더 나아가지 못하는 Job을 사유와 함께 닫는다.
+     *
+     * <p>파이프라인이 단계 사이에서 멎으면 그 Job은 스스로 끝나지 않는다. 미리보기가 없어
+     * {@link #decide} 경로로도 닫을 수 없고, 만료도 없어 영원히 남는다. 그 하나가 CMS 일괄
+     * 가져오기처럼 「미종료 Job이 없어야 한다」를 요구하는 작업을 통째로 막는다.
+     *
+     * <p>{@code WAITING_APPROVAL}도 닫는다. {@link #decide}의 반려는 {@code approval_decision}만
+     * 세우고 종결은 {@code cms.discard} 단계에 맡기므로, 파이프라인이 멎으면 반려해도 Job이
+     * 닫히지 않는다. 여기서는 단계를 거치지 않고 바로 종결시킨다. 되돌리는 경로가 아니라
+     * 끝내는 경로이므로 {@code pipelineAttempt}는 올리지 않는다.
+     *
+     * <p>닫은 Job은 Queue에 다시 넣지 않는다. 다시 넣으면 방금 닫은 것을 Worker가 도로
+     * 집어 든다.
+     */
+    public NaturalCmsContract.JobResponse cancel(
+            AuthenticatedActor actor,
+            UUID jobId,
+            NaturalCmsContract.CancelJobRequest request) {
+        if (actor == null || !actor.role().isCmsAdministrator()) {
+            throw forbidden("A CMS administrator is required.");
+        }
+        NaturalCmsContract.JobResponse cancelled = transactions.execute(status -> {
+            NaturalCmsContract.JobResponse job = requireJob(jobId, true);
+            if (!"ACTIVE".equals(job.status()) && !"WAITING_APPROVAL".equals(job.status())) {
+                throw conflict("Natural CMS cancel closes an unfinished Job only.");
+            }
+            Instant cancelledAt = clock.instant();
+            int updated = jdbc.update("""
+                    UPDATE app.natural_cms_job
+                    SET status = 'REJECTED', approval_decision = 'REJECTED',
+                        approval_feedback = ?, approver_id = ?, preview_valid = FALSE,
+                        state_version = state_version + 1, updated_at = ?
+                    WHERE job_id = ? AND status IN ('ACTIVE', 'WAITING_APPROVAL')
+                    """,
+                    request.reason(), actor.actorId(), Timestamp.from(cancelledAt), jobId);
+            if (updated != 1) {
+                throw conflict("Natural CMS cancel transition did not complete.");
+            }
+            return requireJob(jobId, false);
+        });
+        if (cancelled == null) {
+            throw unavailable();
+        }
+        return cancelled;
+    }
+
     boolean hasPreviewResult(UUID jobId, int pipelineAttempt) {
         Integer count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM app.natural_cms_handler_result
@@ -408,10 +455,12 @@ public final class NaturalCmsStore {
             NaturalCmsContract.StageExecutionResponse response,
             Instant updatedAt) {
         int updated = switch (response.handlerKey()) {
+            // 끝난 Job은 어느 단계 결과로도 되돌리지 않는다. 멎은 줄 알고 닫은 Job의 늦은
+            // 응답이 도착하면 그 Job이 다시 ACTIVE가 되어 닫은 사실이 사라진다.
             case "cms.analyze" -> database.update("""
                     UPDATE app.natural_cms_job
                     SET status = ?, updated_at = ?
-                    WHERE job_id = ? AND status <> 'COMPLETED'
+                    WHERE job_id = ? AND status NOT IN ('COMPLETED', 'REJECTED')
                     """,
                     "infeasible".equals(response.resultPort()) ? "REJECTED" : "ACTIVE",
                     Timestamp.from(updatedAt), jobId);
@@ -422,17 +471,21 @@ public final class NaturalCmsStore {
                         preview_valid = TRUE, approval_decision = NULL,
                         approval_feedback = NULL, approver_id = NULL,
                         updated_at = ?
-                    WHERE job_id = ? AND status <> 'COMPLETED'
+                    WHERE job_id = ? AND status NOT IN ('COMPLETED', 'REJECTED')
                     """,
                     json(response.structuredCommand()), response.previewId(),
                     response.previewHash(), json(response.payload()),
                     Timestamp.from(updatedAt), jobId);
             case "cms.discard" -> {
                 boolean retry = "retry".equals(response.resultPort());
+                // 반려 직후의 Job만 폐기한다. 닫은 Job도 approval_decision은 'REJECTED'라
+                // 그 조건만으로는 구별되지 않는다. 사람이 반려한 Job은 아직
+                // WAITING_APPROVAL이므로 상태까지 봐야 둘이 갈린다.
                 yield database.update("""
                         UPDATE app.natural_cms_job
                         SET status = ?, preview_valid = FALSE, updated_at = ?
                         WHERE job_id = ? AND approval_decision = 'REJECTED'
+                          AND status = 'WAITING_APPROVAL'
                         """,
                         retry ? "ACTIVE" : "REJECTED",
                         Timestamp.from(updatedAt), jobId);

@@ -280,6 +280,31 @@ class CodingJobIntakeServiceTest {
         assertThat(sent.getValue().requestText()).isEqualTo("회원 목록에 가입일 정보가 담기게 해줘");
     }
 
+    /**
+     * Left to the general rule, "show only the running ones" was split and its server half ran
+     * first and failed. The instruction now says which side picking from a shown list belongs to,
+     * and keeps both for a value the screen does not have yet.
+     */
+    @Test
+    void theClassifierIsToldThatPickingFromWhatIsShownIsScreenWork() {
+        activeProfile();
+        runnerAnswers(DEV_SHA);
+        classifierAnswers("screen", "", "");
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", request(null));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> asked =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(turns).executeNaturalCms(asked.capture());
+        JsonNode instruction = asked.getValue().messages().get(0);
+        assertThat(instruction.path("role").asText()).isEqualTo("system");
+        assertThat(instruction.path("content").asText())
+                .contains("고르기·거르기·정렬·묶기·숨기기")
+                .contains("screen 입니다")
+                .contains("새 값을 새로 저장하거나 새로 계산해 내려줘야 할 때만");
+    }
+
     /** Guessing a side would burn a whole run discovering the guess; failing is honest. */
     @Test
     void anUnavailableClassifierFailsTheSubmissionInsteadOfGuessing() {

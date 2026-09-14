@@ -95,6 +95,21 @@ public final class CodingHandlerStageService {
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
             "TOOL_ARGUMENTS_INVALID");
     /**
+     * Read-only tools the code stage runs several of from one answer. Every answer re-sends
+     * the whole conversation, so an answer that is not needed costs everything said so far:
+     * the recorded code stages of Jobs bff4fd0b, 6c75d4ce, 375651f7 and 99748158, replayed
+     * with their consecutive reads grouped three to an answer, lose 28-55% of their input
+     * tokens. Only reads are grouped - they change nothing, so running them in the order
+     * given is the same as running them one answer at a time. An edit still goes alone.
+     */
+    private static final Set<String> BATCHABLE_TOOLS = Set.of("read_file", "search_code");
+    /**
+     * At most this many grouped reads run from one answer. Each read's body rides along on
+     * every later answer and the request is bounded at 65,536 characters; three reads at the
+     * measured p90 of 11,201 bytes already fill half of it.
+     */
+    private static final int MAX_BATCHED_READS = 3;
+    /**
      * The workspace applies a patch with git apply --check --whitespace=error-all, so a
      * hunk is refused unless its context matches the file exactly. A model that guessed
      * the context needs to be pointed at the real bytes, not just told to try again.
@@ -482,38 +497,63 @@ public final class CodingHandlerStageService {
                     continue;
                 }
             }
-            CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
-            patchAttempted = patchAttempted || "apply_patch".equals(call.name());
-            if (!allowedTools.contains(call.name())) {
-                throw contract("The model selected a tool outside the stage allowlist.");
-            }
-            CodingToolContract.ResultContent toolResult;
-            try {
-                toolResult = executeTool(
-                        authorization, jobId, request, authority, aggregate,
-                        resultId, turn, call);
-            }
-            catch (CodingToolException failure) {
-                // A refusal the model caused is handed back as feedback instead of ending
-                // the Job, because the refusal reason is already a correction instruction.
-                // Anything else - authority, storage, gateway - stays fatal.
-                if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
-                        || turn == MAX_MODEL_TURNS) {
-                    throw failure;
+            List<CodingModelTurnContract.ToolCall> batch =
+                    executableBatch(request.handlerKey(), modelResponse.toolCalls());
+            for (CodingModelTurnContract.ToolCall call : batch) {
+                if (!allowedTools.contains(call.name())) {
+                    throw contract("The model selected a tool outside the stage allowlist.");
                 }
+            }
+            patchAttempted = patchAttempted || "apply_patch".equals(batch.get(0).name());
+            List<CodingModelTurnContract.ToolCall> executed = new ArrayList<>();
+            List<CodingToolContract.ResultContent> toolResults = new ArrayList<>();
+            CodingModelTurnContract.ToolCall refused = null;
+            CodingToolException refusal = null;
+            for (CodingModelTurnContract.ToolCall call : batch) {
+                try {
+                    toolResults.add(executeTool(
+                            authorization, jobId, request, authority, aggregate,
+                            resultId, turn, call));
+                    executed.add(call);
+                }
+                catch (CodingToolException failure) {
+                    // A refusal the model caused is handed back as feedback instead of ending
+                    // the Job, because the refusal reason is already a correction instruction.
+                    // Anything else - authority, storage, gateway - stays fatal.
+                    if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
+                            || turn == MAX_MODEL_TURNS) {
+                        throw failure;
+                    }
+                    refused = call;
+                    refusal = failure;
+                    break;
+                }
+            }
+            // Only the calls that ran are recorded, in the order the model gave them. A call
+            // after a refusal never ran, and a tool result needs a real execution behind it.
+            // Keeping the ran calls as a leading run also leaves each call at the position
+            // its Gemini thought signature was issued for.
+            if (executed.isEmpty()) {
                 messages.add(plainAssistantMessage(modelResponse));
-                messages.add(userMessage("Your " + call.name() + " call was refused: "
-                        + failure.getMessage()
+            }
+            else {
+                messages.add(assistantToolMessage(modelResponse, executed));
+                toolResults.forEach(result -> messages.add(toolMessage(result)));
+            }
+            List<JsonNode> decodedResults = toolResults.stream()
+                    .map(this::decodeToolResult)
+                    .toList();
+            if (refusal != null) {
+                messages.add(userMessage("Your " + refused.name() + " call was refused: "
+                        + refusal.getMessage()
                         + " Correct the call and continue the task."
-                        + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
+                        + ("apply_patch".equals(refused.name()) ? APPLY_PATCH_RETRY_HINT : "")));
                 continue;
             }
-            messages.add(assistantToolMessage(modelResponse, call));
-            messages.add(toolMessage(toolResult));
-            JsonNode decoded = decodeToolResult(toolResult);
+            CodingModelTurnContract.ToolCall call = executed.get(executed.size() - 1);
             if (Set.of("read_diff", "apply_patch",
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
-                latestDiff = decoded;
+                latestDiff = decodedResults.get(decodedResults.size() - 1);
             }
             if ("apply_patch".equals(call.name())) {
                 // Measured on Job cb3cd98b: the model applied a working patch, then kept
@@ -1665,11 +1705,18 @@ public final class CodingHandlerStageService {
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
                 + "synonym or rewording, and payload must be an object. " + payloadFields
                 + ("coding.code".equals(handlerKey)
-                    // One call per answer is the pipeline's contract: the loop runs the first
-                    // call alone and the history records only that one, so a batch of calls
-                    // silently loses all but its head unless the model is told.
-                    ? "Request one tool call per answer; when an answer carries several, only "
-                        + "the first is executed. "
+                    // The loop runs up to MAX_BATCHED_READS reads from one answer and any other
+                    // tool alone, so the model is told both halves - otherwise a mixed answer
+                    // silently loses all but its head. Grouping is asked only for reads that
+                    // do not wait on each other: a read guessed before the result it depends on
+                    // is a read the stage then carries on every later answer.
+                    ? "When you need several read_file or search_code results that do not "
+                        + "depend on each other, request them together in one answer, up to "
+                        + MAX_BATCHED_READS + "; they run in the order given. Do not group a "
+                        + "read whose path or range depends on an earlier result - wait for "
+                        + "that result. Every other tool goes alone in its answer: an answer "
+                        + "that mixes it with other calls runs only its first call, and reads "
+                        + "past the " + MAX_BATCHED_READS + "th are not run. "
                         // apply_patch's own result carries the final diff digest (measured,
                         // Job 60401f37), and the review stage re-reads the diff itself, so
                         // a read_diff after the last edit only re-buys conversation weight.
@@ -2008,30 +2055,65 @@ public final class CodingHandlerStageService {
                 + "copied from a fresh read, never from memory. ";
     }
 
-    /** The tool message carries no name; the assistant message right before it does. */
+    /**
+     * The tool message carries no name; the assistant message that asked for it does. Grouped
+     * reads put several results after one assistant message, so the call is matched by its id
+     * in the nearest assistant message before the result - not by position, which names only
+     * the first result of a group and leaves the rest unfolded.
+     */
     private static String toolNameBefore(List<JsonNode> messages, int toolIndex) {
-        if (toolIndex == 0) {
+        String toolCallId = messages.get(toolIndex).path("toolCallId").asText("");
+        for (int index = toolIndex - 1; index >= 0; index--) {
+            JsonNode message = messages.get(index);
+            if (!"assistant".equals(message.path("role").textValue())) {
+                continue;
+            }
+            for (JsonNode call : message.path("toolCalls")) {
+                if (toolCallId.equals(call.path("toolCallId").asText())) {
+                    return call.path("name").asText("");
+                }
+            }
             return "";
         }
-        return messages.get(toolIndex - 1).path("toolCalls").path(0).path("name").asText("");
+        return "";
     }
 
     /**
-     * Replays only the call that actually ran. A model may hand back several tool calls in one
-     * answer, but this loop executes the first alone - replaying the rest would leave the next
-     * turn declaring calls that have no result, which the message contract rightly refuses.
-     * The history must record what the pipeline did, not what the model asked for.
+     * Replays only the calls that actually ran. A model may hand back more calls in one answer
+     * than the loop runs - an edit runs alone, reads at most {@link #MAX_BATCHED_READS} - and
+     * replaying the rest would leave the next turn declaring calls that have no result, which
+     * the message contract rightly refuses. The history must record what the pipeline did,
+     * not what the model asked for.
      */
     private ObjectNode assistantToolMessage(
-            CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
+            CodingModelTurnContract.Response response,
+            List<CodingModelTurnContract.ToolCall> executed) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "assistant");
         message.put("content", response.assistant().content());
-        ObjectNode value = message.putArray("toolCalls").addObject();
-        value.put("toolCallId", executed.toolCallId().toString());
-        value.put("name", executed.name());
-        value.set("arguments", executed.arguments());
+        ArrayNode calls = message.putArray("toolCalls");
+        for (CodingModelTurnContract.ToolCall call : executed) {
+            ObjectNode value = calls.addObject();
+            value.put("toolCallId", call.toolCallId().toString());
+            value.put("name", call.name());
+            value.set("arguments", call.arguments());
+        }
         return message;
+    }
+
+    /**
+     * The calls of one answer that are run. Several run only in the code stage and only when
+     * every call is a read, at most {@link #MAX_BATCHED_READS} of them from the front. Anything
+     * else - an edit among the calls, or the review stage - runs the first call alone, as the
+     * loop always did.
+     */
+    static List<CodingModelTurnContract.ToolCall> executableBatch(
+            String handlerKey, List<CodingModelTurnContract.ToolCall> calls) {
+        if (!"coding.code".equals(handlerKey)
+                || !calls.stream().allMatch(call -> BATCHABLE_TOOLS.contains(call.name()))) {
+            return List.of(calls.get(0));
+        }
+        return List.copyOf(calls.subList(0, Math.min(calls.size(), MAX_BATCHED_READS)));
     }
 
     private ObjectNode toolMessage(CodingToolContract.ResultContent result) {

@@ -661,6 +661,200 @@ class CodingHandlerStageServiceTest {
                 .isEqualTo("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
     }
 
+    private static final String DIFF_CALL = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    private static final String READ_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    private static final String READ_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    private static final String READ_D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    /** One answer carrying several reads, the way Claude sends them when it may. */
+    private static ProviderChatResponse readsReply(ModelProvider provider, String... callIds) {
+        List<ProviderChatMessage.ToolCall> calls = new java.util.ArrayList<>();
+        for (int index = 0; index < callIds.length; index++) {
+            calls.add(new ProviderChatMessage.ToolCall(callIds[index], "read_file",
+                    "{\"path\":\"src/App.java\",\"startLine\":" + (index * 10 + 1)
+                            + ",\"endLine\":" + (index * 10 + 9) + "}"));
+        }
+        return new ProviderChatResponse(provider, "coding-test-model", "",
+                List.copyOf(calls), 10, 5, Duration.ofMillis(10));
+    }
+
+    /** The usual accepted submit, also recording which call ids reached the tool service. */
+    private static org.mockito.stubbing.Answer<CodingToolContract.Accepted> recordingSubmit(
+            StageFixture fixture, List<String> submitted) {
+        org.mockito.stubbing.Answer<CodingToolContract.Accepted> accept =
+                acceptedSubmit(fixture.submittedToolCall());
+        return invocation -> {
+            submitted.add(((JsonNode) invocation.getArgument(1)).path("toolCallId").asText());
+            return accept.answer(invocation);
+        };
+    }
+
+    private static ProviderChatMessage lastAssistant(ProviderChatRequest request) {
+        List<ProviderChatMessage> assistants = request.messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.ASSISTANT)
+                .toList();
+        return assistants.get(assistants.size() - 1);
+    }
+
+    private static List<String> toolResultIds(ProviderChatRequest request) {
+        return request.messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
+                .map(ProviderChatMessage::toolCallId)
+                .toList();
+    }
+
+    /*
+     * AI04-032: every answer re-sends the whole conversation, so reads that do not wait on
+     * each other run together from one answer - replayed on Jobs bff4fd0b, 6c75d4ce, 375651f7
+     * and 99748158 that removes 28-55% of the code stage's input tokens. All of them run, in
+     * the order given, and the next request records the calls followed by their results.
+     */
+    @Test
+    void readsFromOneAnswerRunTogetherAndReplayInOrder() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        List<String> submitted = new java.util.ArrayList<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(recordingSubmit(fixture, submitted));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", DIFF_CALL, "{}"),
+                readsReply(ModelProvider.GOOGLE_GENAI, READ_B, READ_C, READ_D),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(submitted).containsExactly(DIFF_CALL, READ_B, READ_C, READ_D);
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        ProviderChatRequest third = routed.getAllValues().get(2);
+        assertThat(lastAssistant(third).toolCalls())
+                .extracting(ProviderChatMessage.ToolCall::id)
+                .containsExactly(READ_B, READ_C, READ_D);
+        assertThat(toolResultIds(third)).containsExactly(DIFF_CALL, READ_B, READ_C, READ_D);
+    }
+
+    /*
+     * A refusal inside a group stops the group there. The read before it ran and is recorded
+     * with its result; the refused read and the one after it never ran, so they are left out
+     * of the history - a tool result needs a real execution behind it - and the refusal
+     * reason is handed back as for a single call. Leaving them out keeps the ran calls as a
+     * leading run, at the positions their Gemini thought signatures were issued for.
+     */
+    @Test
+    void aRefusalInsideAGroupKeepsOnlyTheReadsThatRan() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        List<String> submitted = new java.util.ArrayList<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(recordingSubmit(fixture, submitted))
+                .thenAnswer(recordingSubmit(fixture, submitted))
+                .thenThrow(new CodingToolException(
+                        "TOOL_ARGUMENTS_INVALID", "read_file range is invalid.",
+                        org.springframework.http.HttpStatus.BAD_REQUEST))
+                .thenAnswer(recordingSubmit(fixture, submitted));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", DIFF_CALL, "{}"),
+                readsReply(ModelProvider.GOOGLE_GENAI, READ_B, READ_C, READ_D),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(submitted).containsExactly(DIFF_CALL, READ_B);
+        verify(fixture.toolService(), times(3))
+                .submitForNode(eq("Bearer worker"), any(), eq("code"));
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        ProviderChatRequest third = routed.getAllValues().get(2);
+        assertThat(lastAssistant(third).toolCalls())
+                .extracting(ProviderChatMessage.ToolCall::id)
+                .containsExactly(READ_B);
+        assertThat(toolResultIds(third)).containsExactly(DIFF_CALL, READ_B);
+        List<ProviderChatMessage> messages = third.messages();
+        ProviderChatMessage last = messages.get(messages.size() - 1);
+        assertThat(last.role()).isEqualTo(ProviderChatMessage.Role.USER);
+        assertThat(last.content())
+                .contains("Your read_file call was refused: read_file range is invalid.");
+    }
+
+    /*
+     * Grouped reads put several results after one assistant message. The fold used to name a
+     * result by the message right before it, which for the second read of a group is the
+     * first read's result - so a group's later reads never folded. The call is now matched by
+     * its id: with a fold depth of one, the group's older read folds and the newest stays.
+     */
+    @Test
+    void foldsEveryReadOfAGroupNotOnlyItsFirst() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 1, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.ANTHROPIC, "read_diff", DIFF_CALL, "{}"),
+                readsReply(ModelProvider.ANTHROPIC, READ_B, READ_C),
+                terminalReply(ModelProvider.ANTHROPIC));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        List<String> third = toolBodies(routed.getAllValues().get(2));
+        assertThat(third).hasSize(3);
+        assertThat(third.get(0)).contains(DIFF_DIGEST);
+        assertThat(third.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(third.get(2)).contains(DIFF_DIGEST);
+    }
+
+    /*
+     * Which calls of one answer run. Only reads group, only in the code stage, and at most
+     * three: an edit goes alone because the order of edits and reads matters, and the review
+     * stage keeps judging one call at a time.
+     */
+    @Test
+    void onlyAnAnswerOfReadsInTheCodeStageRunsMoreThanItsFirstCall() {
+        JsonNode none = new ObjectMapper().createObjectNode();
+        org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall first =
+                new org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall(
+                        UUID.fromString(READ_B), "read_file", none);
+        org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall second =
+                new org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall(
+                        UUID.fromString(READ_C), "search_code", none);
+        org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall third =
+                new org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall(
+                        UUID.fromString(READ_D), "read_file", none);
+        org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall fourth =
+                new org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall(
+                        UUID.fromString(DIFF_CALL), "read_file", none);
+        org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall patch =
+                new org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract.ToolCall(
+                        UUID.fromString(EXECUTION.toString()), "apply_patch", none);
+
+        assertThat(CodingHandlerStageService.executableBatch(
+                "coding.code", List.of(first, second, third, fourth)))
+                .containsExactly(first, second, third);
+        assertThat(CodingHandlerStageService.executableBatch(
+                "coding.code", List.of(first, patch, second)))
+                .containsExactly(first);
+        assertThat(CodingHandlerStageService.executableBatch(
+                "coding.code", List.of(patch, first)))
+                .containsExactly(patch);
+        assertThat(CodingHandlerStageService.executableBatch(
+                "coding.review", List.of(first, second)))
+                .containsExactly(first);
+        assertThat(CodingHandlerStageService.executableBatch(
+                "coding.code", List.of(first)))
+                .containsExactly(first);
+    }
+
     @Test
     void anEmptySnapshotAndStageToolIntersectionExposesNoTools() {
         assertThat(CodingHandlerStageService.allowedTools(

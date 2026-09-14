@@ -239,12 +239,42 @@ public class RagStore {
         return scored.stream().map(Scored::text).toList();
     }
 
-    /** 줄바꿈·문장부호 경계로 나누고, "[분류]" 같은 필드 라벨 줄은 제외한다. */
-    private static List<String> segments(String content) {
-        return Arrays.stream(content.split("(?<=[.!?])\\s+|\\R+"))
+    /**
+     * 문장 단위로 나누고 "[분류]" 같은 필드 라벨 줄은 제외한다.
+     *
+     * <p><b>원문의 줄바꿈은 문장 끝이 아니다.</b> 공고 본문은 줄을 고정 폭으로 접어 저장돼
+     * 있어 한 문장이 두 줄에 걸친다 — 줄바꿈마다 끊으면 "…다듬을 수" / "있는 기회를 제공하고자
+     * …경진대회를" 처럼 끝맺음 없는 조각이 나오고, 그 조각이 그대로 답변이 된다(2026-09-14 실측).
+     * 그래서 <b>접힌 줄을 먼저 펴고</b> 문장부호로만 나눈다.
+     *
+     * <p>라벨 줄은 앞뒤 어느 쪽으로도 펴지 않는다. 라벨은 항목의 시작이지 문장의 일부가
+     * 아니다 — 펴 버리면 "[신청기간] 20260901 ~ 20260930 초기 창업…"이 한 덩어리가 되고,
+     * 대괄호로 시작한다는 이유로 <b>그 문장까지 통째로 걸러진다.</b>
+     */
+    static List<String> segments(String content) {
+        return Arrays.stream(unwrap(content).split("(?<=[.!?])\\s+|\\R+"))
                 .map(String::trim)
                 .filter(segment -> !segment.isEmpty() && !segment.startsWith("["))
                 .toList();
+    }
+
+    /** 문장이 끝나지 않은 채 다음 줄로 넘어가면 한 줄로 잇는다. */
+    private static String unwrap(String content) {
+        String[] lines = content.split("\\R");
+        StringBuilder joined = new StringBuilder(content.length());
+        for (int index = 0; index < lines.length; index++) {
+            String line = lines[index].strip();
+            joined.append(line);
+            if (index == lines.length - 1) {
+                break;
+            }
+            String next = lines[index + 1].strip();
+            boolean sentenceOpen = !line.isEmpty() && !line.startsWith("[")
+                    && !line.endsWith(".") && !line.endsWith("!") && !line.endsWith("?")
+                    && !next.isEmpty() && !next.startsWith("[");
+            joined.append(sentenceOpen ? ' ' : '\n');
+        }
+        return joined.toString();
     }
 
     private ProductApiContract.ChatbotResponse chatbot(ResultSet rs, UUID traceId)

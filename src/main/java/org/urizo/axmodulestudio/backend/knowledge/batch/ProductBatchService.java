@@ -3,6 +3,7 @@ package org.urizo.axmodulestudio.backend.knowledge.batch;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
@@ -10,6 +11,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +53,7 @@ final class ProductBatchService {
     private final ChunkingStrategyPlanner planner;
     private final ObjectMapper objectMapper;
     private final int maxDocuments;
+    private final int maxDetailCalls;
 
     ProductBatchService(
             JdbcTemplate productJdbcTemplate,
@@ -61,7 +64,9 @@ final class ProductBatchService {
             ConnectorSecretResolver secrets,
             ChunkingStrategyPlanner planner,
             ObjectMapper objectMapper,
-            @Value("${ax.knowledge.connector.max-documents:500}") int maxDocuments) {
+            @Value("${ax.knowledge.connector.max-documents:500}") int maxDocuments,
+            // 문서별 2차 호출의 상한. 공공 API 일일 한도를 빌드 한 번이 다 쓰지 못하게 한다.
+            @Value("${ax.knowledge.connector.max-detail-calls:600}") int maxDetailCalls) {
         this.jdbc = productJdbcTemplate;
         this.transactions = productTransactionTemplate;
         this.clock = clock;
@@ -71,6 +76,7 @@ final class ProductBatchService {
         this.planner = planner;
         this.objectMapper = objectMapper;
         this.maxDocuments = maxDocuments;
+        this.maxDetailCalls = maxDetailCalls;
     }
 
     boolean claim(UUID jobId, String workerId) {
@@ -162,7 +168,7 @@ final class ProductBatchService {
     void phase(UUID jobId, String phase) {
         switch (phase) {
             case "COLLECT" -> collect(jobId);
-            case "NORMALIZE" -> progress(jobId, phase, 30);
+            case "NORMALIZE" -> normalize(jobId);
             case "CHUNK" -> chunk(jobId);
             case "EMBED" -> embed(jobId);
             case "INDEX" -> index(jobId);
@@ -181,6 +187,22 @@ final class ProductBatchService {
                     Timestamp.from(now), Timestamp.from(now), jobId);
             jdbc.update("UPDATE app.knowledge_version SET status = 'FAILED' "
                     + "WHERE build_job_id = ? AND status IN ('BUILD_REQUESTED', 'BUILDING')", jobId);
+        });
+    }
+
+    /**
+     * 합쳐진 문서 집합이 어떤 모습인지 남긴다. 행사 날짜를 가진 문서 수가 여기서 확인된다 —
+     * 만료 표시는 이 값에서만 나오므로, 0이면 종료 행사가 한 건도 표시되지 않는다.
+     */
+    private void normalize(UUID jobId) {
+        transactions.executeWithoutResult(status -> {
+            UUID versionId = knowledgeVersion(jobId);
+            Integer dated = jdbc.queryForObject(
+                    "SELECT count(*) FROM app.source_document "
+                            + "WHERE knowledge_version_id = ? AND event_start_date IS NOT NULL",
+                    Integer.class, versionId);
+            LOG.info("Normalized version {} with {} dated documents.", versionId, dated);
+            updateProgress(jobId, "NORMALIZE", 30, null, null);
         });
     }
 
@@ -224,14 +246,128 @@ final class ProductBatchService {
     }
 
     /**
-     * 이 Version에 고정된 커넥터로 원천 문서를 가져온다.
+     * 이 Version에 고정된 원천들로 문서를 만든다. 첫 원천(BASE)이 문서 집합을 정하고, 뒤따르는
+     * OVERLAY는 같은 문서에 필드만 더한다(AXMS-AI02-023).
+     */
+    private List<ProductApiContract.PreviewDocument> source(UUID versionId) {
+        List<JsonNode> configs = pinnedSources(versionId);
+        List<ProductApiContract.PreviewDocument> documents = fetch(configs.get(0));
+        for (JsonNode overlay : configs.subList(1, configs.size())) {
+            SourceMerge.Result result = SourceMerge.merge(documents, fetch(overlay));
+            // 0건이면 두 원천이 한 문서도 겹치지 않은 것이다. 실패는 아니지만 조용히 넘기면
+            // "왜 날짜가 없지"를 빌드가 끝난 뒤에 묻게 된다.
+            LOG.info("Overlay source enriched {} of {} documents.",
+                    result.enriched(), documents.size());
+            documents = result.documents();
+        }
+        return enrich(versionId, configs.get(0), documents);
+    }
+
+    /**
+     * 목록 API가 주지 않는 본문을 문서별 2차 호출로 채운다(AXMS-AI02-023 W3).
+     *
+     * <p>같은 문서를 두 번 사지 않는다 — 이 지식 베이스의 이전 버전이 같은 갱신 시각으로 이미
+     * 받아 둔 값이 있으면 그대로 쓴다. 그래서 재빌드는 새 문서와 바뀐 문서만큼만 호출을 쓴다.
+     * 예산 상한은 하루 호출 한도를 빌드 한 번이 다 써 버리는 것을 막고, 한 건의 실패는
+     * 빌드를 죽이지 않는다(그 문서는 목록 본문만 갖는다).
+     */
+    private List<ProductApiContract.PreviewDocument> enrich(
+            UUID versionId, JsonNode config, List<ProductApiContract.PreviewDocument> documents) {
+        JsonNode detail = config.path("documentMapping").path("detail");
+        if (!detail.isObject()) {
+            return documents;
+        }
+        String label = detail.path("label").asText("개요");
+        Map<String, String> cached = cachedDetails(versionId, label);
+        String key = secrets.resolve(config.path("authentication").path("secretRef").asText());
+        List<ProductApiContract.PreviewDocument> enriched = new ArrayList<>(documents.size());
+        int fetched = 0;
+        int reused = 0;
+        int failed = 0;
+        int skipped = 0;
+        for (ProductApiContract.PreviewDocument document : documents) {
+            String text = cached.get(cacheKey(document.documentId(), document.sourceUpdatedAt()));
+            if (text != null) {
+                reused++;
+            }
+            else if (fetched + failed >= maxDetailCalls) {
+                skipped++;
+            }
+            else {
+                try {
+                    text = connectors.detail(config, key, document.documentId());
+                    fetched++;
+                }
+                catch (RuntimeException failure) {
+                    failed++;
+                    LOG.warn("Detail lookup failed for document {}: {}",
+                            document.documentId(), failure.getMessage());
+                }
+            }
+            enriched.add(text == null ? document : withDetail(document, label, text));
+        }
+        LOG.info("Detail enrichment: {} fetched, {} reused, {} failed, {} over budget.",
+                fetched, reused, failed, skipped);
+        return List.copyOf(enriched);
+    }
+
+    /**
+     * 같은 지식 베이스의 이전 버전이 이미 받아 둔 상세 본문. 문서 번호와 원천 갱신 시각이
+     * 모두 같을 때만 재사용한다 — 원천이 바뀌었으면 본문도 바뀌었다고 본다.
+     */
+    private Map<String, String> cachedDetails(UUID versionId, String label) {
+        Map<String, String> cached = new HashMap<>();
+        jdbc.query(
+                "SELECT sd.external_document_id, sd.source_updated_at, sd.content "
+                        + "FROM app.source_document sd JOIN app.knowledge_version kv "
+                        + "ON kv.knowledge_version_id = sd.knowledge_version_id "
+                        + "WHERE kv.knowledge_base_id = (SELECT knowledge_base_id "
+                        + "FROM app.knowledge_version WHERE knowledge_version_id = ?) "
+                        + "AND sd.knowledge_version_id <> ? AND position(? in sd.content) > 0",
+                (ResultSet rs) -> {
+                    Timestamp updatedAt = rs.getTimestamp(2);
+                    String text = detailText(rs.getString(3), label);
+                    if (updatedAt != null && text != null) {
+                        cached.putIfAbsent(
+                                cacheKey(rs.getString(1), updatedAt.toInstant()), text);
+                    }
+                },
+                versionId, versionId, "[" + label + "]\n");
+        return cached;
+    }
+
+    private static String cacheKey(String documentId, Instant sourceUpdatedAt) {
+        return documentId + "@" + sourceUpdatedAt;
+    }
+
+    /** 픽스처 코퍼스와 같은 형태로 붙인다 — 라벨 한 줄 뒤에 본문. 포털이 그 형태를 읽는다. */
+    static ProductApiContract.PreviewDocument withDetail(
+            ProductApiContract.PreviewDocument document, String label, String text) {
+        return new ProductApiContract.PreviewDocument(
+                document.documentId(), document.title(),
+                document.content() + "\n[" + label + "]\n" + text,
+                document.category(), document.sourceUrl(),
+                document.sourceUpdatedAt(), document.imageUrl());
+    }
+
+    /**
+     * {@link #withDetail}가 붙인 본문을 다시 꺼낸다. 두 쪽이 어긋나면 캐시가 조용히 한 번도
+     * 맞지 않고, 재빌드마다 문서 수만큼 외부 호출을 다시 쓴다.
+     */
+    static String detailText(String content, String label) {
+        String marker = "\n[" + label + "]\n";
+        int start = content.indexOf(marker);
+        return start < 0 ? null : content.substring(start + marker.length());
+    }
+
+    /**
+     * 원천 하나에서 문서를 가져온다.
      *
      * <p>{@code fixture.invalid} 커넥터는 기존 표본 로더를 그대로 쓴다. 1호(관광) 코퍼스가
      * 그 경로로 적재돼 있어, 실수집으로 한번에 갈아타면 이미 활성화된 Version을 다시 만들 수
      * 없게 된다. 1호를 커넥터로 재수집할 수 있음이 확인되면 그때 이 분기와 로더를 함께 지운다.
      */
-    private List<ProductApiContract.PreviewDocument> source(UUID versionId) {
-        JsonNode config = connectorConfig(versionId);
+    private List<ProductApiContract.PreviewDocument> fetch(JsonNode config) {
         if (DeterministicConnectorFixture.supports(config.path("baseUrl").asText())) {
             return TourismSampleDocumentLoader.documents();
         }
@@ -240,22 +376,41 @@ final class ProductBatchService {
         return connectors.fetch(config, key, maxDocuments);
     }
 
-    private JsonNode connectorConfig(UUID versionId) {
+    /**
+     * 고정된 원천 설정을 BASE부터 순서대로 돌려준다. 연결 표에 행이 없으면 예전처럼
+     * {@code knowledge_version.connector_version_id} 하나만 쓴다 — 이미 만들어진 버전이 그렇다.
+     */
+    private List<JsonNode> pinnedSources(UUID versionId) {
         List<String> values = jdbc.query(
-                "SELECT cv.config_json::text FROM app.knowledge_version kv "
+                "SELECT cv.config_json::text FROM app.knowledge_version_connector kvc "
                         + "JOIN app.connector_version cv "
-                        + "ON cv.connector_version_id = kv.connector_version_id "
-                        + "WHERE kv.knowledge_version_id = ?",
+                        + "ON cv.connector_version_id = kvc.connector_version_id "
+                        + "WHERE kvc.knowledge_version_id = ? "
+                        + "ORDER BY CASE WHEN kvc.role = 'BASE' THEN 0 ELSE 1 END, "
+                        + "cv.connector_version_id",
                 (rs, row) -> rs.getString(1), versionId);
+        if (values.isEmpty()) {
+            values = jdbc.query(
+                    "SELECT cv.config_json::text FROM app.knowledge_version kv "
+                            + "JOIN app.connector_version cv "
+                            + "ON cv.connector_version_id = kv.connector_version_id "
+                            + "WHERE kv.knowledge_version_id = ?",
+                    (rs, row) -> rs.getString(1), versionId);
+        }
         if (values.isEmpty()) {
             throw new IllegalStateException("Knowledge version has no pinned connector version.");
         }
-        try {
-            return objectMapper.readTree(values.get(0));
+        List<JsonNode> configs = new ArrayList<>(values.size());
+        for (String value : values) {
+            try {
+                configs.add(objectMapper.readTree(value));
+            }
+            catch (JsonProcessingException failure) {
+                throw new IllegalStateException(
+                        "Stored connector configuration is invalid.", failure);
+            }
         }
-        catch (JsonProcessingException failure) {
-            throw new IllegalStateException("Stored connector configuration is invalid.", failure);
-        }
+        return configs;
     }
 
     /**
@@ -632,11 +787,6 @@ final class ProductBatchService {
         });
     }
 
-    private void progress(UUID jobId, String phase, int percent) {
-        transactions.executeWithoutResult(status -> updateProgress(
-                jobId, phase, percent, null, null));
-    }
-
     private void updateProgress(
             UUID jobId, String phase, int percent, Integer target, Integer success) {
         jdbc.update("UPDATE app.product_job SET phase = ?, progress_percent = ?, "
@@ -658,17 +808,36 @@ final class ProductBatchService {
 
     private static final Pattern EVENT_PERIOD =
             Pattern.compile("^\\[행사기간\\]\\s*(\\d{8})\\s*~\\s*(\\d{8})\\s*$", Pattern.MULTILINE);
+    // 커넥터 메타데이터 매핑은 필드당 한 줄만 만든다. TourAPI처럼 시작·종료가 별개 필드인
+    // 원천은 "A ~ B" 한 줄을 조립할 수 없어, 두 줄 형식을 함께 받는다(AI02-023).
+    // 픽스처의 한 줄 형식은 그대로 유효하다 — 기존 v1~v3 재빌드가 깨지면 안 된다.
+    private static final Pattern EVENT_START =
+            Pattern.compile("^\\[행사시작\\]\\s*(\\d{8})\\s*$", Pattern.MULTILINE);
+    private static final Pattern EVENT_END =
+            Pattern.compile("^\\[행사종료\\]\\s*(\\d{8})\\s*$", Pattern.MULTILINE);
 
-    /** 본문의 "[행사기간] YYYYMMDD ~ YYYYMMDD" 줄. 없거나 형식·날짜가 어긋나면 NONE — 예외를 던지지 않는다. */
+    /**
+     * 본문의 행사 기간. 한 줄 쌍("[행사기간] A ~ B") 우선, 없으면 두 줄([행사시작]/[행사종료]).
+     * 없거나 형식·날짜가 어긋나면 NONE — 예외를 던지지 않는다.
+     */
     static EventPeriod eventPeriod(String content) {
         Matcher matcher = EVENT_PERIOD.matcher(content);
-        if (!matcher.find()) {
-            return EventPeriod.NONE;
+        if (matcher.find()) {
+            return period(matcher.group(1), matcher.group(2));
         }
+        Matcher start = EVENT_START.matcher(content);
+        Matcher end = EVENT_END.matcher(content);
+        if (start.find() && end.find()) {
+            return period(start.group(1), end.group(1));
+        }
+        return EventPeriod.NONE;
+    }
+
+    private static EventPeriod period(String start, String end) {
         try {
             return new EventPeriod(
-                    LocalDate.parse(matcher.group(1), DateTimeFormatter.BASIC_ISO_DATE),
-                    LocalDate.parse(matcher.group(2), DateTimeFormatter.BASIC_ISO_DATE));
+                    LocalDate.parse(start, DateTimeFormatter.BASIC_ISO_DATE),
+                    LocalDate.parse(end, DateTimeFormatter.BASIC_ISO_DATE));
         }
         catch (DateTimeParseException invalid) {
             return EventPeriod.NONE;

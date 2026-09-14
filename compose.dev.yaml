@@ -266,6 +266,7 @@ services:
       - auth_jwt_signing_key
       - mcp_service_token
       - connector_sme_support_api
+      - connector_tour_api
     expose:
       - "8080"
     healthcheck:
@@ -522,6 +523,8 @@ secrets:
   # connector_<name> 파일로만 해석하므로 커넥터는 위 Secret들에 닿지 못한다.
   connector_sme_support_api:
     file: ./.local/secrets/connector_sme_support_api
+  connector_tour_api:
+    file: ./.local/secrets/connector_tour_api
 
 volumes:
   axms_spring_core_db:

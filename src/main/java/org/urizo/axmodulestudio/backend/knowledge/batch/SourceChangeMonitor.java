@@ -128,24 +128,51 @@ public class SourceChangeMonitor {
                     active.put(rs.getString(1), rs.getString(2));
                 }, candidate.versionId());
 
-        Diff diff = diff(active, latest);
+        boolean comparable = digestsComparable(config, candidate.versionId());
+        Diff diff = diff(active, latest, comparable);
         Instant now = Instant.now(clock);
         String summary = encode(now, candidate.versionNumber(), diff);
         transactions.executeWithoutResult(status -> jdbc.update(
                 "UPDATE app.knowledge_base SET source_change_summary = ?::jsonb, updated_at = ? "
                         + "WHERE knowledge_base_id = ?",
                 summary, Timestamp.from(now), candidate.knowledgeBaseId()));
-        LOG.info("Source change check: kb='{}' comparedVersion=v{} added={} modified={} missing={}",
+        LOG.info("Source change check: kb='{}' comparedVersion=v{} added={} modified={} missing={}{}",
                 candidate.name(), candidate.versionNumber(),
-                diff.added(), diff.modified(), diff.missing());
+                diff.added(), diff.modified(), diff.missing(),
+                comparable ? "" : " (modified not compared — merged or enriched corpus)");
+    }
+
+    /**
+     * 저장된 본문 해시를 목록 응답과 맞대 볼 수 있는가(AXMS-AI02-023).
+     *
+     * <p>이 점검은 목록 API만 부른다. 그런데 빌드는 그 목록에 OVERLAY 원천을 합치거나
+     * 문서별 상세를 덧붙여 저장하므로, 그런 버전의 저장 본문은 목록 본문과 <b>구조적으로
+     * 다르다</b> — 원천이 하나도 바뀌지 않아도 전건이 "수정됨"으로 나온다(관광 500/500 실측).
+     *
+     * <p>그래서 그 경우 수정 집계를 하지 않는다. <b>신규·소멸은 문서 번호만 보므로 그대로
+     * 유효하다.</b> 상세까지 다시 받아 비교하면 점검 한 번에 문서 수만큼 외부 호출이 들어
+     * 점검 자체가 원천에 부담이 된다 — 감지 목적에 맞지 않는 비용이다.
+     */
+    private boolean digestsComparable(JsonNode config, UUID versionId) {
+        if (config.path("documentMapping").has("detail")) {
+            return false;
+        }
+        Integer overlays = jdbc.queryForObject(
+                "SELECT count(*) FROM app.knowledge_version_connector "
+                        + "WHERE knowledge_version_id = ? AND role <> 'BASE'",
+                Integer.class, versionId);
+        return overlays == null || overlays == 0;
     }
 
     /**
      * (ID, 해시) 대조. 해시는 수집이 저장할 때 쓰는 {@link ProductBatchService#sha256}
      * 그대로다 — 다른 자로 재면 모든 문서가 "수정됨"이 된다.
+     *
+     * @param digestsComparable 저장 본문이 목록 본문과 같은 방식으로 만들어졌는가.
+     *     거짓이면 수정 집계를 건너뛴다({@link #digestsComparable}).
      */
     static Diff diff(Map<String, String> activeDigestsById,
-            List<ProductApiContract.PreviewDocument> latest) {
+            List<ProductApiContract.PreviewDocument> latest, boolean digestsComparable) {
         int added = 0;
         int modified = 0;
         Set<String> seen = new HashSet<>();
@@ -155,7 +182,8 @@ public class SourceChangeMonitor {
             if (activeDigest == null) {
                 added++;
             }
-            else if (!activeDigest.equals(ProductBatchService.sha256(document.content()))) {
+            else if (digestsComparable
+                    && !activeDigest.equals(ProductBatchService.sha256(document.content()))) {
                 modified++;
             }
         }

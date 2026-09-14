@@ -65,7 +65,8 @@ class ProductJobRecoveryTest {
                 mock(ConnectorSecretResolver.class),
                 mock(ChunkingStrategyPlanner.class),
                 new ObjectMapper(),
-                500);
+                500,
+                600);
 
         int recovered = service.recoverInterruptedJobs("spring-worker-1");
 

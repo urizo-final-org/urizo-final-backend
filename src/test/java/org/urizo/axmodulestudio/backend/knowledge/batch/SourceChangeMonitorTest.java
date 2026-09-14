@@ -43,7 +43,7 @@ class SourceChangeMonitorTest {
         SourceChangeMonitor.Diff diff = SourceChangeMonitor.diff(active, List.of(
                 document("PBLN_A", "그대로인 본문"),
                 document("PBLN_B", "고쳐 쓴 본문"),
-                document("PBLN_NEW", "새 공고 본문")));
+                document("PBLN_NEW", "새 공고 본문")), true);
 
         assertThat(diff.added()).isEqualTo(1);
         assertThat(diff.modified()).isEqualTo(1);
@@ -55,9 +55,30 @@ class SourceChangeMonitorTest {
         Map<String, String> active = Map.of("PBLN_A", ProductBatchService.sha256("본문"));
 
         SourceChangeMonitor.Diff diff = SourceChangeMonitor.diff(
-                active, List.of(document("PBLN_A", "본문")));
+                active, List.of(document("PBLN_A", "본문")), true);
 
         assertThat(diff).isEqualTo(new SourceChangeMonitor.Diff(0, 0, 0));
+    }
+
+    /**
+     * 병합·상세 보강으로 만든 코퍼스는 저장 본문이 목록 본문과 구조적으로 다르다. 그대로 해시를
+     * 맞대면 원천이 하나도 안 바뀌어도 전건이 "수정됨"이 된다(관광 500/500 실측) —
+     * 그 집계만 건너뛰고 <b>신규·소멸은 문서 번호로 그대로 잡는다</b>(AXMS-AI02-023).
+     */
+    @Test
+    void anEnrichedCorpusCountsNewAndGoneButNotModified() {
+        Map<String, String> active = Map.of(
+                "3113671", ProductBatchService.sha256("강릉커피축제\n[개요]\n보강된 본문"),
+                "1506389", ProductBatchService.sha256("감악산 해맞이 행사\n[개요]\n보강된 본문"));
+
+        SourceChangeMonitor.Diff diff = SourceChangeMonitor.diff(active, List.of(
+                // 목록 응답에는 개요가 없다 — 같은 문서인데 해시가 다르다.
+                document("3113671", "강릉커피축제"),
+                document("4090201", "가든 나이트 마켓")), false);
+
+        assertThat(diff.modified()).isZero();
+        assertThat(diff.added()).isEqualTo(1);
+        assertThat(diff.missing()).isEqualTo(1);
     }
 
     /** 꺼진 모니터는 DB도 원천도 건드리지 않는다 — 촬영 중 갑자기 도는 일이 없어야 한다. */

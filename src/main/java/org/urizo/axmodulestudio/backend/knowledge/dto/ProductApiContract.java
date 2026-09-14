@@ -74,11 +74,20 @@ public final class ProductApiContract {
         public CreateKnowledgeBaseRequest { requireVersion(schemaVersion); }
     }
 
+    /**
+     * {@code connectorVersionId}는 문서 집합을 만드는 BASE 원천이다. {@code overlayConnectorVersionIds}는
+     * 문서를 만들지 않고 같은 문서에 필드만 더하는 보조 원천이며, 생략하면 기존 단일 원천 빌드와 같다.
+     */
     public record StartKnowledgeBuildRequest(
             @NotBlank String schemaVersion,
             @NotNull UUID connectorVersionId,
+            @Size(max = 4) List<UUID> overlayConnectorVersionIds,
             @Size(max = 120) String label) {
-        public StartKnowledgeBuildRequest { requireVersion(schemaVersion); }
+        public StartKnowledgeBuildRequest {
+            requireVersion(schemaVersion);
+            overlayConnectorVersionIds = overlayConnectorVersionIds == null
+                    ? List.of() : List.copyOf(overlayConnectorVersionIds);
+        }
     }
 
     public record StateMutationRequest(

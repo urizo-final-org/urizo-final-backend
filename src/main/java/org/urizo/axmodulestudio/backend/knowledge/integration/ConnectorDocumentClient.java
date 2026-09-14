@@ -19,6 +19,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -113,7 +114,40 @@ public class ConnectorDocumentClient {
         return List.copyOf(documents);
     }
 
+    /**
+     * 문서 하나의 상세를 가져와 매핑된 한 필드만 읽는다(AXMS-AI02-023 W3).
+     *
+     * <p>목록 API가 개요를 주지 않는 원천이 있다. 이 호출은 문서 수만큼 늘어나므로 호출자가
+     * 예산과 재사용을 책임진다 — 여기서는 한 건만 가져온다.
+     *
+     * @return 정제한 본문. 상세가 없거나 값이 비면 {@code null}.
+     */
+    public String detail(JsonNode config, String apiKey, String documentId) {
+        JsonNode detail = config.path("documentMapping").path("detail");
+        JsonNode response = config.path("response");
+        // 목록용 파라미터를 그대로 실으면 안 된다 — 상세 경로가 목록 전용 파라미터를 거부하는
+        // 원천이 있다(TourAPI detailCommon2는 arrange에 INVALID_REQUEST_PARAMETER를 낸다).
+        // 어느 것이 공통이고 어느 것이 목록 전용인지는 설정만 알 수 있으므로 따로 선언한다.
+        JsonNode payload = request(config, apiKey, detail.path("endpoint").asText(),
+                detail.path("parameters"), 1, 1,
+                Map.of(detail.path("parameter").asText(), documentId));
+        requireSuccess(payload, response);
+        List<JsonNode> items = items(payload, response.path("itemsPath").asText());
+        if (items.isEmpty()) {
+            return null;
+        }
+        String text = clean(at(items.get(0), detail.path("path").asText()).asText(""));
+        return text.isBlank() ? null : text;
+    }
+
     private JsonNode request(JsonNode config, String apiKey, int page, int pageSize) {
+        return request(config, apiKey, config.path("endpoint").asText(),
+                config.path("requestParameters"), page, pageSize, Map.of());
+    }
+
+    private JsonNode request(
+            JsonNode config, String apiKey, String endpoint, JsonNode requestParameters,
+            int page, int pageSize, Map<String, String> extra) {
         JsonNode authentication = config.path("authentication");
         JsonNode pagination = config.path("pagination");
         boolean queryKey = "QUERY".equals(authentication.path("location").asText());
@@ -122,17 +156,18 @@ public class ConnectorDocumentClient {
         if (queryKey) {
             parameters.put(authentication.path("name").asText(), apiKey);
         }
-        for (JsonNode parameter : config.path("requestParameters")) {
+        for (JsonNode parameter : requestParameters) {
             JsonNode defaultValue = parameter.path("defaultValue");
             if (!defaultValue.isMissingNode() && !defaultValue.isNull()) {
                 parameters.put(parameter.path("name").asText(), defaultValue.asText());
             }
         }
+        parameters.putAll(extra);
         parameters.put(pagination.path("pageParameter").asText(), Integer.toString(page));
         parameters.put(pagination.path("pageSizeParameter").asText(), Integer.toString(pageSize));
 
         HttpRequest.Builder builder = HttpRequest.newBuilder()
-                .uri(uri(config, parameters))
+                .uri(uri(config, endpoint, parameters))
                 .timeout(Duration.ofSeconds(60))
                 .GET();
         if (!queryKey) {
@@ -164,7 +199,7 @@ public class ConnectorDocumentClient {
         }
     }
 
-    private static URI uri(JsonNode config, Map<String, String> parameters) {
+    private static URI uri(JsonNode config, String endpoint, Map<String, String> parameters) {
         StringBuilder query = new StringBuilder();
         parameters.forEach((name, value) -> {
             query.append(query.isEmpty() ? '?' : '&')
@@ -172,8 +207,7 @@ public class ConnectorDocumentClient {
                     .append('=')
                     .append(URLEncoder.encode(value, StandardCharsets.UTF_8));
         });
-        return URI.create(config.path("baseUrl").asText()
-                + config.path("endpoint").asText() + query);
+        return URI.create(config.path("baseUrl").asText() + endpoint + query);
     }
 
     /**
@@ -220,6 +254,13 @@ public class ConnectorDocumentClient {
         return node.isObject() ? List.of(node) : List.of();
     }
 
+    /**
+     * 원본에 문서 URL이 없는 원천(TourAPI 축제 목록 등)을 위한 합성 주소.
+     * {@code source_document.source_url}이 NOT NULL이라 비워 둘 수 없고, 픽스처 로더가
+     * 같은 이유로 합성 주소를 쓰는 선례를 따른다(AI02-023).
+     */
+    private static final String SYNTHETIC_SOURCE_URL = "https://source.invalid/documents/";
+
     static ProductApiContract.PreviewDocument document(JsonNode item, JsonNode mapping) {
         String documentId = required(item, mapping, "documentId");
         String sourceUrl = optional(item, mapping, "sourceUrl");
@@ -236,7 +277,7 @@ public class ConnectorDocumentClient {
                 required(item, mapping, "title").strip(),
                 content(item, mapping, documentId),
                 category == null || category.isBlank() ? List.of() : List.of(category.strip()),
-                sourceUrl == null ? null : URI.create(sourceUrl),
+                URI.create(sourceUrl == null ? SYNTHETIC_SOURCE_URL + documentId : sourceUrl),
                 updatedAt == null ? null : timestamp(updatedAt, documentId),
                 optional(item, mapping, "imageUrl"));
     }
@@ -258,6 +299,7 @@ public class ConnectorDocumentClient {
             throw new IllegalStateException(
                     "Connector document " + documentId + " has no content after cleaning.");
         }
+        categoryLine(item, mapping).ifPresent(line -> body.append('\n').append(line));
         Iterator<Map.Entry<String, JsonNode>> entries = mapping.path("metadata").fields();
         while (entries.hasNext()) {
             Map.Entry<String, JsonNode> entry = entries.next();
@@ -336,6 +378,37 @@ public class ConnectorDocumentClient {
         }
     }
 
+    /**
+     * 분류 코드를 사람이 쓰는 말로 바꿔 본문에 한 줄 남긴다(AXMS-AI02-023).
+     *
+     * <p>원천이 분류를 코드로만 주면 "숙박"·"쇼핑" 같은 검색어가 본문 어디에도 없어 그 질문이
+     * 통째로 검색되지 않는다(관광 실측: 픽스처 코퍼스 83건 → 코드만 실은 코퍼스 9건). 코드표는
+     * 도메인마다 다르므로 코드가 아니라 커넥터 설정이 갖는다.
+     *
+     * <p>가장 긴 접두가 이긴다. {@code AC}와 {@code AC03}이 함께 있으면 더 구체적인 쪽을 쓴다.
+     */
+    private static Optional<String> categoryLine(JsonNode item, JsonNode mapping) {
+        JsonNode line = mapping.path("categoryLine");
+        String category = optional(item, mapping, "category");
+        if (!line.isObject() || category == null) {
+            return Optional.empty();
+        }
+        String matched = null;
+        String label = null;
+        Iterator<Map.Entry<String, JsonNode>> codes = line.path("codes").fields();
+        while (codes.hasNext()) {
+            Map.Entry<String, JsonNode> code = codes.next();
+            if (category.startsWith(code.getKey())
+                    && (matched == null || code.getKey().length() > matched.length())) {
+                matched = code.getKey();
+                label = code.getValue().asText();
+            }
+        }
+        return label == null || label.isBlank()
+                ? Optional.empty()
+                : Optional.of("[" + line.path("label").asText("분류") + "] " + label);
+    }
+
     private static String required(JsonNode item, JsonNode mapping, String field) {
         String value = optional(item, mapping, field);
         if (value == null || value.isBlank()) {
@@ -344,13 +417,22 @@ public class ConnectorDocumentClient {
         return value;
     }
 
+    /**
+     * 매핑된 값. <b>빈 문자열은 없는 것으로 본다</b> — 공공 API는 값이 없는 칸을 {@code null}이
+     * 아니라 {@code ""}로 돌려준다. 빈 문자열을 그대로 흘리면 적재 시점에 CHECK 위반이나
+     * 파싱 실패로 나타나고, 그때는 어느 칸이 비었는지 알아보기 어렵다.
+     */
     private static String optional(JsonNode item, JsonNode mapping, String field) {
         JsonNode path = mapping.path(field);
         if (!path.isTextual()) {
             return null;
         }
         JsonNode value = at(item, path.asText());
-        return value.isMissingNode() || value.isNull() ? null : value.asText();
+        if (value.isMissingNode() || value.isNull()) {
+            return null;
+        }
+        String text = value.asText();
+        return text.isBlank() ? null : text;
     }
 
     static Instant timestamp(String raw, String documentId) {

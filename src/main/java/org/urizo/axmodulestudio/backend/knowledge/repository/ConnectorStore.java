@@ -10,6 +10,7 @@ import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.HashSet;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -358,10 +359,13 @@ public class ConnectorStore {
     }
 
     private static void validateDocumentMapping(JsonNode value) {
-        Set<String> paths = Set.of(
-                "documentId", "title", "content", "category", "sourceUpdatedAt", "sourceUrl");
+        // imageUrl은 수집기가 이미 읽는 매핑인데 여기서 빠져 있었다. 그래서 실수집 커넥터로는
+        // 사진 있는 문서를 만들 수 없었다(픽스처 코퍼스만 405/500장을 갖고 있던 이유).
+        Set<String> paths = Set.of("documentId", "title", "content", "category",
+                "sourceUpdatedAt", "sourceUrl", "imageUrl");
         requireFields(value, Set.of("documentId", "title", "content"),
-                Set.of("category", "sourceUpdatedAt", "sourceUrl", "metadata"),
+                Set.of("category", "sourceUpdatedAt", "sourceUrl", "imageUrl", "metadata",
+                        "detail", "categoryLine"),
                 "document mapping");
         for (String field : paths) {
             if (value.has(field)) {
@@ -374,6 +378,61 @@ public class ConnectorStore {
                 throw validation("Connector document metadata mapping is invalid.");
             }
             metadata.fields().forEachRemaining(entry -> requireJsonPath(entry.getValue()));
+        }
+        if (value.has("detail")) {
+            validateDetail(value.get("detail"));
+        }
+        if (value.has("categoryLine")) {
+            validateCategoryLine(value.get("categoryLine"));
+        }
+    }
+
+    /** 분류 코드를 사람이 쓰는 말로 바꿔 본문에 남기는 표. 코드표는 도메인마다 다르다. */
+    private static void validateCategoryLine(JsonNode value) {
+        requireFields(value, Set.of("codes"), Set.of("label"), "document category line");
+        if (value.has("label")) {
+            text(value, "label", 1, 40);
+        }
+        JsonNode codes = value.get("codes");
+        if (!codes.isObject() || codes.isEmpty() || codes.size() > 100) {
+            throw validation("Connector category line codes are invalid.");
+        }
+        codes.fields().forEachRemaining(entry -> {
+            if (entry.getKey().isBlank() || entry.getKey().length() > 40
+                    || !entry.getValue().isTextual()
+                    || entry.getValue().textValue().isBlank()
+                    || entry.getValue().textValue().length() > 120) {
+                throw validation("Connector category line codes are invalid.");
+            }
+        });
+    }
+
+    /**
+     * 문서별 2차 조회 설정. 목록 API가 주지 않는 본문(개요 등)을 문서 하나씩 가져온다.
+     *
+     * <p>문서 수만큼 호출이 늘어나는 유일한 설정이라 형식을 여기서 못 박는다. 경로가
+     * {@code endpoint}로 제한되는 것은 목록과 같은 원천·같은 인증만 쓰게 하기 위해서다.
+     */
+    private static void validateDetail(JsonNode value) {
+        requireFields(value, Set.of("endpoint", "parameter", "path"),
+                Set.of("label", "parameters"), "document detail");
+        String endpoint = text(value, "endpoint", 1, 500);
+        if (!endpoint.startsWith("/") || endpoint.startsWith("//") || endpoint.contains("..")) {
+            throw validation("Connector detail endpoint is not an origin-relative safe path.");
+        }
+        text(value, "parameter", 1, 120);
+        requireJsonPath(value.get("path"));
+        if (value.has("label")) {
+            text(value, "label", 1, 40);
+        }
+        if (value.has("parameters")) {
+            JsonNode parameters = value.get("parameters");
+            if (!parameters.isArray()) {
+                throw validation("Connector detail parameters must be an array.");
+            }
+            List<JsonNode> items = new ArrayList<>();
+            parameters.forEach(items::add);
+            validateRequestParameters(items);
         }
     }
 

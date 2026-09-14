@@ -51,7 +51,8 @@ public class TourDiagnosisAgent {
             org.slf4j.LoggerFactory.getLogger(TourDiagnosisAgent.class);
 
     /** 프롬프트가 바뀌면 올린다. 어떤 기준으로 내린 진단인지 결과에 남는다. */
-    public static final String PROMPT_VERSION = "v1";
+    /** v2에서 화면 문장을 존댓말로 통일하고 각 칸의 길이를 묶었다. 조사 흐름은 그대로다. */
+    public static final String PROMPT_VERSION = "v2";
 
     static final String SYSTEM_PROMPT = """
             너는 관광 정보 RAG의 검색 품질이 왜 그 점수인지 조사하는 도구다.
@@ -80,7 +81,7 @@ public class TourDiagnosisAgent {
             규칙:
             - 한 번에 도구 하나만 고른다.
             - reason은 왜 지금 그 도구를 부르는지 한국어 한 문장으로 적는다. 관리자가
-              읽는 문장이다.
+              화면에서 읽는 문장이므로 "-합니다"·"-입니다" 체로 60자 이내로 쓴다.
             - 도구가 error를 돌려주면 같은 호출을 반복하지 말고 다른 수를 찾거나 끝낸다.
             - 진단의 evidence는 전부 도구가 돌려준 수치에서 나와야 한다. 도구가 주지 않은
               숫자를 지어내지 않는다.
@@ -183,12 +184,19 @@ public class TourDiagnosisAgent {
         List<ProviderChatMessage> closing = new ArrayList<>(messages);
         closing.add(ProviderChatMessage.plain(ProviderChatMessage.Role.USER,
                 "조사를 마쳐라. 지금까지 도구가 돌려준 수치만 근거로 진단을 내려라. "
+                        // 네 칸 모두 관리자가 화면에서 그대로 읽는 문장이다. 화면의 다른
+                        // 문구가 존댓말이므로 여기만 평서체면 한 카드 안에서 말투가 갈린다.
+                        + "네 칸(verdict·evidence·reasoning·recommendation) 모두 관리자가 "
+                        + "화면에서 읽는 문장이므로 \"-합니다\"·\"-입니다\" 체로 쓴다. "
                         // verdict는 화면에서 굵은 한 줄로 쓰인다. 길면 줄이 접혀 카드가
                         // 무너지고, 관리자가 한눈에 읽어야 할 핵심이 묻힌다.
                         + "verdict는 원인 하나만 담은 한 문장으로, 40자 이상 60자 이하로 쓴다. "
                         + "숫자·근거·권고를 verdict에 넣지 않는다 — 그건 아래 칸의 몫이다. "
-                        + "evidence는 3~5개, 각 60자 이내로 쓰고 전부 도구가 준 숫자를 담는다. "
-                        + "reasoning에는 실패한 문항 하나를 실제로 인용한다. "
+                        + "evidence는 3~5개, 각 50자 이내의 짧은 한 문장으로 쓰고 전부 도구가 "
+                        + "준 숫자를 담는다. "
+                        // 한 문단이 길어지면 화면에서 여러 줄로 접혀 진단이 묻힌다.
+                        + "reasoning에는 실패한 문항 하나를 실제로 인용하되 120자 이내로 쓴다. "
+                        + "recommendation은 무엇을 하면 되는지 80자 이내 한 문장으로 쓴다. "
                         + "confidence는 HIGH·MEDIUM·LOW 중 하나로 쓴다."
                         + ("MODEL_CONCLUDED".equals(stopReason) ? ""
                         : " 조사가 상한에 걸려 중단됐다(" + stopReason

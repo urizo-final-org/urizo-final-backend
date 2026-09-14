@@ -75,6 +75,8 @@ public final class CodingHandlerStageService {
     private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
     /** Tool sequence number of the read_diff the code stage runs before its first answer. */
     private static final int PRE_EDIT_DIFF_SEQUENCE = 1099;
+    /** The most of an earlier round's diff a rework round's first message carries. */
+    private static final int MAX_CURRENT_DIFF_CHARACTERS = 8_000;
     /**
      * The lines the request itself names, read before the first answer. On the four measured
      * haiku Jobs of one request the model spent two to three answers finding the quoted
@@ -426,7 +428,7 @@ public final class CodingHandlerStageService {
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(),
                 initialMessages(request.handlerKey(), aggregate, false,
-                        objectMapper.createArrayNode(), objectMapper.createArrayNode()),
+                        objectMapper.createArrayNode(), objectMapper.createArrayNode(), null),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -524,14 +526,14 @@ public final class CodingHandlerStageService {
                 ? objectMapper.createArrayNode()
                 : targetFileExcerpts(authorization, jobId, request, authority, aggregate,
                         resultId, allowedTools, targets);
-        List<JsonNode> messages = new ArrayList<>(initialMessages(
-                request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
-                targetExcerpts));
         JsonNode latestDiff = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("apply_patch")
                 ? establishDiffBeforeEdits(
                         authorization, jobId, request, authority, aggregate, resultId)
                 : null;
+        List<JsonNode> messages = new ArrayList<>(initialMessages(
+                request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
+                targetExcerpts, currentDiffText(latestDiff)));
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
         // different things - it looked and the change was already there, or it tried and
@@ -1617,7 +1619,8 @@ public final class CodingHandlerStageService {
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             boolean foldHistory,
             ArrayNode targetFileOutlines,
-            ArrayNode targetFileExcerpts) {
+            ArrayNode targetFileExcerpts,
+            String currentDiff) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1700,6 +1703,10 @@ public final class CodingHandlerStageService {
         // The lines the request quotes, already read; left out when nothing was found.
         if (!targetFileExcerpts.isEmpty()) {
             context.set("targetFileExcerpts", targetFileExcerpts);
+        }
+        // What an earlier round of this attempt already changed; left out on a first round.
+        if (currentDiff != null) {
+            context.put("currentDiff", currentDiff);
         }
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -1863,7 +1870,9 @@ public final class CodingHandlerStageService {
                         + "and endLine, not the whole file. targetFileExcerpts, when present, "
                         + "holds the lines the request itself names, already read: edit from "
                         + "them without reading them again, and read only what they do not "
-                        + "show. Open a later "
+                        + "show. currentDiff, when present, is the change an earlier round "
+                        + "of this request already made: continue from it and do not redo "
+                        + "it; call read_diff for it only when it says truncated. Open a later "
                         + "targetFile only when the requested change does not belong in the "
                         + "files already read - every file you read is re-sent with every "
                         + "later answer, so an unneeded read keeps costing until the stage "
@@ -2068,6 +2077,30 @@ public final class CodingHandlerStageService {
      * limit - leaves that file out rather than failing the stage: the outline is a head start,
      * not a precondition.
      */
+    /**
+     * The diff an earlier round of this attempt left, for a rework round's first message. On
+     * b3a872c3 and 543eb70f the second and third code rounds took about two thirds of the code
+     * stage's input tokens: each began from the request alone and searched out the same files
+     * again. Null for an empty diff (a first round) or a refused read_diff; a long diff is cut
+     * at {@link #MAX_CURRENT_DIFF_CHARACTERS}, because the first message is re-sent with every
+     * answer.
+     */
+    static String currentDiffText(JsonNode diff) {
+        if (diff == null) {
+            return null;
+        }
+        String text = diff.path("diff").asText("");
+        if (text.isEmpty()) {
+            return null;
+        }
+        if (text.length() <= MAX_CURRENT_DIFF_CHARACTERS) {
+            return text;
+        }
+        return text.substring(0, MAX_CURRENT_DIFF_CHARACTERS)
+                + "\n(truncated: the diff is " + text.length()
+                + " characters; read_diff shows it whole)";
+    }
+
     /**
      * Runs the code stage's first read_diff itself, before the model's first answer.
      * apply_patch refuses an edit until a read_diff has established the current diff digest,

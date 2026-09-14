@@ -768,6 +768,106 @@ class CodingHandlerStageServiceTest {
         verify(fixture.gateway(), times(4)).chat(any());
     }
 
+    /*
+     * AI04-034 carry-over: on b3a872c3 and 543eb70f the second and third code rounds took about
+     * two thirds of the code stage's input tokens, because each began from the request alone
+     * and searched out the same files again. A rework round's first message now carries the
+     * diff the earlier round left, read by the stage's own read_diff before the first answer.
+     */
+    @Test
+    void aReworkRoundStartsFromTheDiffTheEarlierRoundLeft() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerContract.HandlerResultResponse firstRound =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.fromString("12121212-1212-4121-8121-121212121212"),
+                        JOB, TRACE, 1, "coding.code",
+                        CodingHandlerContract.ResultType.CANDIDATE, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, null,
+                        mapper.createObjectNode().put("summary", "first round"), NOW);
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(firstRound), "Implement the approved change.");
+        String diff = "diff --git a/src/App.java b/src/App.java\n+    int changed = 1;\n";
+        answerToolsByRequest(fixture, new ArrayList<>(),
+                toolRequest -> jsonResult(fixture, diffJsonWith(diff)));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        assertThat(mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("currentDiff").asText()).isEqualTo(diff);
+        assertThat(routed.getValue().messages().get(0).content())
+                .contains("currentDiff, when present");
+    }
+
+    /* A first round's diff is empty, so its first message carries no currentDiff. */
+    @Test
+    void aFirstRoundCarriesNoCurrentDiff() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        answerToolsByRequest(fixture, new ArrayList<>(),
+                toolRequest -> jsonResult(fixture, diffJsonWith("")));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        assertThat(mapper.readTree(firstUserMessage(routed.getValue()))
+                .has("currentDiff")).isFalse();
+    }
+
+    /* A refused stage read_diff leaves nothing to carry; the model reads the diff itself. */
+    @Test
+    void aRefusedStageReadDiffCarriesNoCurrentDiff() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenThrow(new CodingToolException(
+                        "TOOL_EXECUTION_FAILED", "The MCP coding tool refused the call.",
+                        org.springframework.http.HttpStatus.BAD_GATEWAY))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", DIFF_CALL, "{}"),
+                terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(routed.capture());
+        assertThat(mapper.readTree(firstUserMessage(routed.getAllValues().get(0)))
+                .has("currentDiff")).isFalse();
+    }
+
+    /* The first message is re-sent with every answer, so a long diff is cut at 8,000 characters. */
+    @Test
+    void aLongCurrentDiffIsCutAtTheCap() {
+        ObjectMapper mapper = new ObjectMapper();
+        String longDiff = "+" + "x".repeat(8_999);
+        String carried = CodingHandlerStageService.currentDiffText(
+                mapper.createObjectNode().put("diff", longDiff));
+        assertThat(carried).startsWith(longDiff.substring(0, 8_000));
+        assertThat(carried).contains("(truncated: the diff is 9000 characters");
+        assertThat(carried.length()).isLessThan(8_100);
+        assertThat(CodingHandlerStageService.currentDiffText(null)).isNull();
+        assertThat(CodingHandlerStageService.currentDiffText(
+                mapper.createObjectNode().put("diff", ""))).isNull();
+    }
+
+    private static String diffJsonWith(String diff) {
+        return "{\"workspaceId\":\"" + WORKSPACE + "\","
+                + "\"baseSha\":\"" + BASE_SHA + "\","
+                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                + "\"digest\":\"" + DIFF_DIGEST + "\","
+                + "\"changedPaths\":[\"src/App.java\"],"
+                + "\"diff\":" + new ObjectMapper().valueToTree(diff) + "}";
+    }
+
     /** A feasible analysis naming the given target files, as approval 1 stored it. */
     private static CodingHandlerContract.HandlerResultResponse analysisNaming(
             ObjectMapper mapper, String... targetFiles) {

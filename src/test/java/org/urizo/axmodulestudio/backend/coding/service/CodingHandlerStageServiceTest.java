@@ -75,7 +75,8 @@ class CodingHandlerStageServiceTest {
             ProviderChatGatewayPort gateway,
             CodingToolService toolService,
             AtomicReference<UUID> submittedToolCall,
-            CodingHandlerContract.StageExecutionRequest request) { }
+            CodingHandlerContract.StageExecutionRequest request,
+            GuardrailPathSelectionService selections) { }
 
     private static StageFixture stageFixture(ObjectMapper mapper) {
         return stageFixture(mapper, bindingPolicy(mapper));
@@ -142,10 +143,11 @@ class CodingHandlerStageServiceTest {
         // The profile always resolves to a binding in production: resolve either returns
         // a list or throws, so the stage never hands the turn service a null selection.
         when(anyBindings.resolve(any(), any(), any(), any())).thenReturn(List.of(registration));
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
         CodingHandlerStageService service = new CodingHandlerStageService(
                 resultService, toolService, guard, modelService,
                 mock(CodingRunnerService.class), mock(DeploymentAdapter.class), anyBindings,
-                mock(GuardrailPathSelectionService.class),
+                selections,
                 mock(GuardrailRuleService.class), mapper, clock,
                 120, Duration.ofMillis(500), toolHistoryKeep, readOnlyAnswerLimit);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
@@ -194,7 +196,8 @@ class CodingHandlerStageServiceTest {
         return new StageFixture(
                 service, gateway, toolService, submittedToolCall,
                 new CodingHandlerContract.StageExecutionRequest(
-                        "1.0", TRACE, 4, 1, "coding.code", RESULT));
+                        "1.0", TRACE, 4, 1, "coding.code", RESULT),
+                selections);
     }
 
     private static org.mockito.stubbing.Answer<CodingToolContract.Accepted> acceptedSubmit(
@@ -866,6 +869,164 @@ class CodingHandlerStageServiceTest {
                 + "\"digest\":\"" + DIFF_DIGEST + "\","
                 + "\"changedPaths\":[\"src/App.java\"],"
                 + "\"diff\":" + new ObjectMapper().valueToTree(diff) + "}";
+    }
+
+    /*
+     * AI04-034 fence search: Jobs 3d4b364e and 3c9062a8 left TourPortal.tsx - the file every
+     * phrase of the request lives in - out of the target files, and the excerpt came back
+     * empty. A phrase no target holds is now searched in the Job's fence folders, and the one
+     * file holding it on a code line is read and excerpted like a target.
+     */
+    @Test
+    void aPhraseNoTargetHoldsIsFoundInTheFenceAndExcerpted() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java")),
+                "'진행 중만 보기' 버튼을 추가해줘");
+        when(fixture.selections().jobSnapshot(JOB)).thenReturn(List.of(
+                "frontend:src/features/site", "frontend:src/features/site"));
+        String screen = "export function PortalHome() {\n  const shown = 1;\n"
+                + "  return <button>진행 중만 보기</button>;\n}\n";
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest -> {
+            String name = toolRequest.path("tool").path("name").asText();
+            String path = toolRequest.path("tool").path("arguments").path("path").asText("");
+            if ("search_code".equals(name)) {
+                return jsonResult(fixture, searchJson(false,
+                        "src/features/site/Portal.tsx", 3,
+                        "  return <button>진행 중만 보기</button>;"));
+            }
+            if ("read_file".equals(name)) {
+                return textResult(fixture, "src/Small.java".equals(path) ? SMALL_JAVA : screen);
+            }
+            return jsonResult(fixture, diffJson());
+        });
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        // The target's outline read, one search (the repeated folder counts once), one read of
+        // the file the search named, then the stage's read_diff.
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "search_code", "read_file", "read_diff");
+        JsonNode search = submitted.get(1).path("tool").path("arguments");
+        assertThat(search.path("query").asText()).isEqualTo("진행 중만 보기");
+        assertThat(search.path("roots").get(0).asText()).isEqualTo("src/features/site");
+        assertThat(submitted.get(2).path("tool").path("arguments").path("path").asText())
+                .isEqualTo("src/features/site/Portal.tsx");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("path").asText())
+                .isEqualTo("src/features/site/Portal.tsx");
+        assertThat(excerpts.get(0).path("startLine").asInt()).isEqualTo(1);
+        assertThat(excerpts.get(0).path("content").asText()).contains("진행 중만 보기");
+    }
+
+    /*
+     * The measured case: '진행 중' sat on code lines of portal-meta.ts and portal-meta.test.ts.
+     * Two files name neither surely, a phrase only a test holds is not the screen, and a
+     * cut-off result may hide a second file - none of them adds an excerpt or a read.
+     */
+    @Test
+    void aFenceMatchInTwoFilesOnlyInATestOrCutOffIsNotUsed() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        List<String> searchResults = List.of(
+                "{\"matches\":[{\"path\":\"src/features/site/portal-meta.ts\",\"line\":100,"
+                        + "\"column\":3,\"preview\":\"  if (now >= start) return '진행 중'\"},"
+                        + "{\"path\":\"src/features/site/portal-meta.test.ts\",\"line\":98,"
+                        + "\"column\":3,\"preview\":\"  expect(badge).toBe('진행 중')\"}],"
+                        + "\"truncated\":false}",
+                searchJson(false, "src/features/site/Portal.test.tsx", 12,
+                        "  expect(screen.getByText('진행 중')).toBeVisible()"),
+                searchJson(true, "src/features/site/portal-meta.ts", 100,
+                        "  if (now >= start) return '진행 중'"));
+        for (String searchResult : searchResults) {
+            StageFixture fixture = stageFixture(
+                    mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                    List.of(analysisNaming(mapper, "src/Small.java")),
+                    "'진행 중' 카드만 남겨줘");
+            when(fixture.selections().jobSnapshot(JOB))
+                    .thenReturn(List.of("frontend:src/features/site"));
+            List<JsonNode> submitted = new ArrayList<>();
+            answerToolsByRequest(fixture, submitted, toolRequest -> {
+                String name = toolRequest.path("tool").path("name").asText();
+                if ("search_code".equals(name)) {
+                    return jsonResult(fixture, searchResult);
+                }
+                if ("read_file".equals(name)) {
+                    return textResult(fixture, SMALL_JAVA);
+                }
+                return jsonResult(fixture, diffJson());
+            });
+            when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+            fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+            assertThat(submitted)
+                    .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                    .containsExactly("read_file", "search_code", "read_diff");
+            ArgumentCaptor<ProviderChatRequest> routed =
+                    ArgumentCaptor.forClass(ProviderChatRequest.class);
+            verify(fixture.gateway()).chat(routed.capture());
+            assertThat(mapper.readTree(firstUserMessage(routed.getValue()))
+                    .has("targetFileExcerpts")).isFalse();
+        }
+    }
+
+    /* Without a fence the phrase is searched from the repository root. */
+    @Test
+    void withoutAFenceThePhraseIsSearchedFromTheRepositoryRoot() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java")),
+                "'진행 중만 보기' 버튼을 추가해줘");
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest ->
+                "read_file".equals(toolRequest.path("tool").path("name").asText())
+                        ? textResult(fixture, SMALL_JAVA)
+                        : jsonResult(fixture, diffJson()));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "search_code", "read_diff");
+        assertThat(submitted.get(1).path("tool").path("arguments").path("roots").get(0).asText())
+                .isEqualTo(".");
+    }
+
+    @Test
+    void fenceFoldersAreDistinctCappedAndFallBackToTheRootAndTestFilesAreRecognised() {
+        assertThat(CodingHandlerStageService.fenceFolders(List.of(
+                "frontend:src/a", "backend:src/b", "frontend:src/a", "frontend:src/c",
+                "frontend:src/d")))
+                .containsExactly("src/a", "src/b", "src/c");
+        assertThat(CodingHandlerStageService.fenceFolders(List.of())).containsExactly(".");
+        assertThat(CodingHandlerStageService.fenceFolders(null)).containsExactly(".");
+        assertThat(CodingHandlerStageService.isTestFile("src/features/site/portal-meta.test.ts"))
+                .isTrue();
+        assertThat(CodingHandlerStageService.isTestFile("src/main/java/demo/FooTest.java"))
+                .isTrue();
+        assertThat(CodingHandlerStageService.isTestFile("src/test/java/demo/Foo.java")).isTrue();
+        assertThat(CodingHandlerStageService.isTestFile("src/features/site/TourPortal.tsx"))
+                .isFalse();
+    }
+
+    private static String searchJson(boolean truncated, String path, int line, String preview) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode result = mapper.createObjectNode();
+        result.putArray("matches").addObject()
+                .put("path", path).put("line", line).put("column", 1).put("preview", preview);
+        result.put("truncated", truncated);
+        return result.toString();
     }
 
     /** A feasible analysis naming the given target files, as approval 1 stored it. */

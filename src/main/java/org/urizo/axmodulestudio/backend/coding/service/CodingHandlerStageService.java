@@ -2156,28 +2156,48 @@ public final class CodingHandlerStageService {
             }
         }
         for (int index = 0; index < targets.size(); index++) {
-            String path = targets.get(index);
-            try {
-                JsonNode read = executeDeterministicTool(
-                        authorization, jobId, request, authority, aggregate, resultId,
-                        TARGET_OUTLINE_SEQUENCE_BASE + index, "read_file",
-                        objectMapper.createObjectNode().put("path", path));
-                // Counted the way read_file counts, so a later ranged read lands on these lines.
-                String[] lines = read.path("content").asText("").split("\n", -1);
-                files.add(new TargetFile(path,
-                        lines.length + " lines." + CodingToolService.fileOutline(path, lines),
-                        lines));
-            }
-            catch (CodingToolException refused) {
-                if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
-                        || !String.valueOf(refused.getMessage())
-                                .contains("too large to read whole")) {
-                    continue;
-                }
-                files.add(new TargetFile(path, refused.getMessage(), null));
+            TargetFile file = readTargetFile(authorization, jobId, request, authority,
+                    aggregate, resultId, TARGET_OUTLINE_SEQUENCE_BASE + index, targets.get(index));
+            if (file != null) {
+                files.add(file);
             }
         }
         return files;
+    }
+
+    /**
+     * Reads one file the way the code stage outlines a target: whole, or - when the workspace
+     * refuses it as too large - through the refusal, which already carries the line count and
+     * the declarations. Null when the workspace will not return it at all.
+     */
+    private TargetFile readTargetFile(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            int sequence,
+            String path) {
+        try {
+            JsonNode read = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    sequence, "read_file",
+                    objectMapper.createObjectNode().put("path", path));
+            // Counted the way read_file counts, so a later ranged read lands on these lines.
+            String[] lines = read.path("content").asText("").split("\n", -1);
+            return new TargetFile(path,
+                    lines.length + " lines." + CodingToolService.fileOutline(path, lines),
+                    lines);
+        }
+        catch (CodingToolException refused) {
+            if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
+                    || !String.valueOf(refused.getMessage())
+                            .contains("too large to read whole")) {
+                return null;
+            }
+            return new TargetFile(path, refused.getMessage(), null);
+        }
     }
 
     private ArrayNode outlineNodes(List<TargetFile> files) {
@@ -2214,19 +2234,30 @@ public final class CodingHandlerStageService {
             String phrase = phrases.get(phraseIndex);
             TargetFile found = null;
             int line = 0;
+            int holders = 0;
             for (int index = 0; index < files.size(); index++) {
                 int match = firstCodeMatch(authorization, jobId, request, authority, aggregate,
                         resultId, allowedTools, files.get(index), index, phrase, phraseIndex);
                 if (match <= 0) {
                     continue;
                 }
-                if (found != null) {
-                    // Two target files hold the phrase: neither is surely the one.
-                    found = null;
-                    break;
-                }
+                holders++;
                 found = files.get(index);
                 line = match;
+            }
+            if (holders > 1) {
+                // Two target files hold the phrase: neither is surely the one.
+                continue;
+            }
+            if (holders == 0) {
+                // No target holds it: the analysis may have picked the wrong files.
+                FenceMatch fence = fenceMatch(authorization, jobId, request, authority,
+                        aggregate, resultId, allowedTools, files, phrase, phraseIndex);
+                if (fence == null) {
+                    continue;
+                }
+                found = fence.file();
+                line = fence.line();
             }
             if (found == null || line <= 0) {
                 continue;
@@ -2316,6 +2347,102 @@ public final class CodingHandlerStageService {
         catch (CodingToolException refused) {
             return 0;
         }
+    }
+
+    /** Tool sequence numbers of the fence searches (one per folder and phrase) and fence reads. */
+    private static final int FENCE_SEARCH_SEQUENCE_BASE = 1400;
+    private static final int FENCE_READ_SEQUENCE_BASE = 1500;
+    /** The most fence folders one phrase is searched in. */
+    private static final int MAX_FENCE_SEARCH_FOLDERS = 3;
+
+    /** The one file outside the targets that holds a phrase, and the line it holds it on. */
+    private record FenceMatch(TargetFile file, int line) { }
+
+    /**
+     * Where a phrase no target file holds actually is. The analysis picks target files by name
+     * alone, and Jobs 3d4b364e and 3c9062a8 left out TourPortal.tsx - the file every phrase the
+     * request quoted lives in - so the excerpt came back empty and 3c9062a8 wandered for 24
+     * answers. Each folder of the Job's fence is searched once for the phrase (the repository
+     * root without a fence). The phrase is adopted only when exactly one file holds it on a
+     * code line, counting tests, and that file is not a test: a match in two files, only in a
+     * test, or in a cut-off result names no file surely, so nothing is added, as before. The
+     * adopted file is then read the way a target is.
+     */
+    private FenceMatch fenceMatch(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            List<TargetFile> targets,
+            String phrase,
+            int phraseIndex) {
+        if (!allowedTools.contains("search_code")) {
+            return null;
+        }
+        List<String> folders = fenceFolders(guardrailSelections.jobSnapshot(aggregate.jobId()));
+        java.util.Map<String, Integer> holders = new java.util.LinkedHashMap<>();
+        for (int folderIndex = 0; folderIndex < folders.size(); folderIndex++) {
+            JsonNode found;
+            try {
+                found = executeDeterministicTool(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        FENCE_SEARCH_SEQUENCE_BASE + folderIndex * MAX_EXCERPT_PHRASES
+                                + phraseIndex,
+                        "search_code",
+                        objectMapper.createObjectNode()
+                                .put("query", phrase).put("scope", folders.get(folderIndex)));
+            }
+            catch (CodingToolException refused) {
+                continue;
+            }
+            if (found.path("truncated").asBoolean(false)) {
+                return null;
+            }
+            for (JsonNode match : found.path("matches")) {
+                String path = match.path("path").asText("");
+                if (!path.isEmpty() && isCodeLine(match.path("preview").asText(""))) {
+                    holders.putIfAbsent(path, match.path("line").asInt(0));
+                }
+            }
+        }
+        if (holders.size() != 1) {
+            return null;
+        }
+        java.util.Map.Entry<String, Integer> only = holders.entrySet().iterator().next();
+        if (isTestFile(only.getKey()) || only.getValue() <= 0
+                || targets.stream().anyMatch(target -> target.path().equals(only.getKey()))) {
+            return null;
+        }
+        TargetFile file = readTargetFile(authorization, jobId, request, authority, aggregate,
+                resultId, FENCE_READ_SEQUENCE_BASE + phraseIndex, only.getKey());
+        return file == null ? null : new FenceMatch(file, only.getValue());
+    }
+
+    /**
+     * The folders of the Job's fence, read the way the analysis check reads them (the part
+     * after the repository label), at most {@link #MAX_FENCE_SEARCH_FOLDERS}; the repository
+     * root when the Job has no fence.
+     */
+    static List<String> fenceFolders(List<String> snapshot) {
+        List<String> folders = snapshot == null ? List.of() : snapshot.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .distinct()
+                .limit(MAX_FENCE_SEARCH_FOLDERS)
+                .toList();
+        return folders.isEmpty() ? List.of(".") : folders;
+    }
+
+    /** A test source: its text is not the screen the request is about. */
+    static boolean isTestFile(String path) {
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        return name.contains(".test.") || name.contains(".spec.")
+                || name.endsWith("Test.java") || name.endsWith("Tests.java")
+                || name.endsWith("Test.kt") || path.startsWith("test/")
+                || path.contains("/test/") || path.contains("__tests__/");
     }
 
     /**

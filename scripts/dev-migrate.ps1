@@ -29,7 +29,9 @@ try {
     $env:AXMS_MIGRATION_PASSWORD = $migrationPassword
     Push-Location $repositoryRoot
     try {
-        & '.\mvnw.cmd' -o '-Dflyway.validateMigrationNaming=true' flyway:migrate flyway:info
+        # Same local DB as the flyway-migration service: accept an earlier revision merged
+        # after a later one was already applied (see compose.dev.yaml).
+        & '.\mvnw.cmd' -o '-Dflyway.validateMigrationNaming=true' '-Dflyway.outOfOrder=true' flyway:migrate flyway:info
         if ($LASTEXITCODE -ne 0) {
             throw 'Flyway migration or history verification failed.'
         }

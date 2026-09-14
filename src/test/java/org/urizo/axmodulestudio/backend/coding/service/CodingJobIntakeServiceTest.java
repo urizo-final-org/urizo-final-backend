@@ -281,8 +281,8 @@ class CodingJobIntakeServiceTest {
     }
 
     /**
-     * Left to the general rule, "show only the running ones" was split and its server half had
-     * nothing to do. The instruction now says which side picking from a shown list belongs to,
+     * Left to the general rule, "show only the running ones" was split and its server half ran
+     * first and failed. The instruction now says which side picking from a shown list belongs to,
      * and keeps both for a value the screen does not have yet.
      */
     @Test

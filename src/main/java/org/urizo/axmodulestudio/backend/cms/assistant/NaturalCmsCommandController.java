@@ -73,6 +73,21 @@ public final class NaturalCmsCommandController {
         return store.decide(actor(authentication), jobId, request);
     }
 
+    /**
+     * 멎은 Job을 닫는다.
+     *
+     * <p>{@code /decisions}는 승인할 미리보기가 있어야 하고, 반려해도 종결은 {@code cms.discard}
+     * 단계가 한다. 파이프라인이 멎으면 두 조건 모두 성립하지 않는다. 이 경로는 끝나지 않은
+     * Job을 단계 없이 사유와 함께 닫는다.
+     */
+    @PostMapping("/{jobId}/cancel")
+    NaturalCmsContract.JobResponse cancel(
+            @PathVariable UUID jobId,
+            @Valid @RequestBody NaturalCmsContract.CancelJobRequest request,
+            Authentication authentication) {
+        return store.cancel(actor(authentication), jobId, request);
+    }
+
     @ExceptionHandler(NaturalCmsException.class)
     ResponseEntity<Map<String, Object>> naturalCmsFailure(NaturalCmsException failure) {
         return ResponseEntity.status(failure.status()).body(Map.of(

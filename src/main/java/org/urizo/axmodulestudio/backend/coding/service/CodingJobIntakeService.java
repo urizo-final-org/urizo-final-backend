@@ -72,9 +72,13 @@ public class CodingJobIntakeService {
      * The classifier's whole instruction. firstText/secondText are shown to the requester and
      * become the two Jobs' request sentences, so they are written in the requester's register -
      * a wrong word here surfaces on the screen verbatim.
+     *
+     * <p>Picking from what a screen already shows is named as screen work. Left to the general
+     * rule, "show only the running ones" was split, and its server half had nothing to do: it
+     * spent its turns and failed (Jobs 8e8a728b, 375651f7), so the screen half was never sent.
      */
     private static final String CLASSIFY_PROMPT = """
-            당신은 CMS 개발 요청의 접수 분류기입니다. 요청 문장을 읽고 다음 중 하나로만             판정합니다. server: 저장되는 값, 목록·조회 응답에 담기는 내용, 계산·검증 규칙 등             눈에 보이지 않는 동작을 바꾸는 요청. screen: 화면에 보이는 칸·순서·제목·문구·배치 등             이미 내려오는 내용을 보여주는 방식만 바꾸는 요청. both: 화면에 새로 보여야 하는 값이             있는데 그 값을 내려주는 동작도 함께 만들어야 하는 요청. 확신이 없으면 both 가 아니라             더 그럴듯한 한쪽을 고릅니다. both 일 때만 firstText 에 값을 준비하는 일을,             secondText 에 화면에 보여주는 일을 각각 요청자가 쓴 말투 그대로 한 문장씩 씁니다.             개발 용어, 파일명, 저장소 이름을 절대 쓰지 않습니다. both 가 아니면 firstText 와             secondText 는 빈 문자열로 둡니다.""";
+            당신은 CMS 개발 요청의 접수 분류기입니다. 요청 문장을 읽고 다음 중 하나로만             판정합니다. server: 저장되는 값, 목록·조회 응답에 담기는 내용, 계산·검증 규칙 등             눈에 보이지 않는 동작을 바꾸는 요청. screen: 화면에 보이는 칸·순서·제목·문구·배치 등             이미 내려오는 내용을 보여주는 방식만 바꾸는 요청. both: 화면에 새로 보여야 하는 값이             있는데 그 값을 내려주는 동작도 함께 만들어야 하는 요청. 화면에 이미 나오는 목록·카드·항목을 고르기·거르기·정렬·묶기·숨기기 하거나 그것을 켜고 끄는 버튼·탭을 만드는 요청은 screen 입니다. both 는 화면에 지금 없는 새 값을 새로 저장하거나 새로 계산해 내려줘야 할 때만 고릅니다. 예를 들어 '진행 중인 항목만 골라 보여주기'는 screen, '목록에 지금은 없는 조회수를 보여주기'는 both 입니다. 확신이 없으면 both 가 아니라             더 그럴듯한 한쪽을 고릅니다. both 일 때만 firstText 에 값을 준비하는 일을,             secondText 에 화면에 보여주는 일을 각각 요청자가 쓴 말투 그대로 한 문장씩 씁니다.             개발 용어, 파일명, 저장소 이름을 절대 쓰지 않습니다. both 가 아니면 firstText 와             secondText 는 빈 문자열로 둡니다.""";
 
     /**
      * All three, including STRUCTURED_OUTPUT. A Job that omits it is accepted and then refused

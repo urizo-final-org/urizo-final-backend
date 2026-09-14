@@ -87,7 +87,11 @@ services:
         export AXMS_DB_URL=jdbc:postgresql://database:5432/ax_module_studio
         export AXMS_MIGRATION_PASSWORD="$$(< "$$password_file")"
         export MAVEN_OPTS="-Djansi.force=false -Djansi.tmpdir=/workspace/target"
+        # Revisions are reserved by UTC time but merged whenever their PR lands, so a DB that
+        # already holds a later revision must still accept an earlier one merged after it
+        # (AI05-019 20260911052249613 arrived after 20260911060503254 was applied).
         mvn -o -B -ntp -Dstyle.color=never -Dflyway.validateMigrationNaming=true \
+          -Dflyway.outOfOrder=true \
           flyway:migrate flyway:validate flyway:info
         status=$$?
         unset MAVEN_OPTS

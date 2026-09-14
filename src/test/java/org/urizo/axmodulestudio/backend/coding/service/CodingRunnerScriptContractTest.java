@@ -28,8 +28,10 @@ class CodingRunnerScriptContractTest {
                 .contains("function Invoke-CheckDevMerge")
                 .contains("'CHECK_DEV_MERGE'")
                 .contains("function Invoke-LocalDockerComposeDeployment")
-                .contains("-Service spring-app -Profile full")
-                .contains("-Service frontend -Profile full")
+                // A child powershell.exe takes the deploy as an argument array (AI04-022), so the
+                // fixed target is read from the service map and the array, not one command line.
+                .contains("$service = @{ backend = 'spring-app'; frontend = 'frontend' }")
+                .contains("'-Service', $service, '-Profile', 'full'")
                 .contains("'DEPLOY_LOCAL_COMPOSE'")
                 .doesNotContain("Invoke-Expression")
                 .doesNotContain("deployedPort");
@@ -61,7 +63,7 @@ class CodingRunnerScriptContractTest {
                 .contains("fetch origin dev:refs/remotes/origin/dev")
                 .contains("merge-base --is-ancestor $rawMergeSha origin/dev")
                 .contains("worktree add --detach $target $rawMergeSha")
-                .contains("-SourceRoot $sourceRoot")
+                .contains("'-SourceRoot', \"`\"$sourceRoot`\"\"")
                 .contains("RUNNER_GITHUB_TRANSIENT|push")
                 .contains("RUNNER_DEPLOY_TRANSIENT|origin/dev fetch");
         assertThat(githubApp).contains("RUNNER_PR_SUBJECT_BLOCKED|staged Diff");

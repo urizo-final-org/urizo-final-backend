@@ -178,6 +178,27 @@ function New-ServiceTokenFile {
     Protect-LocalPath -LiteralPath $path
 }
 
+# 커넥터 원천 인증 값은 공공데이터포털에서 발급받는 것이라 이 스크립트가 만들어 줄 수 없다.
+# 그렇다고 파일을 없는 채로 두면 Compose가 file Secret을 stat하지 못해 spring-app이 기동조차
+# 하지 못한다 — 커넥터를 쓰지 않는 팀원 PC까지 함께 막힌다. 그래서 빈 파일만 놓아 둔다.
+#
+# 가짜 값을 넣지 않는 이유: ConnectorSecretResolver가 빈 값을 "Connector secret is empty"로
+# 수집 시점에 명확히 거절한다. 그럴듯한 가짜 키를 넣으면 원천이 401을 돌려주고 원인이
+# 한 겹 더 숨는다. 이미 실제 값이 든 파일은 건드리지 않는다.
+function New-ConnectorSecretPlaceholder {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $path = Join-Path $secretDirectory $Name
+    if (Test-Path -LiteralPath $path) {
+        # 디렉터리면 이 수정 이전에 Compose가 남긴 흔적이다. 원인과 조치를 그쪽이 알려준다.
+        [void](Get-SecretFileLength -Path $path -Name $Name)
+    }
+    else {
+        [System.IO.File]::WriteAllText($path, '', [System.Text.UTF8Encoding]::new($false))
+    }
+    Protect-LocalPath -LiteralPath $path
+}
+
 Protect-LocalPath -LiteralPath $secretDirectory
 New-PasswordFile -Name 'postgres_superuser_password'
 New-PasswordFile -Name 'migration_owner_password'
@@ -193,5 +214,9 @@ New-CheckpointEncryptionKeyFile
 New-ValkeyAclFile
 New-ServiceTokenFile -Name 'coding_model_bridge_service_token'
 New-ServiceTokenFile -Name 'mcp_service_token'
+New-ConnectorSecretPlaceholder -Name 'connector_tour_api'
+New-ConnectorSecretPlaceholder -Name 'connector_sme_support_api'
 
 Write-Output "Local encrypted-secret material is ready under $secretDirectory (values not displayed)."
+Write-Output ("Connector source keys are placeholders. RAG collection needs a real key written into " +
+    "$secretDirectory\connector_<name>; every other feature runs without them.")

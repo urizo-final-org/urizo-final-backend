@@ -602,10 +602,16 @@ class CodingHandlerStageServiceTest {
         // Files open one at a time: an unused read is re-sent with every later answer
         // (5,827 tokens x 8 answers on Job 60401f37), so the stage is told to open the
         // first targetFile and reach for the next only when the change does not fit.
+        // Reads already known to be needed are grouped instead: told only that grouping
+        // was allowed, haiku grouped one answer of twelve (Job 3d4b364e).
         assertThat(routed.getAllValues().get(0).prompt())
                 .contains("start with the first targetFile")
                 .contains("read_file only that range")
-                .contains("Open a later");
+                .contains("Open a later")
+                .contains("each extra reading answer is paid for again and again")
+                .contains("you already know you will need")
+                .contains("request one range that covers them")
+                .contains("ranges of it you already know you need may be requested together");
         assertThat(routed.getAllValues().get(1).prompt())
                 .contains("apply_patch succeeded")
                 .contains("stop editing and finish with the stage result")

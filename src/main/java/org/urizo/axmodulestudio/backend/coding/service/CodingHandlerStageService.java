@@ -1710,11 +1710,21 @@ public final class CodingHandlerStageService {
                     // silently loses all but its head. Grouping is asked only for reads that
                     // do not wait on each other: a read guessed before the result it depends on
                     // is a read the stage then carries on every later answer.
-                    ? "When you need several read_file or search_code results that do not "
-                        + "depend on each other, request them together in one answer, up to "
-                        + MAX_BATCHED_READS + "; they run in the order given. Do not group a "
-                        + "read whose path or range depends on an earlier result - wait for "
-                        + "that result. Every other tool goes alone in its answer: an answer "
+                    // Measured on Job 3d4b364e: told only that grouping was allowed, haiku
+                    // grouped one answer of twelve; three unrelated reads went out one per
+                    // answer, and 13,873 input tokens rode on the two answers grouping would
+                    // have saved. The cost and what to group are therefore said out loud.
+                    ? "Every later answer re-sends the whole conversation, so each extra "
+                        + "reading answer is paid for again and again. Before an answer that "
+                        + "reads, decide every read_file or search_code you already know you "
+                        + "will need - the lines to change and the definition or helper those "
+                        + "lines use once its location is known - and request them together "
+                        + "in that one answer, up to " + MAX_BATCHED_READS + "; they run in "
+                        + "the order given. Only a read whose path or range you cannot know "
+                        + "until an earlier result arrives waits for that result. When you "
+                        + "need several nearby ranges of one file, request one range that "
+                        + "covers them instead of several overlapping reads. Every other tool "
+                        + "goes alone in its answer: an answer "
                         + "that mixes it with other calls runs only its first call, and reads "
                         + "past the " + MAX_BATCHED_READS + "th are not run. "
                         // apply_patch's own result carries the final diff digest (measured,
@@ -1737,7 +1747,8 @@ public final class CodingHandlerStageService {
                         // 46k tokens for a file no edit touched. Every read is permanent
                         // conversation weight, so files are opened one at a time.
                         + "this change from the guardrail's own list: start with the first "
-                        + "targetFile. "
+                        + "targetFile - ranges of it you already know you need may be "
+                        + "requested together. "
                         // Measured on Job 45593ba8: refused a whole 558-line screen file, the
                         // model read lines 1-130 and 130-300 to land two edits at 162 and 230,
                         // and both reads rode along on fifteen later answers.

@@ -37,11 +37,39 @@ public final class PublicChatContract {
      * 이력 전체가 아니라 직전 한 건만 받는다: 대명사를 푸는 데 필요한 것은 직전 턴이고,
      * 목록으로 열어 두면 익명 호출자가 임베딩 입력 길이를 마음대로 늘릴 수 있다.
      */
+    /**
+     * {@code projectId}는 어느 도메인 포털에서 물었는지다. 프로젝트마다 공개 챗봇이 하나이므로
+     * 이 값으로 챗봇이 정해진다. 비우면 {@code ax.knowledge.public-chatbot-id} 설정으로 떨어진다 —
+     * 포털이 하나뿐이던 경로를 그대로 둔다.
+     */
     public record PublicChatQueryRequest(
             @NotBlank @Size(max = 4000) String query,
             UUID conversationId,
             @Size(max = 8) List<@Size(max = 40) String> category,
-            @Size(max = 4000) String previousQuery) {
+            @Size(max = 4000) String previousQuery,
+            UUID projectId,
+            AnswerStyle answerStyle) {
+
+        /** 생략하면 상세 답변이다 — 이 필드가 생기기 전 호출자의 동작이 그대로 유지된다. */
+        public PublicChatQueryRequest {
+            answerStyle = answerStyle == null ? AnswerStyle.DETAILED : answerStyle;
+        }
+    }
+
+    /**
+     * 답변의 목적. 챗봇과 통합검색이 <b>같은 엔드포인트를 쓰지만 답변이 할 일은 다르다</b>.
+     *
+     * <p>챗봇({@code DETAILED})은 근거 카드 한 장씩을 충분히 풀어 설명한다. 방문자가 카드를
+     * 일일이 열어 보는 자리가 아니라 답변만 읽고 판단하는 자리다.
+     *
+     * <p>통합검색({@code BRIEF})은 결과 목록 <b>위에</b> 놓이는 한 문단이다. 결과 셋을 각각
+     * 길게 풀면 바로 아래 카드와 같은 말을 두 번 하게 되고, 정작 목록을 훑는 일을 방해한다.
+     *
+     * <p>이 구분은 호출자만 안다 — 서버는 어느 화면에서 왔는지 알 방법이 없다.
+     */
+    public enum AnswerStyle {
+        DETAILED,
+        BRIEF
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

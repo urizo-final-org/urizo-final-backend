@@ -74,11 +74,20 @@ public final class ProductApiContract {
         public CreateKnowledgeBaseRequest { requireVersion(schemaVersion); }
     }
 
+    /**
+     * {@code connectorVersionId}는 문서 집합을 만드는 BASE 원천이다. {@code overlayConnectorVersionIds}는
+     * 문서를 만들지 않고 같은 문서에 필드만 더하는 보조 원천이며, 생략하면 기존 단일 원천 빌드와 같다.
+     */
     public record StartKnowledgeBuildRequest(
             @NotBlank String schemaVersion,
             @NotNull UUID connectorVersionId,
+            @Size(max = 4) List<UUID> overlayConnectorVersionIds,
             @Size(max = 120) String label) {
-        public StartKnowledgeBuildRequest { requireVersion(schemaVersion); }
+        public StartKnowledgeBuildRequest {
+            requireVersion(schemaVersion);
+            overlayConnectorVersionIds = overlayConnectorVersionIds == null
+                    ? List.of() : List.copyOf(overlayConnectorVersionIds);
+        }
     }
 
     public record StateMutationRequest(
@@ -210,6 +219,8 @@ public final class ProductApiContract {
             String name,
             String description,
             @JsonInclude(JsonInclude.Include.ALWAYS) UUID activeVersionId,
+            /** AI02-022. 원천 변경 점검 요약. null이면 아직 점검된 적 없는 지식베이스다. */
+            JsonNode sourceChangeSummary,
             Instant createdAt) {
     }
 
@@ -235,6 +246,10 @@ public final class ProductApiContract {
             int documentCount,
             int chunkCount,
             Double score,
+            /** AI02-018. 이 버전이 쓴 청킹 규칙. null이면 문서당 1청크로 만든 버전이다. */
+            JsonNode chunkingStrategy,
+            /** AI02-019. 빌드가 잰 검색 평가. null이면 평가 전에 만들어진 버전이다. */
+            JsonNode evaluation,
             Instant createdAt,
             Instant readyAt,
             Instant activatedAt) {

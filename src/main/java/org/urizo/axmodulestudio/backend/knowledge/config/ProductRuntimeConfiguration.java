@@ -29,7 +29,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Profile("local-full")
 @EnableScheduling
 @EnableConfigurationProperties({
-        ProductRuntimeProperties.class, EmbeddingProperties.class, PublicChatLlmProperties.class})
+        ProductRuntimeProperties.class, EmbeddingProperties.class, PublicChatLlmProperties.class,
+        ChunkingLlmProperties.class, EvaluationLlmProperties.class})
 public class ProductRuntimeConfiguration {
 
     @Bean(destroyMethod = "close")

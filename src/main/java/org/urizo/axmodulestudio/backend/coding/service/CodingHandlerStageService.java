@@ -71,6 +71,14 @@ public final class CodingHandlerStageService {
     private static final int MAX_OUTLINED_TARGET_FILES = 3;
     /** Tool sequence numbers of those reads, clear of the answers' own 1 to 24. */
     private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
+    /** Tool sequence number of the read_diff the code stage runs before its first answer. */
+    private static final int PRE_EDIT_DIFF_SEQUENCE = 1099;
+    /**
+     * How many read_file/search_code bodies the code stage keeps unfolded at most, whatever
+     * the fold depth counts. The depth counts answers, and one answer may carry up to
+     * {@link #MAX_BATCHED_READS} reads, so this caps three kept answers at six bodies.
+     */
+    private static final int MAX_KEPT_TOOL_RESULTS = 6;
     /**
      * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
      * of it, so a request of ten thousand characters or a change touching a thousand files is
@@ -456,7 +464,11 @@ public final class CodingHandlerStageService {
                 : objectMapper.createArrayNode();
         List<JsonNode> messages = new ArrayList<>(initialMessages(
                 request.handlerKey(), aggregate, foldHistory, targetOutlines));
-        JsonNode latestDiff = null;
+        JsonNode latestDiff = "coding.code".equals(request.handlerKey())
+                && allowedTools.contains("apply_patch")
+                ? establishDiffBeforeEdits(
+                        authorization, jobId, request, authority, aggregate, resultId)
+                : null;
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
         // different things - it looked and the change was already there, or it tried and
@@ -1730,9 +1742,13 @@ public final class CodingHandlerStageService {
                         // apply_patch's own result carries the final diff digest (measured,
                         // Job 60401f37), and the review stage re-reads the diff itself, so
                         // a read_diff after the last edit only re-buys conversation weight.
-                        + "Use read_diff once before the first apply_patch; after a "
-                        + "successful apply_patch its result already reports the change, so "
-                        + "do not call read_diff again - hand the stage result over. "
+                        // The stage ran that read_diff itself before this answer (measured:
+                        // every Job spent one answer on it), so the model starts editing.
+                        + "The current diff is already established for you, so apply_patch "
+                        + "is available from your first answer: do not call read_diff before "
+                        + "an edit. After a successful apply_patch its result already reports "
+                        + "the change, so do not call read_diff again - hand the stage "
+                        + "result over. "
                         // A measured failure spent four of its turns on a natural-language
                         // query that can never match code and on near-duplicate retries of
                         // searches that had already answered. The budget and the search
@@ -1960,6 +1976,33 @@ public final class CodingHandlerStageService {
      * limit - leaves that file out rather than failing the stage: the outline is a head start,
      * not a precondition.
      */
+    /**
+     * Runs the code stage's first read_diff itself, before the model's first answer.
+     * apply_patch refuses an edit until a read_diff has established the current diff digest,
+     * so every measured Job spent one answer on a read_diff before its first edit
+     * (543eb70f, 3d4b364e, bff4fd0b, 60401f37). The execution is recorded like a model's,
+     * so apply_patch finds its digest the same way; the body is not shown to the model.
+     * It also seeds the stage's diff, so a stage that never edits still ends as an empty
+     * diff rather than as a missing one. A refusal is left to the model's own read_diff,
+     * which the tool's safety net still asks for.
+     */
+    private JsonNode establishDiffBeforeEdits(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId) {
+        try {
+            return executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    PRE_EDIT_DIFF_SEQUENCE, "read_diff", objectMapper.createObjectNode());
+        }
+        catch (CodingToolException refused) {
+            return null;
+        }
+    }
+
     private ArrayNode targetFileOutlines(
             String authorization,
             UUID jobId,
@@ -2026,25 +2069,40 @@ public final class CodingHandlerStageService {
 
     /**
      * Folds every read_file/search_code result older than the last {@code toolHistoryKeep}
-     * of them, in the code stage only. The tool message keeps its ids and result metadata,
-     * and the assistant message that asked for it keeps the call's arguments, so the model
-     * still sees what it read and where - only the body is gone. Already-folded messages
-     * are left as they are, so the same message is never rewritten twice and the request
-     * digest of a retried turn stays what it was.
+     * answers that read, in the code stage only. The tool message keeps its ids and result
+     * metadata, and the assistant message that asked for it keeps the call's arguments, so
+     * the model still sees what it read and where - only the body is gone. Already-folded
+     * messages are left as they are, so the same message is never rewritten twice and the
+     * request digest of a retried turn stays what it was.
+     *
+     * <p>The depth counts answers, not results. Counting results, one answer that grouped
+     * three reads filled the whole depth at once, and from the next answer on every new read
+     * folded a body the model was still working from: on Job 543eb70f all six re-reads of
+     * the code stage came right after the fold of the range they re-read (38% of its input).
+     * The results of one answer stay or fold together; {@link #MAX_KEPT_TOOL_RESULTS} bounds
+     * what three grouped answers can keep.
      */
     private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
             return;
         }
-        int kept = 0;
+        int keptAnswers = 0;
+        int keptResults = 0;
+        int keptAnswer = -1;
         for (int index = messages.size() - 1; index >= 0; index--) {
             JsonNode message = messages.get(index);
             if (!"tool".equals(message.path("role").textValue())
                     || !FOLDABLE_TOOLS.contains(toolNameBefore(messages, index))) {
                 continue;
             }
-            if (++kept <= toolHistoryKeep
-                    || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
+            int answer = answerIndexBefore(messages, index);
+            if (answer != keptAnswer) {
+                keptAnswer = answer;
+                keptAnswers++;
+            }
+            boolean kept = keptAnswers <= toolHistoryKeep
+                    && ++keptResults <= MAX_KEPT_TOOL_RESULTS;
+            if (kept || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
                 continue;
             }
             ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
@@ -2074,19 +2132,26 @@ public final class CodingHandlerStageService {
      */
     private static String toolNameBefore(List<JsonNode> messages, int toolIndex) {
         String toolCallId = messages.get(toolIndex).path("toolCallId").asText("");
-        for (int index = toolIndex - 1; index >= 0; index--) {
-            JsonNode message = messages.get(index);
-            if (!"assistant".equals(message.path("role").textValue())) {
-                continue;
-            }
-            for (JsonNode call : message.path("toolCalls")) {
-                if (toolCallId.equals(call.path("toolCallId").asText())) {
-                    return call.path("name").asText("");
-                }
-            }
+        int answer = answerIndexBefore(messages, toolIndex);
+        if (answer < 0) {
             return "";
         }
+        for (JsonNode call : messages.get(answer).path("toolCalls")) {
+            if (toolCallId.equals(call.path("toolCallId").asText())) {
+                return call.path("name").asText("");
+            }
+        }
         return "";
+    }
+
+    /** The index of the nearest assistant message before a tool result, or -1 without one. */
+    private static int answerIndexBefore(List<JsonNode> messages, int toolIndex) {
+        for (int index = toolIndex - 1; index >= 0; index--) {
+            if ("assistant".equals(messages.get(index).path("role").textValue())) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     /**

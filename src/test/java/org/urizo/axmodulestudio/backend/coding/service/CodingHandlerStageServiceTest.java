@@ -394,9 +394,10 @@ class CodingHandlerStageServiceTest {
 
         fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
 
+        // The stage's own read_diff, then the model's - no read_file before the first answer.
         assertThat(submitted)
                 .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
-                .containsExactly("read_diff");
+                .containsExactly("read_diff", "read_diff");
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(fixture.gateway(), times(2)).chat(routed.capture());
@@ -497,9 +498,11 @@ class CodingHandlerStageServiceTest {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper);
         // The refused call never ran, so the loop must survive it: the refusal reason is
-        // handed back and the corrected exchange finishes the stage.
+        // handed back and the corrected exchange finishes the stage. The first submit is
+        // the stage's own read_diff.
         when(fixture.toolService().submitForNode(
                 eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()))
                 .thenThrow(new CodingToolException(
                         "TOOL_RESULT_NOT_READY",
                         "read_diff must establish the current diff digest first.",
@@ -671,6 +674,16 @@ class CodingHandlerStageServiceTest {
     private static final String READ_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     private static final String READ_C = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
     private static final String READ_D = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+    private static final String READ_E = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    private static final String READ_F = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+    private static final String READ_G = "10101010-1010-4101-8101-101010101010";
+    private static final String READ_H = "20202020-2020-4202-8202-202020202020";
+    private static final String READ_I = "30303030-3030-4303-8303-303030303030";
+    private static final String READ_J = "40404040-4040-4404-8404-404040404040";
+    /** The call id of the read_diff the stage runs itself before the first answer. */
+    private static final String PRE_EDIT_DIFF_CALL = UUID.nameUUIDFromBytes(
+            (RESULT + ":attempt:1:tool:1099:read_diff")
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
 
     /** One answer carrying several reads, the way Claude sends them when it may. */
     private static ProviderChatResponse readsReply(ModelProvider provider, String... callIds) {
@@ -731,7 +744,8 @@ class CodingHandlerStageServiceTest {
                 "Bearer worker", JOB, 1, RESULT, fixture.request());
 
         assertThat(response.resultPort()).isEqualTo("completed");
-        assertThat(submitted).containsExactly(DIFF_CALL, READ_B, READ_C, READ_D);
+        assertThat(submitted).containsExactly(
+                PRE_EDIT_DIFF_CALL, DIFF_CALL, READ_B, READ_C, READ_D);
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(fixture.gateway(), times(3)).chat(routed.capture());
@@ -757,6 +771,7 @@ class CodingHandlerStageServiceTest {
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(recordingSubmit(fixture, submitted))
                 .thenAnswer(recordingSubmit(fixture, submitted))
+                .thenAnswer(recordingSubmit(fixture, submitted))
                 .thenThrow(new CodingToolException(
                         "TOOL_ARGUMENTS_INVALID", "read_file range is invalid.",
                         org.springframework.http.HttpStatus.BAD_REQUEST))
@@ -770,8 +785,8 @@ class CodingHandlerStageServiceTest {
                 "Bearer worker", JOB, 1, RESULT, fixture.request());
 
         assertThat(response.resultPort()).isEqualTo("completed");
-        assertThat(submitted).containsExactly(DIFF_CALL, READ_B);
-        verify(fixture.toolService(), times(3))
+        assertThat(submitted).containsExactly(PRE_EDIT_DIFF_CALL, DIFF_CALL, READ_B);
+        verify(fixture.toolService(), times(4))
                 .submitForNode(eq("Bearer worker"), any(), eq("code"));
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
@@ -792,7 +807,8 @@ class CodingHandlerStageServiceTest {
      * Grouped reads put several results after one assistant message. The fold used to name a
      * result by the message right before it, which for the second read of a group is the
      * first read's result - so a group's later reads never folded. The call is now matched by
-     * its id: with a fold depth of one, the group's older read folds and the newest stays.
+     * its id: with a fold depth of one, once a later answer reads, both reads of the older
+     * group fold and the newest read stays.
      */
     @Test
     void foldsEveryReadOfAGroupNotOnlyItsFirst() {
@@ -804,6 +820,7 @@ class CodingHandlerStageServiceTest {
         when(fixture.gateway().chat(any())).thenReturn(
                 toolCallReply(ModelProvider.ANTHROPIC, "read_diff", DIFF_CALL, "{}"),
                 readsReply(ModelProvider.ANTHROPIC, READ_B, READ_C),
+                readsReply(ModelProvider.ANTHROPIC, READ_D),
                 terminalReply(ModelProvider.ANTHROPIC));
 
         CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
@@ -812,12 +829,170 @@ class CodingHandlerStageServiceTest {
         assertThat(response.resultPort()).isEqualTo("completed");
         ArgumentCaptor<ProviderChatRequest> routed =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
-        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        verify(fixture.gateway(), times(4)).chat(routed.capture());
+        // Third request: the group is the only answer that read, so both bodies stay.
         List<String> third = toolBodies(routed.getAllValues().get(2));
         assertThat(third).hasSize(3);
-        assertThat(third.get(0)).contains(DIFF_DIGEST);
-        assertThat(third.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
-        assertThat(third.get(2)).contains(DIFF_DIGEST);
+        assertThat(third).allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST));
+        // Fourth request: a later answer read, so the whole older group folds.
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        assertThat(fourth).hasSize(4);
+        assertThat(fourth.get(0)).contains(DIFF_DIGEST);
+        assertThat(fourth.get(1)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fourth.get(2)).contains("folded").doesNotContain(DIFF_DIGEST);
+        assertThat(fourth.get(3)).contains(DIFF_DIGEST);
+    }
+
+    /*
+     * AI04-034: the fold depth counts answers, not results. One answer that grouped three
+     * reads used to fill the depth of three at once, and from the next answer on every new
+     * read folded a body the model was still working from - on Job 543eb70f all six re-reads
+     * of the code stage came right after the fold of the range they re-read. A group of three
+     * plus two more reads now stays whole through the third answer, and the group folds as
+     * one when a fourth answer reads.
+     */
+    @Test
+    void aGroupOfReadsCountsAsOneAnswerOfTheFoldDepth() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                readsReply(ModelProvider.ANTHROPIC, READ_B, READ_C, READ_D),
+                readsReply(ModelProvider.ANTHROPIC, READ_E),
+                readsReply(ModelProvider.ANTHROPIC, READ_F),
+                readsReply(ModelProvider.ANTHROPIC, READ_G),
+                terminalReply(ModelProvider.ANTHROPIC));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        // Fourth request: three answers read (the group, E, F) - nothing folds yet.
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        assertThat(fourth).hasSize(5);
+        assertThat(fourth).allSatisfy(
+                body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+        // Fifth request: a fourth answer read, so the group folds as one.
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(6);
+        assertThat(fifth.subList(0, 3)).allSatisfy(
+                body -> assertThat(body).contains("folded").doesNotContain(DIFF_DIGEST));
+        assertThat(fifth.subList(3, 6)).allSatisfy(
+                body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+    }
+
+    /* Three grouped answers could hold nine bodies; the cap keeps six and folds the oldest group. */
+    @Test
+    void keptBodiesAreCappedAtSixAcrossGroupedAnswers() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.ANTHROPIC);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                readsReply(ModelProvider.ANTHROPIC, READ_B, READ_C, READ_D),
+                readsReply(ModelProvider.ANTHROPIC, READ_E, READ_F, READ_G),
+                readsReply(ModelProvider.ANTHROPIC, READ_H, READ_I, READ_J),
+                terminalReply(ModelProvider.ANTHROPIC));
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(4)).chat(routed.capture());
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        assertThat(fourth).hasSize(9);
+        assertThat(fourth.subList(0, 3)).allSatisfy(
+                body -> assertThat(body).contains("folded").doesNotContain(DIFF_DIGEST));
+        assertThat(fourth.subList(3, 9)).allSatisfy(
+                body -> assertThat(body).contains(DIFF_DIGEST).doesNotContain("folded"));
+    }
+
+    /*
+     * AI04-034: apply_patch refuses an edit until a read_diff has established the diff
+     * digest, and every measured Job spent its first answer on that read_diff. The stage now
+     * runs it before the model's first answer under its own call id, keeps its body out of
+     * the conversation, and tells the model the first answer can already be the edit.
+     */
+    @Test
+    void theCodeStageEstablishesTheDiffBeforeTheModelsFirstAnswer() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        List<JsonNode> submitted = new ArrayList<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(invocation -> {
+                    submitted.add(invocation.getArgument(1));
+                    return acceptedSubmit(fixture.submittedToolCall()).answer(invocation);
+                });
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("apply_patch", READ_B, "{\"patch\":\"diff\"}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(response.diffDigest()).isEqualTo(DIFF_DIGEST);
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_diff", "apply_patch");
+        assertThat(submitted.get(0).path("toolCallId").asText()).isEqualTo(PRE_EDIT_DIFF_CALL);
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .contains("The current diff is already established for you")
+                .doesNotContain("Use read_diff once before the first apply_patch");
+        assertThat(toolBodies(routed.getAllValues().get(0))).isEmpty();
+    }
+
+    /* With the diff established by the stage, an answer that never edits still ends with one. */
+    @Test
+    void aStageThatNeverEditsEndsWithTheDiffTheStageEstablished() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(response.diffDigest()).isEqualTo(DIFF_DIGEST);
+        verify(fixture.toolService(), times(1))
+                .submitForNode(eq("Bearer worker"), any(), eq("code"));
+        verify(fixture.gateway(), times(1)).chat(any());
+    }
+
+    /* A refused stage read_diff is left to the model, which the tool's safety net still asks for. */
+    @Test
+    void aRefusedStageReadDiffLeavesTheDiffToTheModel() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenThrow(new CodingToolException(
+                        "TOOL_EXECUTION_FAILED", "The MCP coding tool refused the call.",
+                        org.springframework.http.HttpStatus.BAD_GATEWAY))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_diff", DIFF_CALL, "{}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        assertThat(response.diffDigest()).isEqualTo(DIFF_DIGEST);
+        verify(fixture.toolService(), times(2))
+                .submitForNode(eq("Bearer worker"), any(), eq("code"));
     }
 
     /*
@@ -1692,11 +1867,13 @@ class CodingHandlerStageServiceTest {
         assertThat(replay.resultId()).isEqualTo(response.resultId());
         assertThat(replay.payload()).isEqualTo(response.payload());
 
+        // The stage's own read_diff, then the model's; the replay submits nothing.
         ArgumentCaptor<JsonNode> toolRequest = ArgumentCaptor.forClass(JsonNode.class);
-        verify(toolService).submitForNode(
+        verify(toolService, times(2)).submitForNode(
                 eq("Bearer worker"), toolRequest.capture(), eq("code"));
-        assertThat(toolRequest.getValue().path("tool").path("name").asText())
-                .isEqualTo("read_diff");
+        assertThat(toolRequest.getAllValues())
+                .extracting(submitted -> submitted.path("tool").path("name").asText())
+                .containsExactly("read_diff", "read_diff");
         assertThat(toolRequest.getValue().path("repository").path("candidateSha").asText())
                 .isEqualTo(BASE_SHA);
 
@@ -2389,6 +2566,8 @@ class CodingHandlerStageServiceTest {
                 new CodingHandlerContract.StageExecutionRequest(
                         "1.0", TRACE, 4, 1, "coding.review", RESULT));
 
+        // The review stage runs no read_diff of its own before the model answers.
+        verify(toolService, never()).submitForNode(any(), any(), any());
         ArgumentCaptor<ProviderChatRequest> sent =
                 ArgumentCaptor.forClass(ProviderChatRequest.class);
         verify(gateway).chat(sent.capture());

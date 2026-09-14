@@ -18,6 +18,7 @@ import org.springframework.mock.http.client.MockClientHttpResponse;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.service.CodingModelTurnService;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.*;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 
 class ProductProviderFallbackTest {
     private static final Instant NOW = Instant.parse("2026-09-14T00:00:00Z");
@@ -102,7 +103,22 @@ class ProductProviderFallbackTest {
         };
         CodingModelTurnContract.Request request = request();
         String before = new ObjectMapper().findAndRegisterModules().writeValueAsString(request);
-        CodingModelTurnContract.Response result = service(pinned, adapter).execute(request, pinned);
+        List<String> observed = new ArrayList<>();
+        ProviderCallObserver observer = new ProviderCallObserver() {
+            public UUID started(ModelProvider provider, String model, int attempt) {
+                assertThat(ModelObservationScope.current().turnId()).isEqualTo(request.turnId());
+                assertThat(ModelObservationScope.current().executionAttempt()).isEqualTo(request.attempt());
+                observed.add(provider.name() + ":" + model);
+                return UUID.randomUUID();
+            }
+            public void finished(UUID id, ModelGatewayErrorCode code) {
+                observed.add(code == null ? "SUCCEEDED" : code.name());
+            }
+        };
+        CodingModelTurnContract.Response result = service(pinned, adapter, observer).execute(request, pinned);
+        assertThat(observed).containsExactly(primary.name() + ":" + first.modelId(), "MODEL_NOT_CONFIGURED",
+                fallback.name() + ":" + second.modelId(), "SUCCEEDED");
+        assertThat(ModelObservationScope.current()).isNull();
         assertThat(calls).containsExactly(primary, fallback);
         assertThat(result.selectedModel().modelId()).isEqualTo(second.modelId());
         assertThat(result.selectedModel().provider()).isEqualTo(
@@ -143,10 +159,15 @@ class ProductProviderFallbackTest {
 
     private static CodingModelTurnService service(List<ProviderModelRegistration> models,
             ProviderChatAdapter adapter) {
+        return service(models, adapter, ProviderCallObserver.NOOP);
+    }
+
+    private static CodingModelTurnService service(List<ProviderModelRegistration> models,
+            ProviderChatAdapter adapter, ProviderCallObserver observer) {
         ProviderCapabilityRegistry registry = new ProviderCapabilityRegistry(ProviderLane.PRODUCT,
                 ProviderCapabilityPolicy.stage2Baseline(), models);
         return new CodingModelTurnService(registry, new ProviderChatGateway(registry,
-                new ProviderChatAdapterRegistry(List.of(adapter)), CLOCK), new ObjectMapper(), CLOCK, false);
+                new ProviderChatAdapterRegistry(List.of(adapter)), CLOCK, observer), new ObjectMapper(), CLOCK, false);
     }
 
     private static CodingModelTurnContract.Request request() {

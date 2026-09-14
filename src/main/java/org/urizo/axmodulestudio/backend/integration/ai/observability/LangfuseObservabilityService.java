@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -90,6 +91,49 @@ public final class LangfuseObservabilityService {
         }
         catch (UpstreamFailure failure) {
             return MetricsResponse.empty(Availability.UNAVAILABLE, range);
+        }
+    }
+
+    public TokenUsageResponse tokenUsage(String from, String to, String jobId) {
+        TimeRange range = timeRange(from, to);
+        String selectedJob = optionalJobId(jobId);
+        ChronoUnit unit = Duration.between(range.from(), range.to()).compareTo(Duration.ofHours(48)) <= 0
+                ? ChronoUnit.HOURS : ChronoUnit.DAYS;
+        String granularity = unit == ChronoUnit.HOURS ? "hour" : "day";
+        Availability unavailable = configurationAvailability();
+        if (unavailable != null) return TokenUsageResponse.empty(unavailable, range, granularity);
+        CacheKey key = new CacheKey("token-usage:" + selectedJob, range.from(), range.to());
+        TokenUsageResponse cached = cached(key, TokenUsageResponse.class);
+        if (cached != null) return cached;
+        try {
+            JsonNode root = request(tokenUsagePath(range, selectedJob, granularity));
+            Map<Instant, TokenUsagePoint> buckets = new java.util.TreeMap<>();
+            Instant firstBucket = range.from().truncatedTo(unit);
+            for (JsonNode row : data(root)) {
+                requireObject(row);
+                Instant bucket = requiredInstant(row, "time_dimension");
+                if (bucket.isBefore(firstBucket) || !bucket.isBefore(range.to())
+                        || !bucket.equals(bucket.truncatedTo(unit)) || buckets.containsKey(bucket)) {
+                    throw new UpstreamFailure();
+                }
+                buckets.put(bucket, new TokenUsagePoint(bucket,
+                        nullableLong(row, "sum_inputTokens"), nullableLong(row, "sum_outputTokens"),
+                        nullableLong(row, "sum_totalTokens")));
+            }
+            List<TokenUsagePoint> points = new java.util.ArrayList<>();
+            // Missing buckets are unknown, not zero. Keep a wholly empty result empty.
+            if (!buckets.isEmpty()) {
+                for (Instant bucket = firstBucket; bucket.isBefore(range.to()); bucket = bucket.plus(1, unit)) {
+                    points.add(buckets.getOrDefault(bucket, new TokenUsagePoint(bucket, null, null, null)));
+                }
+            }
+            TokenUsageResponse response = new TokenUsageResponse(Availability.AVAILABLE, null,
+                    range.from(), range.to(), ENVIRONMENT, granularity, List.copyOf(points));
+            put(key, response);
+            return response;
+        }
+        catch (UpstreamFailure failure) {
+            return TokenUsageResponse.empty(Availability.UNAVAILABLE, range, granularity);
         }
     }
 
@@ -311,6 +355,33 @@ public final class LangfuseObservabilityService {
         }
         catch (JsonProcessingException failure) {
             throw new IllegalStateException("The fixed Langfuse metrics query cannot be encoded.");
+        }
+    }
+
+    private String tokenUsagePath(TimeRange range, String jobId, String granularity) {
+        ObjectNode query = objectMapper.createObjectNode();
+        query.put("view", "observations");
+        query.putArray("dimensions");
+        ArrayNode metrics = query.putArray("metrics");
+        metric(metrics, "inputTokens", "sum");
+        metric(metrics, "outputTokens", "sum");
+        metric(metrics, "totalTokens", "sum");
+        ArrayNode filters = query.putArray("filters");
+        fixedStringFilter(filters, "environment", ENVIRONMENT);
+        fixedStringFilter(filters, "name", "axms.model");
+        fixedStringFilter(filters, "type", "GENERATION");
+        if (jobId != null) metadataFilter(filters, "jobId", jobId);
+        query.put("fromTimestamp", range.from().toString());
+        query.put("toTimestamp", range.to().toString());
+        query.putObject("timeDimension").put("granularity", granularity);
+        query.putArray("orderBy").addObject().put("field", "time_dimension").put("direction", "asc");
+        // At most 49 hourly or 32 daily buckets, including partial UTC boundary buckets.
+        query.putObject("config").put("row_limit", 50);
+        try {
+            return "/api/public/v2/metrics?query=" + encode(objectMapper.writeValueAsString(query));
+        }
+        catch (JsonProcessingException failure) {
+            throw new IllegalStateException("The fixed Langfuse token usage query cannot be encoded.");
         }
     }
 
@@ -764,6 +835,23 @@ public final class LangfuseObservabilityService {
                     ENVIRONMENT, List.of());
         }
     }
+
+    public record TokenUsageResponse(
+            Availability status,
+            String errorCode,
+            Instant from,
+            Instant to,
+            String environment,
+            String granularity,
+            List<TokenUsagePoint> points) {
+
+        static TokenUsageResponse empty(Availability status, TimeRange range, String granularity) {
+            return new TokenUsageResponse(status, LangfuseObservabilityService.errorCode(status),
+                    range.from(), range.to(), ENVIRONMENT, granularity, List.of());
+        }
+    }
+
+    public record TokenUsagePoint(Instant bucketStart, Long inputTokens, Long outputTokens, Long totalTokens) { }
 
     public record MetricRow(
             String model,

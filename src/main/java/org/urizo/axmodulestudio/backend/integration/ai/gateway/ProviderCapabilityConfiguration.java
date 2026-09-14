@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Set;
 
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -33,8 +34,9 @@ public class ProviderCapabilityConfiguration {
     ProviderChatGateway providerChatGateway(
             ProviderCapabilityRegistry capabilityRegistry,
             ProviderChatAdapterRegistry adapterRegistry,
-            Clock clock) {
-        return new ProviderChatGateway(capabilityRegistry, adapterRegistry, clock);
+            Clock clock, ObjectProvider<ProviderCallObserver> observer) {
+        return new ProviderChatGateway(capabilityRegistry, adapterRegistry, clock,
+                observer.getIfAvailable(() -> ProviderCallObserver.NOOP));
     }
 
     static List<ProviderModelRegistration> registrations(ProviderLane lane) {

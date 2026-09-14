@@ -16,7 +16,9 @@ public final class ModelObservationScope implements AutoCloseable {
                 metadata.traceId() == null ? previous.traceId() : metadata.traceId(),
                 metadata.profileVersionId() == null
                         ? previous.profileVersionId() : metadata.profileVersionId(),
-                metadata.nodeId() == null ? previous.nodeId() : metadata.nodeId()));
+                metadata.nodeId() == null ? previous.nodeId() : metadata.nodeId(),
+                metadata.turnId() == null ? previous.turnId() : metadata.turnId(),
+                metadata.executionAttempt() == null ? previous.executionAttempt() : metadata.executionAttempt()));
     }
 
     public static ModelObservationScope open(
@@ -25,10 +27,14 @@ public final class ModelObservationScope implements AutoCloseable {
             UUID profileVersionId,
             String nodeId) {
         return new ModelObservationScope(new Metadata(
-                jobId, traceId, profileVersionId, nodeId));
+                jobId, traceId, profileVersionId, nodeId, null, null));
     }
 
-    static Metadata current() {
+    public static ModelObservationScope openTurn(UUID turnId, int executionAttempt) {
+        return new ModelObservationScope(new Metadata(null, null, null, null, turnId, executionAttempt));
+    }
+
+    public static Metadata current() {
         return CURRENT.get();
     }
 
@@ -42,5 +48,6 @@ public final class ModelObservationScope implements AutoCloseable {
         }
     }
 
-    record Metadata(UUID jobId, UUID traceId, UUID profileVersionId, String nodeId) { }
+    public record Metadata(UUID jobId, UUID traceId, UUID profileVersionId, String nodeId,
+            UUID turnId, Integer executionAttempt) { }
 }

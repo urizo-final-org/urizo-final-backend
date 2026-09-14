@@ -429,6 +429,20 @@ public final class NaturalCmsStageService {
                 : feasibilityInstruction(job.resource(),
                         resources.openedOperations(job.resource()),
                         resources.operations(job.resource()));
+        if ("TEMPLATE".equals(job.resource().type())) {
+            // CMS 화면의 표시 이름은 고정된 key의 별칭이며, 수정 가능한 layout과 별개다.
+            // 분석과 명령 생성에 같은 설명을 전달해 단계 사이에서 대상을 재해석하지 않는다.
+            instruction += " Template identity: the CMS screen labels BOLD as '템플릿 1',"
+                    + " CLASSIC as '템플릿 2', and MINIMAL as '템플릿 3'."
+                    + " These display names are aliases of the corresponding resource.id, not other templates."
+                    + " Match the requested template name to this mapping before comparing it with resource.id."
+                    + " In particular, '템플릿 3' and resource.id MINIMAL identify the same target."
+                    + " currentState.layout is an independently editable visual layout, not the template identity;"
+                    + " changing it to CLASSIC, MINIMAL or BOLD does not change resource.id or currentState.key."
+                    + " Do not reject a request solely because it uses the selected template's display name"
+                    + " or asks for a different layout. Keep resource.id fixed; requests to edit a different"
+                    + " template or switch the main site's template remain outside this screen's scope.";
+        }
         if (commandStage) {
             instruction += " Tool arguments have exactly one top-level command object."
                     + " Inside command, operation and fields are siblings."

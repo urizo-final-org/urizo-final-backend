@@ -29,6 +29,14 @@ public class AdminLangfuseObservabilityController {
         return service.metrics(from, to, jobId);
     }
 
+    @GetMapping("/token-usage")
+    LangfuseObservabilityService.TokenUsageResponse tokenUsage(
+            @RequestParam String from,
+            @RequestParam String to,
+            @RequestParam(required = false) String jobId) {
+        return service.tokenUsage(from, to, jobId);
+    }
+
     @GetMapping("/observations")
     LangfuseObservabilityService.ObservationsResponse observations(
             @RequestParam String from,

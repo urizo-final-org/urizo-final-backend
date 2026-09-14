@@ -111,7 +111,8 @@ public class CodingModelTurnService {
         List<ProviderModelRegistration> candidates = modelCandidates(boundModels, useCase);
         // The outer Stage scope owns profile/node identity; nodeName is only a handler label.
         try (ModelObservationScope ignored = ModelObservationScope.open(
-                request.jobId(), request.traceId(), profileVersionId, nodeId)) {
+                request.jobId(), request.traceId(), profileVersionId, nodeId);
+                ModelObservationScope turnScope = ModelObservationScope.openTurn(request.turnId(), request.attempt())) {
             ProviderGatewayException lastFailure = null;
             for (ProviderModelRegistration selected : candidates) {
                 if (Thread.currentThread().isInterrupted() || !clock.instant().isBefore(request.deadlineAt())) {

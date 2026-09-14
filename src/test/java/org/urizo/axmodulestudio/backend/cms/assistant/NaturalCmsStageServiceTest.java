@@ -985,6 +985,78 @@ class NaturalCmsStageServiceTest {
         return system(turn.getValue());
     }
 
+    @ParameterizedTest
+    @CsvSource({
+            "BOLD,템플릿 1,cms.analyze", "CLASSIC,템플릿 2,cms.analyze", "MINIMAL,템플릿 3,cms.analyze",
+            "BOLD,템플릿 1,cms.preview", "CLASSIC,템플릿 2,cms.preview", "MINIMAL,템플릿 3,cms.preview"
+    })
+    void templateStagesExplainDisplayAliasesWithoutChangingTheBoundTarget(
+            String key, String label, String stage) throws Exception {
+        var resource = new NaturalCmsContract.ResourceRef("TEMPLATE", key);
+        String requestText = "현재 선택된 " + label
+                + "의 레이아웃을 minimal로 바꾸고 대표색상을 pink로, 헤더와 footer 끝에 'ㅋㅋ'을 붙여줘.";
+        var job = new NaturalCmsContract.JobResponse(
+                "1.0", JOB, TRACE, PROFILE, 1, 1, "ACTIVE", requestText, resource,
+                null, null, null, false, null, null, NOW, NOW);
+        Harness harness = new Harness(job);
+        var state = harness.mapper.createObjectNode().put("key", key).put("layout", "BOLD");
+        when(harness.resources.snapshot(resource)).thenReturn(state);
+        if ("cms.preview".equals(stage)) {
+            var command = harness.mapper.createObjectNode().put("operation", "UPDATE");
+            command.putObject("fields").put("layout", "MINIMAL").put("primaryColor", "#D53372")
+                    .put("headerText", "Headerㅋㅋ").put("footerText", "Footerㅋㅋ");
+            when(harness.models.executeNaturalCms(any(), any()))
+                    .thenReturn(toolResponse("validate_cms_command", command));
+            when(harness.resources.validateCommand(eq(resource), any(), eq(requestText)))
+                    .thenAnswer(call -> ((JsonNode) call.getArgument(1)).deepCopy());
+            stubPreviewTools(harness, state);
+        } else {
+            when(harness.models.executeNaturalCms(any(), any()))
+                    .thenReturn(modelResponse("{\"port\":\"feasible\",\"payload\":{}}", List.of()));
+        }
+
+        var result = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest(stage, RESULT));
+
+        ArgumentCaptor<CodingModelTurnContract.Request> turn =
+                ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
+        verify(harness.models).executeNaturalCms(turn.capture(), any());
+        assertThat(system(turn.getValue()))
+                .contains("BOLD as '템플릿 1'", "CLASSIC as '템플릿 2'", "MINIMAL as '템플릿 3'")
+                .contains("Match the requested template name to this mapping")
+                .contains("independently editable visual layout")
+                .contains("Keep resource.id fixed")
+                .contains("switch the main site's template remain outside this screen's scope");
+        JsonNode context = harness.mapper.readTree(turn.getValue().messages().get(1).path("content").asText());
+        assertThat(context.path("request").asText()).isEqualTo(requestText);
+        assertThat(context.path("resource").path("id").asText()).isEqualTo(key);
+        assertThat(context.path("currentState").path("key").asText()).isEqualTo(key);
+        assertThat(context.path("currentState").path("layout").asText()).isEqualTo("BOLD");
+        assertThat(result.resource()).isEqualTo(resource);
+        assertThat(result.resultPort()).isEqualTo("cms.preview".equals(stage) ? "ready" : "feasible");
+    }
+
+    @Test
+    void templateIdentityHintDoesNotOverrideAnInfeasibleModelDecision() throws Exception {
+        var resource = new NaturalCmsContract.ResourceRef("TEMPLATE", "MINIMAL");
+        var job = new NaturalCmsContract.JobResponse(
+                "1.0", JOB, TRACE, PROFILE, 1, 1, "ACTIVE", "템플릿 1의 색상을 바꿔줘", resource,
+                null, null, null, false, null, null, NOW, NOW);
+        Harness harness = new Harness(job);
+        when(harness.resources.snapshot(resource)).thenReturn(
+                harness.mapper.createObjectNode().put("key", "MINIMAL").put("layout", "BOLD"));
+        when(harness.models.executeNaturalCms(any(), any())).thenReturn(modelResponse(
+                "{\"port\":\"infeasible\",\"payload\":{\"reason\":\"선택한 템플릿과 다른 대상입니다.\"}}", List.of()));
+
+        var result = harness.service.execute(
+                "Bearer worker", JOB, 1, RESULT, stageRequest("cms.analyze", RESULT));
+
+        assertThat(result.resultPort()).isEqualTo("infeasible");
+        assertThat(result.payload().path("reason").asText()).isEqualTo("선택한 템플릿과 다른 대상입니다.");
+        assertThat(result.resource()).isEqualTo(resource);
+        verifyNoInteractions(harness.mcp);
+    }
+
     private static String system(CodingModelTurnContract.Request request) {
         return request.messages().stream()
                 .filter(message -> "system".equals(message.path("role").asText()))

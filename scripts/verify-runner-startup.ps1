@@ -33,6 +33,7 @@ foreach ($definition in $startupAst.FindAll({
 $script:testRoot = Join-Path (Split-Path -Parent $PSScriptRoot) ('.local/runner-test-' + [guid]::NewGuid().ToString('N'))
 $fixtureRoot = Join-Path $script:testRoot 'Backend With Spaces'
 New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'scripts') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'runner.ps1') -Destination (Join-Path $fixtureRoot 'scripts/runner.ps1')
 $script:fixtureToken = Join-Path $fixtureRoot 'coding_model_bridge_service_token'
 Set-Content -LiteralPath $script:fixtureToken -Value 'NOT-A-CREDENTIAL' -Encoding ASCII
 $script:mode = 'ready'
@@ -43,6 +44,7 @@ $script:lastReadyPath = ''
 $script:badMount = $false
 $fixtureServer = $null
 $script:fixtureRunner = $null
+$script:fixtureSignals = @()
 
 function Get-Command {
     param([string]$Name, $ErrorAction)
@@ -76,6 +78,9 @@ function Start-Process {
     $script:lastCommandLine = $ArgumentList
     if ($ArgumentList -notmatch '-StartupSignalPath "([^"]+)"') { throw 'Missing startup signal path.' }
     $script:lastReadyPath = $Matches[1]
+    if ($ArgumentList -notmatch '-LifecycleId "([^"]+)"') { throw 'Missing lifecycle identifier.' }
+    $script:fixtureSignals += [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset,
+        "Local\AXMS-CodingRunner-Drain-$($Matches[1])")
     if ($script:mode -eq 'ready') {
         Set-Content -LiteralPath $script:lastReadyPath -Value '4242' -Encoding ASCII
     }
@@ -85,6 +90,13 @@ function Start-Process {
 function Stop-Process { throw 'A startup failure must never terminate a Runner.' }
 
 try {
+    $layoutRoot = Join-Path $script:testRoot 'Workspace Layout'
+    foreach ($entry in @('urizo-final-backend','urizo-final-frontend','urizo-final-master',
+        '.worktrees/urizo-final-backend','.worktrees/urizo-final-frontend','.worktrees/feature')) {
+        New-Item -ItemType Directory -Path (Join-Path $layoutRoot $entry) -Force | Out-Null
+    }
+    Set-Content -LiteralPath (Join-Path $layoutRoot 'urizo-final-master/repository-manifest.json') -Value '{}' -Encoding ASCII
+    Assert-StartupCheck ((Resolve-RunnerWorkspace (Join-Path $layoutRoot '.worktrees/feature')) -eq $layoutRoot) 'backend/frontend aliases inside worktrees cannot shadow the canonical workspace'
     $canonicalWorkspace = Resolve-RunnerWorkspace -RepositoryRoot (Split-Path -Parent $PSScriptRoot)
     Assert-StartupCheck ((Resolve-RunnerWorkspace -RepositoryRoot $fixtureRoot) -eq $canonicalWorkspace) 'nested worktree resolves canonical workspace'
     Assert-StartupCheck ((ConvertTo-RunnerHostPath '/run/desktop/mnt/host/c/Workspace With Spaces/token') -eq 'c:\Workspace With Spaces\token') 'Docker Desktop Linux mount path converts to Windows'
@@ -104,6 +116,22 @@ try {
     try { Start-CodingRunner -RepositoryRoot $fixtureRoot -TargetUri 'http://127.0.0.1:1' -TimeoutSeconds 0 }
     catch { $blocked = $_.Exception.Message -match 'has not confirmed its first poll' }
     Assert-StartupCheck ($blocked -and $script:launches -eq 1) 'unconfirmed existing process cannot become a successful retry'
+    Set-Content -LiteralPath $script:lastReadyPath -Value '4242' -Encoding ASCII
+    $script:existing[0].CommandLine = $script:lastCommandLine -replace ' -LifecycleId "[^"]+" -SourceSha256 "[^"]+"', ''
+    $blocked = $false
+    try { Start-CodingRunner -RepositoryRoot $fixtureRoot -TargetUri 'http://127.0.0.1:1' -TimeoutSeconds 0 }
+    catch { $blocked = $_.Exception.Message -match 'CODING RUNNER LEGACY' }
+    Assert-StartupCheck ($blocked -and $script:launches -eq 1) 'legacy process without cooperative stop is preserved'
+    Assert-StartupCheck ($null -eq (Read-CodingRunnerArguments 'pwsh.exe -Command "Get-Content C:\other\runner.ps1"')) 'diagnostic command text is not mistaken for a Runner'
+    $normalized = Read-CodingRunnerArguments ($script:lastCommandLine.Replace('\', '\\'))
+    Assert-StartupCheck (Test-RunnerPathEqual $normalized.File (Join-Path $fixtureRoot 'scripts/runner.ps1')) 'equivalent Windows path separators are normalized'
+    $script:existing = @([pscustomobject]@{ProcessId=4242;CommandLine=$script:lastCommandLine},
+        [pscustomobject]@{ProcessId=4243;CommandLine=$script:lastCommandLine})
+    $blocked = $false
+    try { Start-CodingRunner -RepositoryRoot $fixtureRoot -TargetUri 'http://127.0.0.1:1' -TimeoutSeconds 0 }
+    catch { $blocked = $_.Exception.Message -match 'Multiple Coding Runners' }
+    Assert-StartupCheck ($blocked -and $script:launches -eq 1) 'ambiguous multiple processes are preserved'
+    $script:existing = @($script:existing[0])
     $script:existing[0].CommandLine = 'powershell.exe -File "C:\other\runner.ps1"'
     $blocked = $false
     try { Start-CodingRunner -RepositoryRoot $fixtureRoot -TargetUri 'http://127.0.0.1:1' -TimeoutSeconds 0 }
@@ -219,10 +247,23 @@ try {
             -WindowStyle Hidden -RedirectStandardOutput $duplicateOutput -PassThru
         Assert-StartupCheck ($duplicate.WaitForExit(5000) -and
             (Get-Content -LiteralPath $duplicateOutput -Raw) -match 'no task was claimed') 'manual duplicate exits before claiming while automatic Runner is active'
+        Add-Content -LiteralPath (Join-Path $fixtureScripts 'runner.ps1') -Value '# Isolated source update fixture.'
+        $updatedOutput = @(Start-CodingRunner -RepositoryRoot $fixtureRoot -TargetUri $fixtureUri -TimeoutSeconds 20 -DrainSeconds 10)
+        $afterUpdate = @(Get-CodingRunnerProcesses)
+        Assert-StartupCheck ($afterUpdate.Count -eq 1 -and $afterUpdate[0].ProcessId -ne $script:fixtureRunner.Id -and
+            ($updatedOutput -join '') -match 'STOPPED' -and ($updatedOutput -join '') -match 'STARTED') 'same path with changed source gracefully replaces the old process'
+        $replacementRoot = Join-Path $fixtureRoot 'Replacement With Spaces'
+        New-Item -ItemType Directory -Path (Join-Path $replacementRoot 'scripts') -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $fixtureScripts 'runner.ps1') -Destination (Join-Path $replacementRoot 'scripts/runner.ps1')
+        $movedOutput = @(Start-CodingRunner -RepositoryRoot $replacementRoot -TargetUri $fixtureUri -TimeoutSeconds 20 -DrainSeconds 10)
+        $afterMove = @(Get-CodingRunnerProcesses)
+        Assert-StartupCheck ($afterMove.Count -eq 1 -and $afterMove[0].ProcessId -ne $afterUpdate[0].ProcessId -and
+            ($movedOutput -join '') -match 'STOPPED' -and ($movedOutput -join '') -match 'STARTED') 'different source path replaces the old Runner and confirms the new poll'
     }
     Write-Output "Runner startup: $script:checks checks passed on PowerShell $($PSVersionTable.PSVersion). No live Runner operations."
 }
 finally {
+    foreach ($signal in $script:fixtureSignals) { $signal.Dispose() }
     if ($ProcessSmoke) {
         # Stop only fixture processes bound to this run's unique temporary root.
         foreach ($fixtureProcess in @(Get-CodingRunnerProcesses)) {

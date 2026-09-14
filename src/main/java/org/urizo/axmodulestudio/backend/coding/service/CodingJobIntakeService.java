@@ -26,6 +26,8 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayException;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseFormat;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelUseCase;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
 
 /**
@@ -110,6 +112,7 @@ public class CodingJobIntakeService {
     // A provider rather than the service itself: the model-turn bridge rides its own switch
     // (ax.coding.model-turn-bridge), and an app booted without it must still boot.
     private final ObjectProvider<CodingModelTurnService> modelTurns;
+    private final ObjectProvider<ProfileModelBindingService> profileModelBindings;
     private final int maxShaPolls;
     private final Duration shaPollInterval;
 
@@ -131,9 +134,10 @@ public class CodingJobIntakeService {
             ProfileVersionRepository profileVersions,
             GuardrailPathSelectionService guardrailSelections,
             ObjectProvider<CodingModelTurnService> modelTurns,
+            ObjectProvider<ProfileModelBindingService> profileModelBindings,
             ObjectMapper objectMapper,
             Clock clock) {
-        this(commands, runner, profileVersions, guardrailSelections, modelTurns, objectMapper,
+        this(commands, runner, profileVersions, guardrailSelections, modelTurns, profileModelBindings, objectMapper,
                 clock, 60, Duration.ofMillis(500));
     }
 
@@ -143,6 +147,7 @@ public class CodingJobIntakeService {
             ProfileVersionRepository profileVersions,
             GuardrailPathSelectionService guardrailSelections,
             ObjectProvider<CodingModelTurnService> modelTurns,
+            ObjectProvider<ProfileModelBindingService> profileModelBindings,
             ObjectMapper objectMapper,
             Clock clock,
             int maxShaPolls,
@@ -154,6 +159,7 @@ public class CodingJobIntakeService {
         this.guardrailSelections = Objects.requireNonNull(
                 guardrailSelections, "guardrailSelections are required");
         this.modelTurns = Objects.requireNonNull(modelTurns, "modelTurns are required");
+        this.profileModelBindings = Objects.requireNonNull(profileModelBindings, "profileModelBindings are required");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.maxShaPolls = maxShaPolls;
@@ -182,8 +188,10 @@ public class CodingJobIntakeService {
         // "read the sentence". The field still arrives filled on the second leg of a split,
         // where the answer was decided by the classifier on the first.
         CodingConsoleContract.SplitPlan split = null;
+        ProfileVersionRepository.AdminStoredProfileVersion profile = null;
         if (repository == null || repository.isBlank()) {
-            Classification verdict = classify(traceId, idempotencyKey, requestText);
+            profile = activeProfile();
+            Classification verdict = classify(traceId, idempotencyKey, requestText, profile);
             repository = verdict.repository();
             if (verdict.split() != null) {
                 // Not confirmed with the requester: they cannot judge the split, and the plan
@@ -213,7 +221,7 @@ public class CodingJobIntakeService {
                             + "최고관리자에게 울타리 설정을 요청해 주세요.",
                     HttpStatus.CONFLICT);
         }
-        ProfileVersionRepository.AdminStoredProfileVersion profile = activeProfile();
+        if (profile == null) profile = activeProfile();
         List<String> nodes = nodeIds(profile.snapshot());
         if (!nodes.contains(GRAPH_STEP)) {
             // The Job authority refuses a graphStep outside allowedNodes, so this would be
@@ -265,8 +273,8 @@ public class CodingJobIntakeService {
      * ask the requester, who could not know the answer.
      *
      * <p>One structured model turn, no tools, strict schema. The model is picked from the
-     * capability registry rather than the profile: the profile binds models to graph nodes and
-     * this call happens before any Job or graph exists. When the request needs both sides, the
+     * active profile's coding.analyze binding, including its ordered fallbacks. The same
+     * immutable profile version is retained for Job creation. When the request needs both sides, the
      * classifier also writes the two part-sentences, in the requester's own register - those
      * are what the screen shows, so they must never contain system words.
      *
@@ -274,9 +282,11 @@ public class CodingJobIntakeService {
      * side instead would send the model into a checkout without the files it needs, and the
      * requester would learn about it only after a whole run burned down.
      */
-    private Classification classify(UUID traceId, String idempotencyKey, String requestText) {
+    private Classification classify(UUID traceId, String idempotencyKey, String requestText,
+            ProfileVersionRepository.AdminStoredProfileVersion profile) {
         CodingModelTurnService turns = modelTurns.getIfAvailable();
-        if (turns == null) {
+        ProfileModelBindingService bindings = profileModelBindings.getIfAvailable();
+        if (turns == null || bindings == null) {
             throw failure("CODING_CLASSIFY_UNAVAILABLE",
                     "요청을 접수할 AI 통로가 꺼져 있습니다. 시스템 담당자에게 알려 주세요.",
                     HttpStatus.SERVICE_UNAVAILABLE);
@@ -285,6 +295,19 @@ public class CodingJobIntakeService {
                 ("coding-intake-classify:" + idempotencyKey).getBytes(StandardCharsets.UTF_8));
         CodingModelTurnContract.Response response;
         try {
+            List<String> analysisNodes = new ArrayList<>();
+            for (JsonNode node : profile.snapshot().path("nodes")) {
+                if ("agent".equals(node.path("type").asText())
+                        && "coding.analyze".equals(node.path("handlerKey").asText())) {
+                    analysisNodes.add(node.path("id").asText());
+                }
+            }
+            if (analysisNodes.size() != 1) {
+                throw failure("CODING_CLASSIFY_UNAVAILABLE",
+                        "활성 AI 설정의 요청 분석 노드를 확인해 주세요.", HttpStatus.CONFLICT);
+            }
+            var candidates = bindings.resolve(profile.profileVersionId(), analysisNodes.get(0),
+                    "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT);
             response = turns.executeNaturalCms(new CodingModelTurnContract.Request(
                     CodingModelTurnContract.SCHEMA_VERSION,
                     turnId,
@@ -306,7 +329,7 @@ public class CodingJobIntakeService {
                                     .put("role", "user").put("content", requestText)),
                     List.of(),
                     ProviderResponseFormat.jsonSchema(classifySchema()).requestContract(),
-                    Instant.now(clock).plus(CLASSIFY_DEADLINE)));
+                    Instant.now(clock).plus(CLASSIFY_DEADLINE)), candidates);
         }
         catch (ProviderGatewayException gatewayFailure) {
             throw failure("CODING_CLASSIFY_UNAVAILABLE",

@@ -205,6 +205,65 @@ class ProviderChatGatewayTest {
                 NOW.plusSeconds(30));
     }
 
+    @Test
+    void recordsActualRetryOrderAndOnlyNormalizedFailures() {
+        List<String> events = new ArrayList<>();
+        ProviderCallObserver observer = new ProviderCallObserver() {
+            public java.util.UUID started(ModelProvider provider, String model, int attempt) {
+                events.add(provider + ":" + model + ":" + attempt);
+                return java.util.UUID.randomUUID();
+            }
+            public void finished(java.util.UUID id, ModelGatewayErrorCode error) {
+                events.add(error == null ? "SUCCESS" : error.name());
+            }
+        };
+        ProviderChatGateway observed = observed(observer);
+        when(adapter.chat(registration, request("fixture")))
+                .thenThrow(new ProviderFailure(ProviderFailureKind.RATE_LIMITED, Duration.ofMillis(1)))
+                .thenReturn(response("private response"));
+        observed.chat(request("fixture"));
+        assertThat(events).containsExactly("OPENAI:" + registration.modelId() + ":1", "MODEL_RATE_LIMITED",
+                "OPENAI:" + registration.modelId() + ":2", "SUCCESS");
+    }
+
+    @Test
+    void observerFailureNeverChangesSuccessOrOriginalFailure() {
+        ProviderCallObserver observer = new ProviderCallObserver() {
+            public java.util.UUID started(ModelProvider provider, String model, int attempt) {
+                throw new IllegalStateException("store unavailable");
+            }
+        };
+        when(adapter.chat(registration, request("fixture"))).thenReturn(response("OK"));
+        assertThat(observed(observer).chat(request("fixture")).content()).isEqualTo("OK");
+        org.mockito.Mockito.doThrow(new ProviderFailure(ProviderFailureKind.BILLING, null))
+                .when(adapter).chat(registration, request("fixture"));
+        assertThatThrownBy(() -> observed(observer).chat(request("fixture")))
+                .isInstanceOfSatisfying(ProviderGatewayException.class,
+                        failure -> assertThat(failure.code()).isEqualTo(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED));
+    }
+
+    @Test
+    void completionObserverFailureDoesNotRetrySuccessfulProvider() {
+        ProviderCallObserver observer = new ProviderCallObserver() {
+            public java.util.UUID started(ModelProvider provider, String model, int attempt) {
+                return java.util.UUID.randomUUID();
+            }
+            public void finished(java.util.UUID id, ModelGatewayErrorCode error) {
+                throw new IllegalStateException("store unavailable");
+            }
+        };
+        when(adapter.chat(registration, request("fixture"))).thenReturn(response("OK"));
+        assertThat(observed(observer).chat(request("fixture")).content()).isEqualTo("OK");
+        verify(adapter, times(1)).chat(registration, request("fixture"));
+    }
+
+    private ProviderChatGateway observed(ProviderCallObserver observer) {
+        return new ProviderChatGateway(new ProviderCapabilityRegistry(ProviderLane.PRODUCT,
+                ProviderCapabilityPolicy.stage2Baseline(), List.of(registration)),
+                new ProviderChatAdapterRegistry(List.of(adapter)), new ProviderErrorNormalizer(),
+                new ProviderRetryPolicy(), Clock.fixed(NOW, ZoneOffset.UTC), retryDelays::add, observer);
+    }
+
     private static ProviderChatResponse response(String content) {
         return new ProviderChatResponse(
                 ModelProvider.OPENAI,

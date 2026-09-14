@@ -15,6 +15,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,14 +45,24 @@ public final class AiJobMonitoringService {
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final Clock clock;
+    private final AiModelCallMonitoring modelCalls;
 
     public AiJobMonitoringService(
             @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
             @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions,
             Clock clock) {
+        this(jdbc, transactions, clock, new AiModelCallMonitoring(jdbc, clock));
+    }
+
+    @Autowired
+    public AiJobMonitoringService(
+            @Qualifier("codingModelTurnJdbcTemplate") JdbcTemplate jdbc,
+            @Qualifier("codingModelTurnTransactionTemplate") TransactionTemplate transactions,
+            Clock clock, AiModelCallMonitoring modelCalls) {
         this.jdbc = Objects.requireNonNull(jdbc, "jdbc is required");
         this.transactions = Objects.requireNonNull(transactions, "transactions are required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
+        this.modelCalls = modelCalls;
     }
 
     public ReportResponse report(String authorization, NodeOccurrenceReport report) {
@@ -115,7 +126,8 @@ public final class AiJobMonitoringService {
         java.util.Collections.reverse(descending);
         return new JobSnapshotResponse(
                 SCHEMA_VERSION, clock.instant(), summaries.get(0), nodes,
-                List.copyOf(descending), truncated);
+                List.copyOf(descending), truncated,
+                modelCalls.snapshot(jobId, summaries.get(0).profileVersionId()));
     }
 
     public NodeOccurrence requireOccurrence(

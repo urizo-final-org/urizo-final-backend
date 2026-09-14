@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -73,6 +75,27 @@ public final class CodingHandlerStageService {
     private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
     /** Tool sequence number of the read_diff the code stage runs before its first answer. */
     private static final int PRE_EDIT_DIFF_SEQUENCE = 1099;
+    /**
+     * The lines the request itself names, read before the first answer. On the four measured
+     * haiku Jobs of one request the model spent two to three answers finding the quoted
+     * screen text, and on 543eb70f it read the same PortalHome range nine times over three
+     * rounds. A phrase the request quotes is looked up in the target files, and the
+     * declaration it sits in is handed over as an excerpt - at most two, bounded, because an
+     * excerpt sits in the first message and is re-sent with every answer.
+     */
+    private static final int MAX_EXCERPT_PHRASES = 4;
+    private static final int MAX_EXCERPTS = 2;
+    private static final int MAX_EXCERPT_LINES = 120;
+    private static final int MAX_EXCERPT_CHARACTERS = 8_000;
+    /** Tool sequence numbers of the excerpt searches (one per file and phrase) and reads. */
+    private static final int EXCERPT_SEARCH_SEQUENCE_BASE = 1200;
+    private static final int EXCERPT_READ_SEQUENCE_BASE = 1300;
+    /** Text a request quotes: straight or curly single and double quotes, two or more characters. */
+    private static final Pattern QUOTED_PHRASE = Pattern.compile(
+            "'([^'\\n]{2,})'|\"([^\"\\n]{2,})\"|\u2018([^\u2019\\n]{2,})\u2019|\u201c([^\u201d\\n]{2,})\u201d");
+    /** The line numbers an outline lists, in the form {@code "<line>: <declaration>"}. */
+    private static final Pattern OUTLINE_LINE = Pattern.compile("(?m)^(\\d+): ");
+    private static final Pattern OUTLINE_LINE_COUNT = Pattern.compile("(\\d+) lines");
     /**
      * How many read_file/search_code bodies the code stage keeps unfolded at most, whatever
      * the fold depth counts. The depth counts answers, and one answer may carry up to
@@ -368,7 +391,7 @@ public final class CodingHandlerStageService {
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(),
                 initialMessages(request.handlerKey(), aggregate, false,
-                        objectMapper.createArrayNode()),
+                        objectMapper.createArrayNode(), objectMapper.createArrayNode()),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -458,12 +481,17 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         boolean foldHistory = foldsToolHistory(modelBindings);
-        ArrayNode targetOutlines = "coding.code".equals(request.handlerKey())
+        List<TargetFile> targets = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("read_file")
-                ? targetFileOutlines(authorization, jobId, request, authority, aggregate, resultId)
-                : objectMapper.createArrayNode();
+                ? targetFiles(authorization, jobId, request, authority, aggregate, resultId)
+                : List.of();
+        ArrayNode targetExcerpts = targets.isEmpty()
+                ? objectMapper.createArrayNode()
+                : targetFileExcerpts(authorization, jobId, request, authority, aggregate,
+                        resultId, allowedTools, targets);
         List<JsonNode> messages = new ArrayList<>(initialMessages(
-                request.handlerKey(), aggregate, foldHistory, targetOutlines));
+                request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
+                targetExcerpts));
         JsonNode latestDiff = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("apply_patch")
                 ? establishDiffBeforeEdits(
@@ -1532,7 +1560,8 @@ public final class CodingHandlerStageService {
             String handlerKey,
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             boolean foldHistory,
-            ArrayNode targetFileOutlines) {
+            ArrayNode targetFileOutlines,
+            ArrayNode targetFileExcerpts) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1611,6 +1640,10 @@ public final class CodingHandlerStageService {
         // Left out when there is nothing to show, so every other stage's context is unchanged.
         if (!targetFileOutlines.isEmpty()) {
             context.set("targetFileOutlines", targetFileOutlines);
+        }
+        // The lines the request quotes, already read; left out when nothing was found.
+        if (!targetFileExcerpts.isEmpty()) {
+            context.set("targetFileExcerpts", targetFileExcerpts);
         }
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -1771,7 +1804,10 @@ public final class CodingHandlerStageService {
                         + "targetFileOutlines, when present, gives each target file's line "
                         + "count and the line numbers of its declarations: pick the declaration "
                         + "the change belongs to and read_file only that range with startLine "
-                        + "and endLine, not the whole file. Open a later "
+                        + "and endLine, not the whole file. targetFileExcerpts, when present, "
+                        + "holds the lines the request itself names, already read: edit from "
+                        + "them without reading them again, and read only what they do not "
+                        + "show. Open a later "
                         + "targetFile only when the requested change does not belong in the "
                         + "files already read - every file you read is re-sent with every "
                         + "later answer, so an unneeded read keeps costing until the stage "
@@ -2003,18 +2039,25 @@ public final class CodingHandlerStageService {
         }
     }
 
-    private ArrayNode targetFileOutlines(
+    /**
+     * A target file the stage read before the first answer: its outline, and its lines when
+     * the workspace returned it whole ({@code null} for a file refused as too large, whose
+     * outline then comes from the refusal).
+     */
+    private record TargetFile(String path, String outline, String[] lines) { }
+
+    private List<TargetFile> targetFiles(
             String authorization,
             UUID jobId,
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             UUID resultId) {
-        ArrayNode outlines = objectMapper.createArrayNode();
+        List<TargetFile> files = new ArrayList<>();
         CodingHandlerContract.HandlerResultResponse analysis =
                 latestResultOrNull(aggregate, "coding.analyze", "feasible");
         if (analysis == null || analysis.payload() == null) {
-            return outlines;
+            return files;
         }
         List<String> targets = new ArrayList<>();
         for (JsonNode target : analysis.payload().path("targetFiles")) {
@@ -2025,7 +2068,6 @@ public final class CodingHandlerStageService {
         }
         for (int index = 0; index < targets.size(); index++) {
             String path = targets.get(index);
-            String outline;
             try {
                 JsonNode read = executeDeterministicTool(
                         authorization, jobId, request, authority, aggregate, resultId,
@@ -2033,7 +2075,9 @@ public final class CodingHandlerStageService {
                         objectMapper.createObjectNode().put("path", path));
                 // Counted the way read_file counts, so a later ranged read lands on these lines.
                 String[] lines = read.path("content").asText("").split("\n", -1);
-                outline = lines.length + " lines." + CodingToolService.fileOutline(path, lines);
+                files.add(new TargetFile(path,
+                        lines.length + " lines." + CodingToolService.fileOutline(path, lines),
+                        lines));
             }
             catch (CodingToolException refused) {
                 if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
@@ -2041,11 +2085,212 @@ public final class CodingHandlerStageService {
                                 .contains("too large to read whole")) {
                     continue;
                 }
-                outline = refused.getMessage();
+                files.add(new TargetFile(path, refused.getMessage(), null));
             }
-            outlines.addObject().put("path", path).put("outline", outline);
+        }
+        return files;
+    }
+
+    private ArrayNode outlineNodes(List<TargetFile> files) {
+        ArrayNode outlines = objectMapper.createArrayNode();
+        for (TargetFile file : files) {
+            outlines.addObject().put("path", file.path()).put("outline", file.outline());
         }
         return outlines;
+    }
+
+    /**
+     * The excerpts of the target files that hold the text the request quotes. A phrase is
+     * adopted only when exactly one target file holds it on a code line - a match in a
+     * comment or an import is not the screen - and the excerpt is the declaration that
+     * match sits in, up to {@link #MAX_EXCERPT_LINES}. A file read whole is searched in
+     * memory; a file refused as too large is searched by the workspace, within that file
+     * only, and its range read once. Nothing found means nothing added, as before.
+     */
+    private ArrayNode targetFileExcerpts(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            List<TargetFile> files) {
+        ArrayNode excerpts = objectMapper.createArrayNode();
+        List<String> phrases = quotedPhrases(aggregate.requestText());
+        Set<String> taken = new LinkedHashSet<>();
+        int characters = 0;
+        for (int phraseIndex = 0; phraseIndex < phrases.size()
+                && excerpts.size() < MAX_EXCERPTS; phraseIndex++) {
+            String phrase = phrases.get(phraseIndex);
+            TargetFile found = null;
+            int line = 0;
+            for (int index = 0; index < files.size(); index++) {
+                int match = firstCodeMatch(authorization, jobId, request, authority, aggregate,
+                        resultId, allowedTools, files.get(index), index, phrase, phraseIndex);
+                if (match <= 0) {
+                    continue;
+                }
+                if (found != null) {
+                    // Two target files hold the phrase: neither is surely the one.
+                    found = null;
+                    break;
+                }
+                found = files.get(index);
+                line = match;
+            }
+            if (found == null || line <= 0) {
+                continue;
+            }
+            int[] range = excerptRange(found, line);
+            if (!taken.add(found.path() + ":" + range[0])) {
+                continue;
+            }
+            String content = excerptText(authorization, jobId, request, authority, aggregate,
+                    resultId, excerpts.size(), found, range[0], range[1]);
+            if (content == null || content.isEmpty()) {
+                continue;
+            }
+            if (characters + content.length() > MAX_EXCERPT_CHARACTERS) {
+                break;
+            }
+            characters += content.length();
+            excerpts.addObject()
+                    .put("path", found.path())
+                    .put("startLine", range[0])
+                    .put("endLine", range[1])
+                    .put("content", content);
+        }
+        return excerpts;
+    }
+
+    /** The text a request quotes, in order, without repeats - at most four phrases. */
+    static List<String> quotedPhrases(String requestText) {
+        Set<String> phrases = new LinkedHashSet<>();
+        Matcher matcher = QUOTED_PHRASE.matcher(requestText == null ? "" : requestText);
+        while (matcher.find() && phrases.size() < MAX_EXCERPT_PHRASES) {
+            for (int group = 1; group <= matcher.groupCount(); group++) {
+                String phrase = matcher.group(group);
+                if (phrase != null && phrase.trim().length() >= 2) {
+                    phrases.add(phrase.trim());
+                }
+            }
+        }
+        return List.copyOf(phrases);
+    }
+
+    /** A line of code rather than a comment or an import - the screen text lives in code. */
+    static boolean isCodeLine(String line) {
+        String text = line.trim();
+        return !text.startsWith("//") && !text.startsWith("*") && !text.startsWith("/*")
+                && !text.startsWith("import");
+    }
+
+    /** The first code line of the file holding the phrase, or 0 when it holds none. */
+    private int firstCodeMatch(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            TargetFile file,
+            int fileIndex,
+            String phrase,
+            int phraseIndex) {
+        if (file.lines() != null) {
+            for (int index = 0; index < file.lines().length; index++) {
+                if (file.lines()[index].contains(phrase) && isCodeLine(file.lines()[index])) {
+                    return index + 1;
+                }
+            }
+            return 0;
+        }
+        if (!allowedTools.contains("search_code")) {
+            return 0;
+        }
+        try {
+            JsonNode found = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    EXCERPT_SEARCH_SEQUENCE_BASE + fileIndex * MAX_EXCERPT_PHRASES + phraseIndex,
+                    "search_code",
+                    objectMapper.createObjectNode().put("query", phrase).put("scope", file.path()));
+            for (JsonNode match : found.path("matches")) {
+                if (file.path().equals(match.path("path").asText())
+                        && isCodeLine(match.path("preview").asText(""))) {
+                    return match.path("line").asInt(0);
+                }
+            }
+            return 0;
+        }
+        catch (CodingToolException refused) {
+            return 0;
+        }
+    }
+
+    /**
+     * The declaration a matched line belongs to: from the nearest outlined declaration at or
+     * before it (the line itself when none precedes it) to the line before the next one,
+     * never past the file's end or {@link #MAX_EXCERPT_LINES}.
+     */
+    static int[] excerptRange(TargetFile file, int line) {
+        int start = line;
+        int end = 0;
+        Matcher matcher = OUTLINE_LINE.matcher(file.outline());
+        while (matcher.find()) {
+            int declaration = Integer.parseInt(matcher.group(1));
+            if (declaration <= line) {
+                start = declaration;
+            }
+            else if (end == 0) {
+                end = declaration - 1;
+            }
+        }
+        int lineCount = file.lines() != null ? file.lines().length : 0;
+        if (lineCount == 0) {
+            Matcher count = OUTLINE_LINE_COUNT.matcher(file.outline());
+            lineCount = count.find() ? Integer.parseInt(count.group(1)) : 0;
+        }
+        if (end == 0) {
+            end = lineCount > 0 ? lineCount : start + MAX_EXCERPT_LINES - 1;
+        }
+        end = Math.min(end, start + MAX_EXCERPT_LINES - 1);
+        if (lineCount > 0) {
+            end = Math.min(end, lineCount);
+        }
+        return new int[] {start, Math.max(start, end)};
+    }
+
+    /** The excerpt's text: sliced in memory from a file read whole, read once otherwise. */
+    private String excerptText(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            int excerptIndex,
+            TargetFile file,
+            int startLine,
+            int endLine) {
+        if (file.lines() != null) {
+            int end = Math.min(endLine, file.lines().length);
+            return String.join("\n", List.of(file.lines()).subList(startLine - 1, end));
+        }
+        try {
+            JsonNode read = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    EXCERPT_READ_SEQUENCE_BASE + excerptIndex, "read_file",
+                    objectMapper.createObjectNode()
+                            .put("path", file.path())
+                            .put("startLine", startLine)
+                            .put("endLine", endLine));
+            return read.path("content").asText("");
+        }
+        catch (CodingToolException refused) {
+            return null;
+        }
     }
 
     /**

@@ -103,6 +103,15 @@ class CodingHandlerStageServiceTest {
     private static StageFixture stageFixture(
             ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
             ModelProvider provider, List<CodingHandlerContract.HandlerResultResponse> results) {
+        return stageFixture(mapper, toolBindings, toolHistoryKeep, provider, results,
+                "Implement the approved change.");
+    }
+
+    /** {@code requestText} is the Job's request as the attempt carries it. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
+            ModelProvider provider, List<CodingHandlerContract.HandlerResultResponse> results,
+            String requestText) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
@@ -150,7 +159,7 @@ class CodingHandlerStageServiceTest {
                 new CodingHandlerContract.AttemptAggregateResponse(
                         "1.0", JOB, TRACE, 1, WORKSPACE,
                         CodingHandlerContract.AttemptStatus.ACTIVE,
-                        "Implement the approved change.",
+                        requestText,
                         results, List.of(), List.of(), NOW, null);
         when(toolService.stageAuthority("Bearer worker", JOB, 4)).thenReturn(authority);
         when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
@@ -403,6 +412,242 @@ class CodingHandlerStageServiceTest {
         verify(fixture.gateway(), times(2)).chat(routed.capture());
         assertThat(mapper.readTree(firstUserMessage(routed.getAllValues().get(0)))
                 .has("targetFileOutlines")).isFalse();
+    }
+
+    /*
+     * AI04-034 ②: on the four measured haiku Jobs of one request, the model spent two to
+     * three answers finding the screen text the request quoted, and on 543eb70f it read the
+     * same PortalHome range nine times over three rounds. A phrase the request quotes is now
+     * looked up in the target files before the first answer, and the declaration holding it
+     * is handed over as an excerpt - from memory when the file was read whole.
+     */
+    @Test
+    void aPhraseTheRequestQuotesIsHandedOverAsTheDeclarationHoldingIt() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java")),
+                "Rename 'updateUser' on the members screen.");
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest ->
+                "read_file".equals(toolRequest.path("tool").path("name").asText())
+                        ? textResult(fixture, SMALL_JAVA)
+                        : jsonResult(fixture, diffJson()));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        // The whole read that outlines the file, then the stage's read_diff - no search.
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "read_diff");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("path").asText()).isEqualTo("src/Small.java");
+        assertThat(excerpts.get(0).path("startLine").asInt()).isEqualTo(4);
+        assertThat(excerpts.get(0).path("endLine").asInt()).isEqualTo(7);
+        assertThat(excerpts.get(0).path("content").asText())
+                .isEqualTo("    public void updateUser() {\n    }\n}\n");
+        assertThat(routed.getValue().messages().get(0).content())
+                .contains("targetFileExcerpts, when present");
+    }
+
+    /*
+     * A file refused as too large is searched by the workspace within that file only, and
+     * the declaration holding the first code match is read once, ranged - two tool calls the
+     * model no longer spends answers on.
+     */
+    @Test
+    void aPhraseInALargeFileIsSearchedThereAndItsRangeReadOnce() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Large.tsx")),
+                "'진행 중만 보기' 버튼을 추가해줘");
+        String largeRefusal = "The file is 29470 characters over 559 lines - too large to read "
+                + "whole. Call read_file with startLine and endLine. Outline (line: declaration):"
+                + "\n173: export function PortalHome() {\n210: export function Other() {";
+        String range = "export function PortalHome() {\n  return <button>진행 중만 보기</button>;\n}";
+        List<JsonNode> submitted = new ArrayList<>();
+        AtomicReference<JsonNode> last = new AtomicReference<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(invocation -> {
+                    JsonNode toolRequest = invocation.getArgument(1);
+                    JsonNode arguments = toolRequest.path("tool").path("arguments");
+                    if ("read_file".equals(toolRequest.path("tool").path("name").asText())
+                            && !arguments.has("startLine")) {
+                        throw new CodingToolException(
+                                "TOOL_ARGUMENTS_INVALID", largeRefusal, HttpStatus.BAD_REQUEST);
+                    }
+                    submitted.add(toolRequest);
+                    last.set(toolRequest);
+                    return acceptedSubmit(fixture.submittedToolCall()).answer(invocation);
+                });
+        doAnswer(ignored -> switch (last.get().path("tool").path("name").asText()) {
+            case "search_code" -> jsonResult(fixture, "{\"matches\":[{\"path\":\"src/Large.tsx\","
+                    + "\"line\":180,\"column\":3,\"preview\":\"  <button>진행 중만 보기</button>\"}],"
+                    + "\"truncated\":false}");
+            case "read_file" -> textResult(fixture, range);
+            default -> jsonResult(fixture, diffJson());
+        }).when(fixture.toolService()).result("Bearer worker", EXECUTION);
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("search_code", "read_file", "read_diff");
+        JsonNode search = submitted.get(0).path("tool").path("arguments");
+        assertThat(search.path("query").asText()).isEqualTo("진행 중만 보기");
+        assertThat(search.path("roots")).hasSize(1);
+        assertThat(search.path("roots").get(0).asText()).isEqualTo("src/Large.tsx");
+        JsonNode read = submitted.get(1).path("tool").path("arguments");
+        assertThat(read.path("path").asText()).isEqualTo("src/Large.tsx");
+        assertThat(read.path("startLine").asInt()).isEqualTo(173);
+        assertThat(read.path("endLine").asInt()).isEqualTo(209);
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("startLine").asInt()).isEqualTo(173);
+        assertThat(excerpts.get(0).path("endLine").asInt()).isEqualTo(209);
+        assertThat(excerpts.get(0).path("content").asText()).isEqualTo(range);
+    }
+
+    /* A phrase two target files hold names neither of them; a comment match is not the screen. */
+    @Test
+    void aPhraseHeldByTwoFilesOrOnlyByACommentYieldsNoExcerpt() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        // Two whole files hold the phrase on a code line.
+        StageFixture two = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java", "src/Twin.java")),
+                "Rename 'updateUser' on the members screen.");
+        answerToolsByRequest(two, new ArrayList<>(), toolRequest ->
+                "read_file".equals(toolRequest.path("tool").path("name").asText())
+                        ? textResult(two, SMALL_JAVA)
+                        : jsonResult(two, diffJson()));
+        when(two.gateway().chat(any())).thenReturn(terminalReply());
+        two.service().execute("Bearer worker", JOB, 1, RESULT, two.request());
+        ArgumentCaptor<ProviderChatRequest> routedTwo =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(two.gateway()).chat(routedTwo.capture());
+        assertThat(mapper.readTree(firstUserMessage(routedTwo.getValue()))
+                .has("targetFileExcerpts")).isFalse();
+
+        // One file holds the phrase, but only in a comment.
+        StageFixture comment = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java")),
+                "Rename 'updateUser' on the members screen.");
+        answerToolsByRequest(comment, new ArrayList<>(), toolRequest ->
+                "read_file".equals(toolRequest.path("tool").path("name").asText())
+                        ? textResult(comment, "package demo;\n\n// updateUser lives elsewhere\n"
+                                + "public class Small {\n    public void save() {\n    }\n}\n")
+                        : jsonResult(comment, diffJson()));
+        when(comment.gateway().chat(any())).thenReturn(terminalReply());
+        comment.service().execute("Bearer worker", JOB, 1, RESULT, comment.request());
+        ArgumentCaptor<ProviderChatRequest> routedComment =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(comment.gateway()).chat(routedComment.capture());
+        assertThat(mapper.readTree(firstUserMessage(routedComment.getValue()))
+                .has("targetFileExcerpts")).isFalse();
+    }
+
+    /* Excerpts ride along on every answer, so past 8,000 characters only the first is kept. */
+    @Test
+    void excerptsStopAtTheCharacterCap() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StringBuilder big = new StringBuilder("public class Big {\n");
+        big.append("    public void alpha() {\n");
+        for (int line = 0; line < 100; line++) {
+            big.append("        int a").append(line).append(" = ").append("x".repeat(50)).append(";\n");
+        }
+        big.append("    public void beta() {\n");
+        for (int line = 0; line < 100; line++) {
+            big.append("        int b").append(line).append(" = ").append("y".repeat(50)).append(";\n");
+        }
+        big.append("}\n");
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Big.java")),
+                "Change 'alpha' and 'beta' on the screen.");
+        answerToolsByRequest(fixture, new ArrayList<>(), toolRequest ->
+                "read_file".equals(toolRequest.path("tool").path("name").asText())
+                        ? textResult(fixture, big.toString())
+                        : jsonResult(fixture, diffJson()));
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("startLine").asInt()).isEqualTo(2);
+        assertThat(excerpts.get(0).path("endLine").asInt()).isEqualTo(102);
+        assertThat(excerpts.get(0).path("content").asText().length()).isLessThan(8_000);
+    }
+
+    @Test
+    void quotedPhrasesComeInOrderWithoutRepeatsAndAtMostFour() {
+        assertThat(CodingHandlerStageService.quotedPhrases(
+                "Add '진행 중만 보기' next to \"지금 열리는 축제·행사\", then ‘진행 중만 보기’ again, "
+                        + "“four”, 'five', and 'x'."))
+                .containsExactly("진행 중만 보기", "지금 열리는 축제·행사", "four", "five");
+        assertThat(CodingHandlerStageService.quotedPhrases("no quotes here")).isEmpty();
+        assertThat(CodingHandlerStageService.quotedPhrases(null)).isEmpty();
+    }
+
+    private static final String SMALL_JAVA = "package demo;\n\npublic class Small {\n"
+            + "    public void updateUser() {\n    }\n}\n";
+
+    /** Submits are accepted and recorded; each result is built from the request it answers. */
+    private static void answerToolsByRequest(
+            StageFixture fixture, List<JsonNode> submitted,
+            java.util.function.Function<JsonNode, CodingToolContract.ResultContent> results) {
+        AtomicReference<JsonNode> last = new AtomicReference<>();
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(invocation -> {
+                    JsonNode toolRequest = invocation.getArgument(1);
+                    submitted.add(toolRequest);
+                    last.set(toolRequest);
+                    return acceptedSubmit(fixture.submittedToolCall()).answer(invocation);
+                });
+        doAnswer(ignored -> results.apply(last.get()))
+                .when(fixture.toolService()).result("Bearer worker", EXECUTION);
+    }
+
+    private static CodingToolContract.ResultContent textResult(StageFixture fixture, String text) {
+        return new CodingToolContract.ResultContent(
+                "1.0", UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                fixture.submittedToolCall().get(),
+                JOB, TRACE, "stage-tool.result", EXECUTION, "text/plain", text.length(),
+                "sha256:" + "f".repeat(64), text);
+    }
+
+    private static CodingToolContract.ResultContent jsonResult(StageFixture fixture, String json) {
+        return new CodingToolContract.ResultContent(
+                "1.0", UUID.fromString("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+                fixture.submittedToolCall().get(),
+                JOB, TRACE, "stage-tool.result", EXECUTION, "application/json", json.length(),
+                "sha256:" + "f".repeat(64), json);
+    }
+
+    private static String diffJson() {
+        return "{\"workspaceId\":\"" + WORKSPACE + "\","
+                + "\"baseSha\":\"" + BASE_SHA + "\","
+                + "\"candidateSha\":\"" + BASE_SHA + "\","
+                + "\"digest\":\"" + DIFF_DIGEST + "\","
+                + "\"changedPaths\":[\"src/App.java\"]}";
     }
 
     /** A feasible analysis naming the given target files, as approval 1 stored it. */
@@ -2583,6 +2828,8 @@ class CodingHandlerStageServiceTest {
         assertThat(system).contains("reportSummary").contains("criteriaResults");
         // And the criteria agreed at approval 1 actually reach the reviewer.
         assertThat(user).contains("acceptanceCriteria");
+        // The reviewer's context carries neither of the code stage's pre-read structures.
+        assertThat(user).doesNotContain("targetFileOutlines").doesNotContain("targetFileExcerpts");
     }
 
     // Measured on Jobs a4dd06bf and c26fd4aa: the request was inside the fence and correctly

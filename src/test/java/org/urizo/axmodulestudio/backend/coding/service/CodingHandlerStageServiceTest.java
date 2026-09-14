@@ -112,6 +112,15 @@ class CodingHandlerStageServiceTest {
             ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
             ModelProvider provider, List<CodingHandlerContract.HandlerResultResponse> results,
             String requestText) {
+        return stageFixture(mapper, toolBindings, toolHistoryKeep, provider, results,
+                requestText, CodingHandlerStageService.DEFAULT_READ_ONLY_ANSWER_LIMIT);
+    }
+
+    /** {@code readOnlyAnswerLimit} is the code stage's brake on reading without an edit. */
+    private static StageFixture stageFixture(
+            ObjectMapper mapper, ProfileToolBindingPolicy toolBindings, int toolHistoryKeep,
+            ModelProvider provider, List<CodingHandlerContract.HandlerResultResponse> results,
+            String requestText, int readOnlyAnswerLimit) {
         CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
         CodingToolService toolService = mock(CodingToolService.class);
         CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
@@ -138,7 +147,7 @@ class CodingHandlerStageServiceTest {
                 mock(CodingRunnerService.class), mock(DeploymentAdapter.class), anyBindings,
                 mock(GuardrailPathSelectionService.class),
                 mock(GuardrailRuleService.class), mapper, clock,
-                120, Duration.ofMillis(500), toolHistoryKeep);
+                120, Duration.ofMillis(500), toolHistoryKeep, readOnlyAnswerLimit);
         CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
                 TRACE, 4,
                 UUID.fromString("11111111-1111-4111-8111-111111111111"),
@@ -648,6 +657,115 @@ class CodingHandlerStageServiceTest {
                 + "\"candidateSha\":\"" + BASE_SHA + "\","
                 + "\"digest\":\"" + DIFF_DIGEST + "\","
                 + "\"changedPaths\":[\"src/App.java\"]}";
+    }
+
+    /*
+     * AI04-034 brake: Job 3c9062a8 read for all 24 answers of its first code round, never
+     * edited, and failed at the turn limit after 218,644 input tokens. A first round that has
+     * only read for the limit's worth of answers now ends there with the same failure code,
+     * after the last reading answer's tool has run.
+     */
+    @Test
+    void readingWithoutAnEditEndsTheFirstCodeRoundAtTheBrake() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(), "Implement the approved change.", 3);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_file", READ_B, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("search_code", READ_C, "{\"query\":\"App\",\"scope\":\"src\"}"),
+                toolCallReply("read_file", READ_D, "{\"path\":\"src/Other.java\"}"),
+                terminalReply());
+
+        assertThatThrownBy(() -> fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request()))
+                .isInstanceOfSatisfying(ProviderGatewayException.class, failure -> {
+                    assertThat(failure.code())
+                            .isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
+                    assertThat(failure.getMessage()).contains("3 answers without an edit");
+                });
+        verify(fixture.gateway(), times(3)).chat(any());
+        // The stage's own read_diff, then the three reading answers' tools.
+        verify(fixture.toolService(), times(4))
+                .submitForNode(eq("Bearer worker"), any(), eq("code"));
+    }
+
+    /* An edit before the brake is reached switches it off for the rest of the round. */
+    @Test
+    void anEditBeforeTheBrakeKeepsTheCodeRoundGoing() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(), "Implement the approved change.", 3);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_file", READ_B, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("read_file", READ_C, "{\"path\":\"src/Other.java\"}"),
+                toolCallReply("apply_patch", READ_D, "{\"patch\":\"diff\"}"),
+                toolCallReply("read_file", READ_E, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("read_file", READ_F, "{\"path\":\"src/Other.java\"}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        verify(fixture.gateway(), times(6)).chat(any());
+    }
+
+    /* A zero limit disables the brake; only the turn limit bounds the round. */
+    @Test
+    void aZeroBrakeLeavesOnlyTheTurnLimit() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(), "Implement the approved change.", 0);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_file", READ_B, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("read_file", READ_C, "{\"path\":\"src/Other.java\"}"),
+                toolCallReply("read_file", READ_D, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("read_file", READ_E, "{\"path\":\"src/Other.java\"}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        verify(fixture.gateway(), times(5)).chat(any());
+    }
+
+    /* A rework round starts from a diff that already exists, so the brake leaves it alone. */
+    @Test
+    void theBrakeLeavesAReworkRoundAlone() {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerContract.HandlerResultResponse firstRound =
+                new CodingHandlerContract.HandlerResultResponse(
+                        "1.0", UUID.fromString("12121212-1212-4121-8121-121212121212"),
+                        JOB, TRACE, 1, "coding.code",
+                        CodingHandlerContract.ResultType.CANDIDATE, "completed",
+                        WORKSPACE, BASE_SHA, DIFF_DIGEST, null,
+                        mapper.createObjectNode().put("summary", "first round"), NOW);
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(firstRound), "Implement the approved change.", 3);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply("read_file", READ_B, "{\"path\":\"src/App.java\"}"),
+                toolCallReply("read_file", READ_C, "{\"path\":\"src/Other.java\"}"),
+                toolCallReply("read_file", READ_D, "{\"path\":\"src/App.java\"}"),
+                terminalReply());
+
+        CodingHandlerContract.StageExecutionResponse response = fixture.service().execute(
+                "Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(response.resultPort()).isEqualTo("completed");
+        verify(fixture.gateway(), times(4)).chat(any());
     }
 
     /** A feasible analysis naming the given target files, as approval 1 stored it. */

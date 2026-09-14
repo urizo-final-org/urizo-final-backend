@@ -226,6 +226,15 @@ public final class CodingHandlerStageService {
     private final Duration runnerPollInterval;
     /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
     private final int toolHistoryKeep;
+    /**
+     * How many answers the first code round may spend reading before its first edit. Job
+     * 3c9062a8 read for all 24 answers, never edited, and failed at the turn limit after
+     * 218,644 input tokens; the successful runs of the same request edited after 3 to 12
+     * reading answers (b3a872c3, 3d4b364e, 543eb70f). Ending at the brake costs the same
+     * failure a fraction of the tokens. 0 disables it.
+     */
+    private final int readOnlyAnswerLimit;
+    static final int DEFAULT_READ_ONLY_ANSWER_LIMIT = 12;
 
     /**
      * Three constructors mean Spring cannot guess, and without the annotation it looks for
@@ -247,10 +256,12 @@ public final class CodingHandlerStageService {
             GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock,
-            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep) {
+            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep,
+            @Value("${ax.coding.model-turn-bridge.read-only-answer-limit:12}")
+            int readOnlyAnswerLimit) {
         this(results, tools, modelGuard, models, runner, deploymentAdapter,
                 profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
-                clock, 120, Duration.ofMillis(500), toolHistoryKeep);
+                clock, 120, Duration.ofMillis(500), toolHistoryKeep, readOnlyAnswerLimit);
     }
 
     CodingHandlerStageService(
@@ -305,7 +316,31 @@ public final class CodingHandlerStageService {
             int maxRunnerPolls,
             Duration runnerPollInterval,
             int toolHistoryKeep) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, maxRunnerPolls, runnerPollInterval, toolHistoryKeep,
+                DEFAULT_READ_ONLY_ANSWER_LIMIT);
+    }
+
+    /** The full wiring; a test sets the read-only answer limit here. */
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval,
+            int toolHistoryKeep,
+            int readOnlyAnswerLimit) {
         this.toolHistoryKeep = toolHistoryKeep;
+        this.readOnlyAnswerLimit = readOnlyAnswerLimit;
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -613,6 +648,27 @@ public final class CodingHandlerStageService {
                         + "runs the checks itself, so checking is not this stage's job. Call "
                         + "apply_patch again only for a part of the request that is still "
                         + "missing - do not re-edit work that is already correct."));
+            }
+            // The brake: a first code round that has only read for readOnlyAnswerLimit answers
+            // ends here instead of reading on to the turn limit. With no edit attempted in this
+            // stage every answer that called a tool was a reading answer. A rework round is
+            // left alone - it starts from a diff that already exists.
+            if ("coding.code".equals(request.handlerKey()) && readOnlyAnswerLimit > 0
+                    && !patchAttempted
+                    && latestResultOrNull(aggregate, "coding.code", "completed") == null) {
+                int readingAnswers = 0;
+                for (JsonNode message : messages) {
+                    if ("assistant".equals(message.path("role").textValue())
+                            && !message.path("toolCalls").isEmpty()) {
+                        readingAnswers++;
+                    }
+                }
+                if (readingAnswers >= readOnlyAnswerLimit) {
+                    throw new ProviderGatewayException(
+                            ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                            "Coding Model read for " + readOnlyAnswerLimit
+                                    + " answers without an edit.");
+                }
             }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(

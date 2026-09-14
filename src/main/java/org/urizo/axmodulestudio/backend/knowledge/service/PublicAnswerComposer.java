@@ -14,6 +14,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatReque
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderChatResponse;
 import org.urizo.axmodulestudio.backend.knowledge.config.PublicChatLlmProperties;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
+import org.urizo.axmodulestudio.backend.knowledge.dto.PublicChatContract;
 
 /**
  * 공개 질의 답변을 LLM 산문으로 다시 쓴다. 기본값은 꺼짐이며, 꺼져 있으면
@@ -69,7 +70,7 @@ class PublicAnswerComposer {
                한 문장 설명, 그 아래 "· 항목: 값" 형식의 정보 줄로 쓰고 덩어리 사이는
                빈 줄로 띄운다. 한 곳만 소개할 때도 같은 형식을 쓴다. 머리말·맺음말은
                쓰지 않는다. 홈페이지 주소와 전화번호는 넣지 않는다 — 화면의 근거 카드에
-               이미 있다. 전체 500자 안팎으로 답한다.
+               이미 있다.
             5. 근거에 [상태] 줄이 있으면 그 행사가 종료됐다는 사실을 답변에 반드시
                포함한다. [상태] 줄이 없으면 종료 여부를 판단하거나 언급하지 않는다.
                오늘 날짜는 주어지지 않는다 — 행사 기간만 보고 지났다고 추측하지 않는다.
@@ -78,7 +79,11 @@ class PublicAnswerComposer {
                않는다. 정보 줄("· 이용시간: …")은 명사형으로 짧게 써도 된다. 다만 근거가
                정한 사실(종료 여부·날짜·요금)은 부드럽게 쓰되 추측형으로 흐리지 않는다.
             7. 마크다운 기호를 쓰지 않는다. *, **, #, -, [](), 표 기호는 화면에 글자
-               그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.""";
+               그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.
+            8. 근거 문서가 여럿이면 하나도 빠뜨리지 않는다. 질문과 관련된 내용이 있는
+               문서는 전부 답변에 담는다. 셋 중 둘만 설명하고 하나를 건너뛰지 않는다.
+               길이를 줄이려고 근거에 있는 중요한 내용을 빼지 않는다 — 필요하면 답변이
+               길어져도 된다.""";
 
     /**
      * 지원사업(공고) 도메인 프롬프트(2026-09-12, axms-ai02-011). 관광 프롬프트와 갈라지는
@@ -92,7 +97,8 @@ class PublicAnswerComposer {
      * (event_end_date가 [행사기간] 파싱 산물이고, 만료 라벨은 2호 범위에서 뺐다). 대신 이
      * 도메인의 거절 축은 자격 판정이다 — 지원금 자격을 지어내지 않는 것이 핵심 가치다.
      *
-     * <p>프롬프트 선택은 {@link #systemPromptFor(UUID)}가 한다.
+     * <p>프롬프트 선택은 {@code systemPromptFor}가 한다 — 도메인은 projectId로, 형식은
+     * 호출자가 보낸 {@code answerStyle}로 갈린다.
      */
     static final String SME_SYSTEM_PROMPT = """
             너는 중소기업 지원사업 안내 챗봇이다. 아래 규칙을 예외 없이 지킨다.
@@ -107,7 +113,7 @@ class PublicAnswerComposer {
                줄에는 근거에 있는 신청기간·지원대상·신청방법·문의처를 우선해 싣고,
                신청방법과 문의처가 근거에 있으면 반드시 포함한다 — 전화번호도 근거에
                적힌 그대로 쓴다. 홈페이지 주소(URL)는 넣지 않는다 — 화면의 근거 카드에
-               이미 있다. 머리말·맺음말은 쓰지 않는다. 전체 500자 안팎으로 답한다.
+               이미 있다. 머리말·맺음말은 쓰지 않는다.
             5. 개별 기업이나 질문자가 지원 자격이 되는지, 선정될 수 있는지는 판정하지
                않는다. 근거의 '지원대상'을 그대로 안내하고, 정확한 자격 확인은 근거에
                있는 문의처로 안내한다. 근거에 문의처가 없으면 문의처를 지어내지 않는다.
@@ -116,7 +122,31 @@ class PublicAnswerComposer {
                않는다. 정보 줄("· 신청기간: …")은 명사형으로 짧게 써도 된다. 다만 근거가
                정한 사실(날짜·금액·자격 요건)은 부드럽게 쓰되 추측형으로 흐리지 않는다.
             7. 마크다운 기호를 쓰지 않는다. *, **, #, -, [](), 표 기호는 화면에 글자
-               그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.""";
+               그대로 보인다. 줄바꿈과 가운뎃점(·)만으로 구조를 만든다.
+            8. 근거 문서가 여럿이면 하나도 빠뜨리지 않는다. 질문과 관련된 내용이 있는
+               문서는 전부 답변에 담는다. 셋 중 둘만 설명하고 하나를 건너뛰지 않는다.
+               길이를 줄이려고 근거에 있는 중요한 내용을 빼지 않는다 — 필요하면 답변이
+               길어져도 된다.""";
+
+    /**
+     * 통합검색 요약용 덧붙임. 도메인 프롬프트 뒤에 붙여 형식 규칙만 갈아 끼운다.
+     *
+     * <p>이 답변이 놓이는 자리가 다르다 — 챗봇은 답변만 읽고 판단하는 자리지만, 검색 요약은
+     * <b>바로 아래에 결과 카드가 펼쳐져 있는</b> 자리다. 거기서 카드마다 길게 풀면 같은 말을
+     * 두 번 하면서 정작 목록을 훑는 일을 방해한다.
+     *
+     * <p>규칙 4·8을 덮는다고 <b>명시한다.</b> 앞 규칙과 조용히 모순되게 두면 어느 쪽을
+     * 따를지가 호출마다 흔들린다.
+     */
+    static final String BRIEF_OVERRIDE = """
+
+
+            9. 이 답변은 검색 결과 목록 바로 위에 놓이는 한 문단 요약이다. 위 4번의 덩어리
+               형식과 8번의 전부 담기 규칙을 쓰지 않고, 대신 아래를 따른다.
+               - 결과를 하나씩 설명하지 않는다. 이름을 나열하지도 않는다.
+               - 여러 결과에 공통으로 보이는 성격이나 대표적인 내용을 두세 문장으로 쓴다.
+               - 정보 줄("· 항목: 값")을 쓰지 않는다. 세부는 아래 카드가 맡는다.
+               - 근거에 없는 내용을 채워 넣지 않는 것은 앞 규칙 그대로다.""";
 
     /**
      * 도메인 판정: projectId가 없으면 관광, 있으면 지원사업.
@@ -127,8 +157,9 @@ class PublicAnswerComposer {
      * 도메인 2개 확정 범위의 규칙이며, 관광이 projectId를 싣게 되는 날(slug 승격)이 오면
      * 프로젝트별 프롬프트 저장으로 바꾼다.
      */
-    static String systemPromptFor(UUID projectId) {
-        return projectId == null ? SYSTEM_PROMPT : SME_SYSTEM_PROMPT;
+    static String systemPromptFor(UUID projectId, PublicChatContract.AnswerStyle style) {
+        String domain = projectId == null ? SYSTEM_PROMPT : SME_SYSTEM_PROMPT;
+        return style == PublicChatContract.AnswerStyle.BRIEF ? domain + BRIEF_OVERRIDE : domain;
     }
 
     private static final String USER_TEMPLATE = """
@@ -162,13 +193,16 @@ class PublicAnswerComposer {
      * 아니거나, 호출이 실패하면 {@code grounded}를 그대로 돌려준다.
      */
     ProductApiContract.RagQueryResponse rewrite(
-            String query, ProductApiContract.RagQueryResponse grounded, UUID projectId) {
+            String query,
+            ProductApiContract.RagQueryResponse grounded,
+            UUID projectId,
+            PublicChatContract.AnswerStyle style) {
         if (!properties.enabled()
                 || !"ANSWERED".equals(grounded.outcome())
                 || grounded.citations().isEmpty()) {
             return grounded;
         }
-        String prose = generate(query, grounded.citations(), systemPromptFor(projectId));
+        String prose = generate(query, grounded.citations(), systemPromptFor(projectId, style));
         if (prose == null || prose.isBlank()) {
             LOG.warn("Public chat LLM answer fell back to the extractive answer: model={}",
                     properties.model());

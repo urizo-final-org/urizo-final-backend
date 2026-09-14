@@ -6,6 +6,7 @@ import java.util.UUID;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
+import org.urizo.axmodulestudio.backend.knowledge.dto.PublicChatContract;
 import org.urizo.axmodulestudio.backend.knowledge.repository.ProductStore;
 
 @Service
@@ -218,17 +219,22 @@ public final class ProductService implements
             ProductApiContract.RagQueryRequest request,
             List<String> category,
             String previousQuery,
-            UUID projectId) {
+            UUID projectId,
+            PublicChatContract.AnswerStyle answerStyle) {
         // 검색·인용·거절은 store가 확정한 그대로 두고 answer 문장만 다시 쓴다.
         // 플래그가 꺼져 있거나 LLM이 실패하면 추출식 응답이 그대로 나간다.
         //
         // rewrite에는 직전 질문을 넘기지 않는다. LLM은 이미 이번 검색이 고른 근거만 보고,
         // 그 근거가 대명사의 지시 대상을 확정한다. 프롬프트를 늘리면 단일 턴 측정치와
         // 비교가 끊긴다 — 켠 뒤 대명사 질문이 실제로 흔들리면 그때 넣는다.
+        //
+        // answerStyle은 검색·인용에 닿지 않는다. 같은 질문은 어느 화면에서 물어도 같은
+        // 근거를 찾고, 달라지는 것은 그 근거를 푸는 길이뿐이다.
         return answers.rewrite(
                 request.query(),
                 store.query(chatbotId, traceId, request, category, previousQuery),
-                projectId);
+                projectId,
+                answerStyle);
     }
 
     public ProductApiContract.AgentJobResponse getJob(UUID id, UUID traceId) {

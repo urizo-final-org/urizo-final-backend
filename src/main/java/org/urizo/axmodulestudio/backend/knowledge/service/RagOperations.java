@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.UUID;
 
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
+import org.urizo.axmodulestudio.backend.knowledge.dto.PublicChatContract;
 
 public interface RagOperations {
 
@@ -33,5 +34,6 @@ public interface RagOperations {
             ProductApiContract.RagQueryRequest request,
             List<String> category,
             String previousQuery,
-            UUID projectId);
+            UUID projectId,
+            PublicChatContract.AnswerStyle answerStyle);
 }

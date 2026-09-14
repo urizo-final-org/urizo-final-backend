@@ -57,16 +57,24 @@ class PublicChatResponseBoundaryTest {
                         "imageUrl");
     }
 
-    /** 첫 턴은 category도 previousQuery도 없이 온다 — 둘 다 생략 가능해야 한다. */
+    /**
+     * 첫 턴은 category도 previousQuery도 없이 온다 — 전부 생략 가능해야 한다.
+     *
+     * <p>{@code answerStyle}을 생략한 호출은 <b>상세 답변</b>이다. 이 필드가 생기기 전
+     * 호출자가 그대로 동작해야 한다(AXMS-AI02-025).
+     */
     @Test
-    void categoryAndPreviousQueryAreOptionalOnThePublicRequest() {
+    void everyFieldButTheQueryIsOptionalAndTheDefaultStyleIsDetailed() {
         assertThat(componentNames(PublicChatContract.PublicChatQueryRequest.class))
-                .containsExactly("query", "conversationId", "category", "previousQuery", "projectId");
+                .containsExactly(
+                        "query", "conversationId", "category", "previousQuery",
+                        "projectId", "answerStyle");
         PublicChatContract.PublicChatQueryRequest firstTurn =
-                new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null, null, null);
+                new PublicChatContract.PublicChatQueryRequest("한옥스테이", null, null, null, null, null);
         assertThat(firstTurn.category()).isNull();
         assertThat(firstTurn.previousQuery()).isNull();
         assertThat(firstTurn.projectId()).isNull();
+        assertThat(firstTurn.answerStyle()).isEqualTo(PublicChatContract.AnswerStyle.DETAILED);
     }
 
     @Test

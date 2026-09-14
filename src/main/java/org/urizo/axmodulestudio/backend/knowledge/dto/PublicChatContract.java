@@ -47,7 +47,29 @@ public final class PublicChatContract {
             UUID conversationId,
             @Size(max = 8) List<@Size(max = 40) String> category,
             @Size(max = 4000) String previousQuery,
-            UUID projectId) {
+            UUID projectId,
+            AnswerStyle answerStyle) {
+
+        /** 생략하면 상세 답변이다 — 이 필드가 생기기 전 호출자의 동작이 그대로 유지된다. */
+        public PublicChatQueryRequest {
+            answerStyle = answerStyle == null ? AnswerStyle.DETAILED : answerStyle;
+        }
+    }
+
+    /**
+     * 답변의 목적. 챗봇과 통합검색이 <b>같은 엔드포인트를 쓰지만 답변이 할 일은 다르다</b>.
+     *
+     * <p>챗봇({@code DETAILED})은 근거 카드 한 장씩을 충분히 풀어 설명한다. 방문자가 카드를
+     * 일일이 열어 보는 자리가 아니라 답변만 읽고 판단하는 자리다.
+     *
+     * <p>통합검색({@code BRIEF})은 결과 목록 <b>위에</b> 놓이는 한 문단이다. 결과 셋을 각각
+     * 길게 풀면 바로 아래 카드와 같은 말을 두 번 하게 되고, 정작 목록을 훑는 일을 방해한다.
+     *
+     * <p>이 구분은 호출자만 안다 — 서버는 어느 화면에서 왔는지 알 방법이 없다.
+     */
+    public enum AnswerStyle {
+        DETAILED,
+        BRIEF
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)

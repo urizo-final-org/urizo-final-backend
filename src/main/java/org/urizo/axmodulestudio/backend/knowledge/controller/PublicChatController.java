@@ -77,7 +77,8 @@ public class PublicChatController {
                         null),
                 body.category(),
                 body.previousQuery(),
-                body.projectId()));
+                body.projectId(),
+                body.answerStyle()));
     }
 
     /**

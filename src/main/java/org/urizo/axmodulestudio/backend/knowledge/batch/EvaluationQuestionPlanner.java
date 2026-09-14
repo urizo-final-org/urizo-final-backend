@@ -59,7 +59,7 @@ public class EvaluationQuestionPlanner {
     /** 본문과 이 길이 이상 연속 일치하면 원문 복사로 본다. */
     static final int CONTENT_RUN = 20;
     /** 프롬프트가 바뀌면 올린다. 세트에 기록되어 "어느 출제 기준으로 만든 세트인가"를 남긴다. */
-    public static final String PROMPT_VERSION = "v1";
+    public static final String PROMPT_VERSION = "v2";
 
     static final String SYSTEM_PROMPT = """
             너는 검색 품질을 재기 위한 시험 문제를 만드는 도구다. 아래 규칙을 예외 없이 지킨다.
@@ -71,7 +71,8 @@ public class EvaluationQuestionPlanner {
             3. 문서에 적힌 지역명·기관명·사업명을 그대로 옮겨 적지 않는다. 그 고유명사가
                없어도 내용으로 찾아지는지가 이 시험의 목적이다.
             4. 질문은 한국어 한 문장이고 10자 이상 80자 이하다.
-            5. documentIndex는 주어진 문서 번호만 쓴다.
+            5. documentIndex는 각 문서 앞 《문서 N》에 표시된 N을 그대로 쓴다. 번호는
+               1부터 시작한다. 0은 없다.
             6. JSON 객체 하나만 출력한다. 설명 문장이나 마크다운 기호를 덧붙이지 않는다.""";
 
     /** 출제 재료. {@code title}은 프롬프트에 실리지 않고 유출 검증에만 쓴다. */
@@ -137,6 +138,13 @@ public class EvaluationQuestionPlanner {
 
     /** 응답에서 문항을 꺼내 검증한다. 문서당 첫 유효 문항만 남긴다. */
     private static List<GeneratedQuestion> accept(List<CandidateDocument> batch, JsonNode answer) {
+        for (JsonNode entry : answer.path("questions")) {
+            // 0이 하나라도 있으면 이 응답은 0-base다. 0번만 버리고 나머지를 받으면
+            // 전 문항이 한 칸 밀린 채 조용히 통과한다(관광 36/46 오정렬 실측). 배치째 버린다.
+            if (entry.path("documentIndex").asInt(-1) == 0) {
+                return List.of();
+            }
+        }
         Map<Integer, GeneratedQuestion> byIndex = new LinkedHashMap<>();
         for (JsonNode entry : answer.path("questions")) {
             int index = entry.path("documentIndex").asInt(0);
@@ -271,7 +279,9 @@ public class EvaluationQuestionPlanner {
         StringBuilder message = new StringBuilder();
         for (int index = 0; index < batch.size(); index++) {
             CandidateDocument document = batch.get(index);
-            message.append("[문서 ").append(index + 1).append(']');
+            // 대괄호 구분자는 쓰지 않는다 — 관광 본문은 모든 줄이 '['로 시작해([분류]/[이름]…)
+            // [문서 N]과 겹치고, 그때 모델이 번호를 0부터 세는 오정렬이 실측됐다(2026-09-13).
+            message.append("《문서 ").append(index + 1).append('》');
             if (document.category() != null && !document.category().isBlank()) {
                 message.append(" (분류: ").append(document.category().strip()).append(')');
             }

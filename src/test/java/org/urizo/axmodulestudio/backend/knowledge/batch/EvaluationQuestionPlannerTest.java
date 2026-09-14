@@ -97,6 +97,25 @@ class EvaluationQuestionPlannerTest {
                 .isEqualTo("PBLN_000000000000001");
     }
 
+    /**
+     * 관광 36/46 오정렬 실측(2026-09-13): 모델이 0-base로 답하면 0번만 버리고 나머지를
+     * 받는 순간 전 문항이 한 칸 밀린 채 조용히 통과한다. 배치째 시끄럽게 실패해야 한다.
+     */
+    @Test
+    void aZeroIndexAnywhereDropsTheWholeBatch() {
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        CandidateDocument second = new CandidateDocument(
+                "PBLN_000000000000002", "서울 강남구 소상공인 경영안정자금 융자 지원 공고",
+                "관내 소상공인의 안정적인 사업 운영을 돕는다.", null, "digest-2");
+        when(gateway.chat(any())).thenReturn(response("""
+                {"questions":[
+                  {"documentIndex":0,"question":"영번을 가리키는 질문 — 이 배치는 0-base다"},
+                  {"documentIndex":1,"question":"창업 초기인데 멘토링 받을 만한 곳이 있을까요?"}
+                ]}"""));
+
+        assertThat(planner(gateway, true).generate(List.of(DOCUMENT, second))).isEmpty();
+    }
+
     @Test
     void disabledPlannerNeverCallsTheGateway() {
         ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);

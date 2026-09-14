@@ -12,3 +12,6 @@ target
 docs
 README.md
 compose*.yaml
+# Spring 이미지와 무관한 별도 서비스다. 여기 두지 않으면 팀원이 만든
+# embedding-server/venv(약 2.5GB)가 매 빌드마다 데몬으로 전송된다.
+embedding-server

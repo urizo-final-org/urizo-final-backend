@@ -7,3 +7,9 @@ target/
 .env.*
 !.env.example
 .local/
+
+# 임베딩 서버 가상환경(약 2.5GB)과 파이썬 부산물. README대로 설치하면
+# embedding-server/venv/가 생긴다 — 저장소에 들어가면 안 된다.
+venv/
+__pycache__/
+*.pyc

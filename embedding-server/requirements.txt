@@ -1,0 +1,31 @@
+# bge-m3 임베딩 서버 전용 의존성.
+#
+# 실험 작업실(api-test)의 requirements.txt를 그대로 가져오지 않았다. 그쪽에는 평가 전용
+# 의존성(ragas·langchain-community·scikit-learn·rapidfuzz·python-dotenv)이 섞여 있는데
+# 서버는 하나도 쓰지 않는다. 아래는 실제로 돌고 있는 venv에서 확인한 버전이다.
+#
+# torch는 PyPI 기본 인덱스에 +cpu 빌드가 없다. CPU 인덱스에서 먼저 설치할 것:
+#   uv pip install --python venv/Scripts/python.exe torch==2.13.0+cpu \
+#       --index-url https://download.pytorch.org/whl/cpu
+#   uv pip install --python venv/Scripts/python.exe -r requirements.txt
+
+# 임베딩 값에 직접 영향을 주는 것들. 버전을 올리면 DB에 저장된 v8 벡터 500건의
+# 기준선이 무효가 될 수 있다 — 올리기 전에 rag/embed_bge.py의 경고를 먼저 읽을 것.
+torch==2.13.0+cpu
+sentence-transformers==6.0.0
+transformers==5.16.1
+numpy==2.4.6
+tokenizers==0.23.1
+safetensors==0.8.0
+scipy==1.17.1
+
+# HTTP 서빙. 임베딩 값과 무관하다.
+fastapi==0.141.1
+uvicorn==0.52.4
+
+# fastapi가 함께 설치하는 전이 의존성 — 재현을 위해 고정한다.
+pydantic==2.13.5
+starlette==1.6.0
+annotated-types==0.8.0
+typing-inspection==0.4.4
+tqdm==4.70.0

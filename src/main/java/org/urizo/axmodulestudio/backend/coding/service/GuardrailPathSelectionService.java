@@ -79,6 +79,18 @@ public class GuardrailPathSelectionService {
         return !rows.isEmpty() && Boolean.TRUE.equals(rows.get(0));
     }
 
+    /**
+     * The folders switched on for one repository, for bounding a search to the fence. Empty when
+     * none are, including an unconfigured fence, where there is no boundary to search within.
+     */
+    public List<String> enabledPaths(String repository) {
+        requireKnownRepository(repository);
+        return List.copyOf(jdbc.queryForList(
+                "SELECT path FROM app.guardrail_path_selection "
+                        + "WHERE repository = ? AND enabled ORDER BY path",
+                String.class, repository));
+    }
+
     public GuardrailSelectionContract.SelectionList save(
             GuardrailSelectionContract.SaveRequest request) {
         String repository = request.repository();
@@ -145,6 +157,27 @@ public class GuardrailPathSelectionService {
     public List<String> jobFiles(UUID jobId) {
         Objects.requireNonNull(jobId, "jobId is required");
         return areaLabels(jobId, "files");
+    }
+
+    /**
+     * Where text the request quotes appeared inside the fence when the job was created. Empty for
+     * a job created before the search existed, for a request that quoted nothing, or when the
+     * runner found nothing.
+     */
+    public List<GuardrailJobSnapshotWriter.PhraseMatch> jobPhraseMatches(UUID jobId) {
+        Objects.requireNonNull(jobId, "jobId is required");
+        List<GuardrailJobSnapshotWriter.PhraseMatch> stored = jdbc.query(
+                "SELECT phrase_match ->> 'phrase' AS phrase, phrase_match ->> 'path' AS path, "
+                        + "(phrase_match ->> 'line')::int AS line, "
+                        + "phrase_match ->> 'preview' AS preview "
+                        + "FROM app.guardrail_job_snapshot, "
+                        + "jsonb_array_elements(snapshot_json -> 'phraseMatches') AS phrase_match "
+                        + "WHERE job_id = ?",
+                (row, index) -> new GuardrailJobSnapshotWriter.PhraseMatch(
+                        row.getString("phrase"), row.getString("path"),
+                        row.getInt("line"), row.getString("preview")),
+                jobId);
+        return List.copyOf(stored);
     }
 
     private List<String> areaLabels(UUID jobId, String field) {

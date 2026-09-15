@@ -1669,6 +1669,21 @@ public final class CodingHandlerStageService {
                         ArrayNode fenceFiles = guardrail.putArray("files");
                         files.forEach(fenceFiles::add);
                     }
+                    // Where the request's quoted text already is, found by the scan at
+                    // submission. From names alone, the file holding a quoted heading was left
+                    // out whenever its name did not suggest the screen: 18 runs of one request,
+                    // Gemini 11/11, haiku 2/4, nano 1/3. Left out when nothing was found, so
+                    // every other request's context is unchanged.
+                    List<GuardrailJobSnapshotWriter.PhraseMatch> matches =
+                            guardrailSelections.jobPhraseMatches(aggregate.jobId());
+                    if (!matches.isEmpty()) {
+                        ArrayNode phraseMatches = guardrail.putArray("phraseMatches");
+                        matches.forEach(match -> phraseMatches.addObject()
+                                .put("phrase", match.phrase())
+                                .put("path", match.path())
+                                .put("line", match.line())
+                                .put("preview", match.preview()));
+                    }
                     guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
                         guardrail.put("allowNewDependency", rules.allowNewDependency());
                         guardrail.put("maxChangedFiles", rules.maxChangedFiles());
@@ -1808,10 +1823,18 @@ public final class CodingHandlerStageService {
                     + "permissions, or the guardrail at all. ";
             default -> "";
         };
+        // Said only when the list is there: an instruction about a list the context does not
+        // carry would have the analyst hunt for it.
+        String phraseHint = context.path("guardrail").has("phraseMatches")
+                ? "guardrail.phraseMatches lists where text the request quotes already appears "
+                        + "in code; when the change edits that text, name those files first in "
+                        + "targetFiles. It is a hint, not the answer. "
+                : "";
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
                 + "synonym or rewording, and payload must be an object. " + payloadFields
+                + phraseHint
                 + ("coding.code".equals(handlerKey)
                     // The loop runs up to MAX_BATCHED_READS reads from one answer and any other
                     // tool alone, so the model is told both halves - otherwise a mixed answer

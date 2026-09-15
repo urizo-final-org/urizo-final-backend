@@ -14,6 +14,7 @@ import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -230,7 +231,7 @@ public class CodingJobIntakeService {
                     "활성 AI 설정에 시작 노드가 없습니다.", HttpStatus.CONFLICT);
         }
 
-        ScanResult scan = scan(repository);
+        ScanResult scan = scan(repository, requestText);
         String baseSha = scan.baseSha();
         Instant now = Instant.now(clock);
 
@@ -249,10 +250,10 @@ public class CodingJobIntakeService {
                         nodes,
                         now.plus(JOB_LIFETIME),
                         requestText);
-        // The file list travels with the creation itself: the guardrail copy is written
-        // once, in that transaction, and no runtime account may update it afterwards.
-        CodingHandlerContract.CreateCodingJobResponse created =
-                commands.create(actor, traceId, idempotencyKey, request, scan.files());
+        // The file list and the phrase matches travel with the creation itself: the guardrail
+        // copy is written once, in that transaction, and no runtime account may update it.
+        CodingHandlerContract.CreateCodingJobResponse created = commands.create(
+                actor, traceId, idempotencyKey, request, scan.files(), scan.phraseMatches());
         // The code stage's MCP tools operate inside a workspace the host runner prepares,
         // and nothing else in the product flow asks for one - the 8/31 walkthrough inserted
         // this task by hand, which is why every Job died at its first tool call with
@@ -416,18 +417,49 @@ public class CodingJobIntakeService {
         return List.copyOf(ids);
     }
 
-    /** What the scan reports: the commit a Job is pinned to, and the files it may be shown. */
-    private record ScanResult(String baseSha, List<String> files) { }
+    /**
+     * What the scan reports: the commit a Job is pinned to, the files it may be shown, and the
+     * lines where text the request quotes already appears.
+     */
+    private record ScanResult(
+            String baseSha,
+            List<String> files,
+            List<GuardrailJobSnapshotWriter.PhraseMatch> phraseMatches) { }
+
+    /** A pathspec list for the runner's search, not a walk of the repository. */
+    private static final int MAX_SEARCH_PATHS = 20;
+    private static final int MAX_SEARCH_PHRASE_CHARACTERS = 80;
 
     /**
      * Asks the runner for {@code origin/dev} and waits. The runner resolves a ref it already
      * has rather than fetching, so the wait is its poll interval and not a network round trip.
      * The same answer carries the repository's tracked files, so the agents can be handed the
      * files they may change instead of searching for them.
+     *
+     * <p>When the request quotes text and the fence allows folders here, the same scan also looks
+     * that text up. The analyst picks target files from names alone, and in 18 runs of one request
+     * haiku and nano left out the file holding the quoted heading in 4 of 7, because its name did
+     * not suggest the home screen. Only allowed folders are sent, so the search stays inside the
+     * fence; an unconfigured fence has nothing to bound it by and sends no search at all.
      */
-    private ScanResult scan(String repository) {
-        UUID taskId = runner.enqueue(
-                SCAN_KIND, objectMapper.createObjectNode().put("repo", repository));
+    private ScanResult scan(String repository, String requestText) {
+        List<String> phrases = CodingHandlerStageService.quotedPhrases(requestText).stream()
+                .filter(phrase -> phrase.length() <= MAX_SEARCH_PHRASE_CHARACTERS)
+                .toList();
+        List<String> folders = phrases.isEmpty() ? List.of()
+                : guardrailSelections.enabledPaths(repository).stream()
+                        .filter(folder -> !GuardrailPathPolicy.isDenied(folder))
+                        .limit(MAX_SEARCH_PATHS)
+                        .toList();
+        List<String> searched = folders.isEmpty() ? List.of() : phrases;
+        ObjectNode payload = objectMapper.createObjectNode().put("repo", repository);
+        if (!searched.isEmpty()) {
+            ArrayNode sentPhrases = payload.putArray("phrases");
+            searched.forEach(sentPhrases::add);
+            ArrayNode sentPaths = payload.putArray("paths");
+            folders.forEach(sentPaths::add);
+        }
+        UUID taskId = runner.enqueue(SCAN_KIND, payload);
 
         for (int poll = 0; poll < maxShaPolls; poll++) {
             CodingRunnerService.TaskOutcome outcome = runner.taskOutcome(taskId, SCAN_KIND);
@@ -439,7 +471,8 @@ public class CodingJobIntakeService {
             }
             JsonNode result = outcome.result();
             if (result != null) {
-                return new ScanResult(prefixed(result.path("sha")), paths(result.path("files")));
+                return new ScanResult(prefixed(result.path("sha")), paths(result.path("files")),
+                        phraseMatches(result.path("phraseMatches"), searched));
             }
             sleep(shaPollInterval);
         }
@@ -448,6 +481,28 @@ public class CodingJobIntakeService {
         throw failure("CODING_RUNNER_NOT_RESPONDING",
                 "실행기가 응답하지 않습니다. 실행기가 켜져 있는지 확인해 주세요.",
                 HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    /**
+     * The runner's matches for the phrases this request sent. Nothing when an older runner did
+     * not search, and nothing for a phrase the request never quoted.
+     */
+    private static List<GuardrailJobSnapshotWriter.PhraseMatch> phraseMatches(
+            JsonNode matches, List<String> searched) {
+        if (!matches.isArray() || searched.isEmpty()) {
+            return List.of();
+        }
+        List<GuardrailJobSnapshotWriter.PhraseMatch> found = new ArrayList<>();
+        for (JsonNode match : matches) {
+            String phrase = match.path("phrase").asText("");
+            if (searched.contains(phrase) && match.path("path").isTextual()
+                    && match.path("line").isIntegralNumber() && match.path("preview").isTextual()) {
+                found.add(new GuardrailJobSnapshotWriter.PhraseMatch(phrase,
+                        match.path("path").asText(), match.path("line").asInt(),
+                        match.path("preview").asText()));
+            }
+        }
+        return List.copyOf(found);
     }
 
     /**

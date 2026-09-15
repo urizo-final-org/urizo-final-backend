@@ -3330,6 +3330,145 @@ class CodingHandlerStageServiceTest {
         assertThat(userContent(sent)).doesNotContain("guardrail");
     }
 
+    // The phrase matches carry paths, and reportSummary reaches the same general administrator
+    // as planSummary. The reviewer is given neither the list nor the instruction about it.
+    @Test
+    void theReviewerIsNeverShownThePhraseMatches() throws Exception {
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
+        when(selections.jobSnapshot(JOB)).thenReturn(List.of("frontend:src/features/site"));
+        when(selections.jobAreas(JOB)).thenReturn(
+                new GuardrailPathSelectionService.JobAreas(List.of("사이트 화면"), List.of()));
+        when(selections.jobPhraseMatches(JOB)).thenReturn(List.of(
+                new GuardrailJobSnapshotWriter.PhraseMatch("지금 열리는 축제·행사",
+                        "src/features/site/TourPortal.tsx", 307, "<h2>지금 열리는 축제·행사</h2>")));
+
+        ProviderChatRequest sent = captureReviewRequest(selections);
+
+        assertThat(userContent(sent)).doesNotContain("phraseMatches")
+                .doesNotContain("TourPortal.tsx");
+        assertThat(systemContent(sent)).doesNotContain("guardrail.phraseMatches");
+    }
+
+    // One request run 18 times: from names alone the file holding the quoted heading was chosen
+    // by Gemini 11/11, haiku 2/4 and nano 1/3. The scan's matches reach the analyst with one
+    // sentence saying what they are and that the choice is still its own.
+    @Test
+    void theAnalystIsShownWhereTheQuotedTextAlreadyAppears() throws Exception {
+        GuardrailPathSelectionService selections = phraseFence();
+        when(selections.jobPhraseMatches(JOB)).thenReturn(List.of(
+                new GuardrailJobSnapshotWriter.PhraseMatch("지금 열리는 축제·행사",
+                        "src/features/site/TourPortal.tsx", 307, "<h2>지금 열리는 축제·행사</h2>")));
+
+        ProviderChatRequest sent = captureAnalysisRequest(selections);
+
+        assertThat(userContent(sent)).contains("phraseMatches")
+                .contains("<h2>지금 열리는 축제·행사</h2>")
+                .contains("307");
+        assertThat(systemContent(sent)).contains("guardrail.phraseMatches")
+                .contains("It is a hint, not the answer.");
+    }
+
+    // Also the shape of every job created before the search existed: its copy has no list.
+    @Test
+    void anAnalystWithNoPhraseMatchesSeesNeitherTheListNorTheInstruction() throws Exception {
+        ProviderChatRequest sent = captureAnalysisRequest(phraseFence());
+
+        assertThat(userContent(sent)).doesNotContain("phraseMatches").contains("사이트 화면");
+        assertThat(systemContent(sent)).doesNotContain("guardrail.phraseMatches");
+    }
+
+    private static GuardrailPathSelectionService phraseFence() {
+        GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
+        when(selections.jobSnapshot(JOB)).thenReturn(List.of("frontend:src/features/site"));
+        when(selections.jobAreas(JOB)).thenReturn(
+                new GuardrailPathSelectionService.JobAreas(List.of("사이트 화면"), List.of()));
+        when(selections.jobFiles(JOB)).thenReturn(List.of("src/features/site/TourPortal.tsx"));
+        return selections;
+    }
+
+    /** Runs one analysis stage against the given fence and returns the request the gateway saw. */
+    private ProviderChatRequest captureAnalysisRequest(
+            GuardrailPathSelectionService selections) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        CodingHandlerResultService resultService = mock(CodingHandlerResultService.class);
+        CodingToolService toolService = mock(CodingToolService.class);
+        CodingModelTurnGuard guard = mock(CodingModelTurnGuard.class);
+        ProviderChatGatewayPort gateway = mock(ProviderChatGatewayPort.class);
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        ProviderModelRegistration registration = new ProviderModelRegistration(
+                ModelProvider.GOOGLE_GENAI,
+                "coding-test-model",
+                Set.of(
+                        ModelCapability.CHAT,
+                        ModelCapability.TOOL_CALLING,
+                        ModelCapability.STRUCTURED_OUTPUT),
+                Duration.ofSeconds(30),
+                2);
+        CodingModelTurnService modelService = new CodingModelTurnService(
+                new ProviderCapabilityRegistry(
+                        ProviderLane.PRODUCT,
+                        ProviderCapabilityPolicy.stage2Baseline(),
+                        List.of(registration)),
+                gateway,
+                mapper,
+                clock,
+                false);
+        ProfileModelBindingService profileModelBindings =
+                mock(ProfileModelBindingService.class);
+        when(profileModelBindings.resolve(
+                PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT))
+                .thenReturn(List.of(registration));
+        CodingHandlerStageService service = new CodingHandlerStageService(
+                resultService, toolService, guard, modelService,
+                mock(CodingRunnerService.class), mock(DeploymentAdapter.class),
+                profileModelBindings, selections,
+                mock(GuardrailRuleService.class), mapper, clock);
+        CodingToolService.StageAuthority authority = new CodingToolService.StageAuthority(
+                TRACE,
+                4,
+                UUID.fromString("11111111-1111-4111-8111-111111111111"),
+                UUID.fromString("22222222-2222-4222-8222-222222222222"),
+                UUID.fromString("33333333-3333-4333-8333-333333333333"),
+                UUID.fromString("44444444-4444-4444-8444-444444444444"),
+                "coding",
+                BASE_SHA,
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+                "coding-v1",
+                Set.of("CHAT", "TOOL_CALLING"),
+                Set.of("coding"),
+                Set.copyOf(CodingToolService.CODING_TOOL_SCHEMA_DIGESTS.keySet()),
+                NOW.plusSeconds(60),
+                PROFILE);
+        CodingHandlerContract.AttemptAggregateResponse aggregate =
+                new CodingHandlerContract.AttemptAggregateResponse(
+                        "1.0", JOB, TRACE, 1, WORKSPACE,
+                        CodingHandlerContract.AttemptStatus.ACTIVE,
+                        "홈 화면 '지금 열리는 축제·행사' 에 진행 중만 보는 버튼을 넣어줘",
+                        List.of(), List.of(), List.of(), NOW, null);
+        when(toolService.stageAuthority(eq("Bearer worker"), eq(JOB), eq(4)))
+                .thenReturn(authority);
+        when(resultService.aggregate("Bearer worker", JOB, 1)).thenReturn(aggregate);
+        when(guard.reserve(eq("Bearer worker"), any())).thenAnswer(invocation -> {
+            CodingModelTurnContract.Request turnRequest = invocation.getArgument(1);
+            return CodingModelTurnPermit.acquired(
+                    turnRequest.jobId(), turnRequest.idempotencyKey(), UUID.randomUUID());
+        });
+        when(gateway.chat(any())).thenReturn(assistantText(
+                "{\"port\":\"feasible\",\"payload\":{\"planSummary\":\"버튼을 넣습니다.\","
+                        + "\"acceptanceCriteria\":[\"버튼이 보인다\"],"
+                        + "\"targetFiles\":[\"src/features/site/TourPortal.tsx\"]}}"));
+
+        service.execute("Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.analyze", RESULT));
+
+        ArgumentCaptor<ProviderChatRequest> sent =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(gateway).chat(sent.capture());
+        return sent.getValue();
+    }
+
     /** Runs one review stage against the given fence and returns the request the gateway saw. */
     private ProviderChatRequest captureReviewRequest(
             GuardrailPathSelectionService selections) throws Exception {

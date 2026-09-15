@@ -13,5 +13,9 @@ interface LangfuseHttpTransport {
             Duration timeout,
             int maxResponseBytes) throws IOException, InterruptedException;
 
-    record Response(int statusCode, String body) { }
+    record Response(int statusCode, String body, String retryAfter) {
+        Response(int statusCode, String body) {
+            this(statusCode, body, null);
+        }
+    }
 }

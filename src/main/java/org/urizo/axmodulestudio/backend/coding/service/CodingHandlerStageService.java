@@ -2449,6 +2449,10 @@ public final class CodingHandlerStageService {
     private static final int FENCE_READ_SEQUENCE_BASE = 1500;
     /** The most fence folders one phrase is searched in. */
     private static final int MAX_FENCE_SEARCH_FOLDERS = 3;
+    /** Tool sequence numbers of the re-reads that settle an ambiguous fence match. */
+    private static final int FENCE_RECHECK_SEQUENCE_BASE = 1600;
+    /** Past this many candidate files a phrase names no file surely, so none is re-read. */
+    private static final int MAX_FENCE_RECHECK_FILES = 4;
 
     /** The one file outside the targets that holds a phrase, and the line it holds it on. */
     private record FenceMatch(TargetFile file, int line) { }
@@ -2461,8 +2465,9 @@ public final class CodingHandlerStageService {
      * root without a fence). The phrase is adopted only when exactly one file other than a test
      * holds it on a code line: a test is not the screen, so it is not counted (Job 100af538 lost
      * festivalBadge when portal-meta.test.ts made portal-meta.ts look ambiguous). A match in two
-     * files, only in a test, or in a cut-off result names no file surely, so nothing is added,
-     * as before. The adopted file is then read the way a target is.
+     * to four files is settled by walking those files whole for block comments; whatever still
+     * holds it in more than one file, only in a test, or in a cut-off result names no file surely,
+     * so nothing is added, as before. The adopted file is then read the way a target is.
      */
     private FenceMatch fenceMatch(
             String authorization,
@@ -2506,6 +2511,38 @@ public final class CodingHandlerStageService {
                 }
             }
         }
+        // Job b960265f: one preview line cannot show that it sits inside a block comment, so
+        // PortalResultCard.tsx:56 - the middle line of a JSX comment - and portal-meta.ts:148
+        // looked equally held and festivalBadge was never excerpted. Only when a phrase looks
+        // held by more than one file are the candidates walked whole: a target from the copy
+        // already read, any other file read once. A file that cannot be read whole stays a
+        // candidate, as before.
+        java.util.Map<String, TargetFile> walked = new java.util.HashMap<>();
+        if (holders.size() > 1 && holders.size() <= MAX_FENCE_RECHECK_FILES) {
+            int candidateIndex = 0;
+            for (String path : List.copyOf(holders.keySet())) {
+                TargetFile target = targets.stream()
+                        .filter(candidate -> candidate.path().equals(path))
+                        .findFirst()
+                        .orElse(null);
+                TargetFile file = target != null ? target : readTargetFile(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        FENCE_RECHECK_SEQUENCE_BASE + phraseIndex * MAX_FENCE_RECHECK_FILES
+                                + candidateIndex, path);
+                candidateIndex++;
+                if (file == null || file.lines() == null) {
+                    continue;
+                }
+                int line = firstCodeLineHolding(file.lines(), phrase);
+                if (line <= 0) {
+                    holders.remove(path);
+                }
+                else {
+                    holders.put(path, line);
+                    walked.put(path, file);
+                }
+            }
+        }
         if (holders.size() != 1) {
             return null;
         }
@@ -2514,8 +2551,10 @@ public final class CodingHandlerStageService {
                 || targets.stream().anyMatch(target -> target.path().equals(only.getKey()))) {
             return null;
         }
-        TargetFile file = readTargetFile(authorization, jobId, request, authority, aggregate,
-                resultId, FENCE_READ_SEQUENCE_BASE + phraseIndex, only.getKey());
+        TargetFile file = walked.containsKey(only.getKey())
+                ? walked.get(only.getKey())
+                : readTargetFile(authorization, jobId, request, authority, aggregate,
+                        resultId, FENCE_READ_SEQUENCE_BASE + phraseIndex, only.getKey());
         return file == null ? null : new FenceMatch(file, only.getValue());
     }
 

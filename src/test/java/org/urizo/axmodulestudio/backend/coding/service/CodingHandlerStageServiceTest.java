@@ -1092,7 +1092,8 @@ class CodingHandlerStageServiceTest {
 
     /*
      * Two source files name neither surely, a phrase only a test holds is not the screen, and
-     * a cut-off result may hide a second file - none of them adds an excerpt or a read.
+     * a cut-off result may hide a second file - none of them adds an excerpt. Only the two-file
+     * case re-reads its candidates, and both still hold the phrase on a code line.
      */
     @Test
     void aFenceMatchInTwoFilesOnlyInATestOrCutOffIsNotUsed() throws Exception {
@@ -1107,7 +1108,13 @@ class CodingHandlerStageServiceTest {
                         "  expect(screen.getByText('진행 중')).toBeVisible()"),
                 searchJson(true, "src/features/site/portal-meta.ts", 100,
                         "  if (now >= start) return '진행 중'"));
-        for (String searchResult : searchResults) {
+        List<List<String>> expectedTools = List.of(
+                List.of("read_file", "search_code", "read_file", "read_file", "read_diff"),
+                List.of("read_file", "search_code", "read_diff"),
+                List.of("read_file", "search_code", "read_diff"));
+        String holding = "export function label() {\n  return '진행 중'\n}\n";
+        for (int caseIndex = 0; caseIndex < searchResults.size(); caseIndex++) {
+            String searchResult = searchResults.get(caseIndex);
             StageFixture fixture = stageFixture(
                     mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
                     List.of(analysisNaming(mapper, "src/Small.java")),
@@ -1117,11 +1124,12 @@ class CodingHandlerStageServiceTest {
             List<JsonNode> submitted = new ArrayList<>();
             answerToolsByRequest(fixture, submitted, toolRequest -> {
                 String name = toolRequest.path("tool").path("name").asText();
+                String path = toolRequest.path("tool").path("arguments").path("path").asText("");
                 if ("search_code".equals(name)) {
                     return jsonResult(fixture, searchResult);
                 }
                 if ("read_file".equals(name)) {
-                    return textResult(fixture, SMALL_JAVA);
+                    return textResult(fixture, "src/Small.java".equals(path) ? SMALL_JAVA : holding);
                 }
                 return jsonResult(fixture, diffJson());
             });
@@ -1131,13 +1139,79 @@ class CodingHandlerStageServiceTest {
 
             assertThat(submitted)
                     .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
-                    .containsExactly("read_file", "search_code", "read_diff");
+                    .containsExactlyElementsOf(expectedTools.get(caseIndex));
             ArgumentCaptor<ProviderChatRequest> routed =
                     ArgumentCaptor.forClass(ProviderChatRequest.class);
             verify(fixture.gateway()).chat(routed.capture());
             assertThat(mapper.readTree(firstUserMessage(routed.getValue()))
                     .has("targetFileExcerpts")).isFalse();
         }
+    }
+
+    /*
+     * The fence search this request really gets (frontend 34e797c): '진행 중' comes back on
+     * PortalResultCard.tsx:56, the middle line of a JSX comment, and on portal-meta.ts:148. One
+     * preview line cannot show the comment, so the two looked equally held and nothing was
+     * excerpted. The ambiguous candidates are now walked whole - the target from memory, the
+     * other read once and reused for the excerpt - and only portal-meta.ts holds it in code.
+     */
+    @Test
+    void anAmbiguousFenceMatchIsSettledByWalkingTheCandidateFilesWhole() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/features/site/PortalResultCard.tsx")),
+                "'진행 중' 표시가 붙은 카드만 남겨줘");
+        when(fixture.selections().jobSnapshot(JOB))
+                .thenReturn(List.of("frontend:src/features/site"));
+        String card = "export function PortalResultCard() {\n"
+                + "  return <div>\n"
+                + "        {/* 카테고리 뱃지와 **모양으로** 갈린다 — 저쪽은 테두리형, 이쪽은 채움형이다. 둘 다\n"
+                + "            테두리형이던 때는 두 카드가 한눈에 거의 같아 보여서, 진행 중 행사와 종료된 행사를\n"
+                + "            참고 정보라 오류가 아니다. */}\n"
+                + "  </div>\n}\n";
+        String meta = "export function festivalBadge(start: string, end: string) {\n"
+                + "  const now = today()\n  if (now >= start) return '진행 중'\n"
+                + "  return 'D-1'\n}\n";
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest -> {
+            String name = toolRequest.path("tool").path("name").asText();
+            String path = toolRequest.path("tool").path("arguments").path("path").asText("");
+            if ("search_code".equals(name)) {
+                return jsonResult(fixture,
+                        "{\"matches\":[{\"path\":\"src/features/site/PortalResultCard.tsx\","
+                                + "\"line\":4,\"column\":39,\"preview\":\"            테두리형이던 때는 "
+                                + "두 카드가 한눈에 거의 같아 보여서, 진행 중 행사와 종료된 행사를\"},"
+                                + "{\"path\":\"src/features/site/portal-meta.ts\",\"line\":3,"
+                                + "\"column\":3,\"preview\":\"  if (now >= start) return '진행 중'\"}],"
+                                + "\"truncated\":false}");
+            }
+            if ("read_file".equals(name)) {
+                return textResult(fixture,
+                        "src/features/site/PortalResultCard.tsx".equals(path) ? card : meta);
+            }
+            return jsonResult(fixture, diffJson());
+        });
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        // The target's own read, the fence search, one read of portal-meta.ts, read_diff.
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "search_code", "read_file", "read_diff");
+        assertThat(submitted.get(2).path("tool").path("arguments").path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        assertThat(excerpts.get(0).path("startLine").asInt()).isEqualTo(1);
+        assertThat(excerpts.get(0).path("content").asText()).contains("festivalBadge");
     }
 
     /* Without a fence the phrase is searched from the repository root. */

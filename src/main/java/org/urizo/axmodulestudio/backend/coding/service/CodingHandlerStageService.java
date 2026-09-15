@@ -1801,6 +1801,16 @@ public final class CodingHandlerStageService {
                     + "array of objects each holding \"criterion\", copied verbatim from the "
                     + "acceptanceCriteria in the coding.analyze payload you were given, and "
                     + "\"met\", either true or false. "
+                    // Measured on Jobs 543eb70f, b3a872c3, efadcf37 and c54876c1 (gpt-5.4-nano):
+                    // eight of ten rejections said only that the diff could not confirm a
+                    // criterion, and three read "all four cards are shown again" as "exactly
+                    // four cards must always render". With nothing to fix, the coding stage
+                    // handed the same candidate back until the rework limit ended the job.
+                    + "Set met to false only when a changed line in the diff, or a failed "
+                    + "check, contradicts the criterion. A criterion is not false because the "
+                    + "diff does not show it. Do not reinterpret what the request states about "
+                    + "the existing screen, such as how many items it shows, as a condition "
+                    + "with a different meaning. "
                     // The reviewer sees the finished candidate, so it is the first stage that
                     // can tell the difference between "not done yet" and "cannot be done here".
                     // Without this field both arrive as changes_requested and the gate, which

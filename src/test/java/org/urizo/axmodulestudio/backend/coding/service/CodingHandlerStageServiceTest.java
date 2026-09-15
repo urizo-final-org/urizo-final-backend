@@ -3557,6 +3557,26 @@ class CodingHandlerStageServiceTest {
         assertThat(systemContent(sent)).doesNotContain("guardrail.phraseMatches");
     }
 
+    // Jobs 543eb70f, b3a872c3, efadcf37 and c54876c1 (nano): eight of ten rejections said only
+    // that the diff could not confirm a criterion, three of them after reading "all four cards
+    // are shown again" as "exactly four must always render". The rule belongs to the reviewer;
+    // the analyst writes the criteria and is not told how they will be judged.
+    @Test
+    void theReviewerMarksACriterionUnmetOnlyWhenTheDiffContradictsIt() throws Exception {
+        String review = systemContent(captureReviewRequest(phraseFence()));
+        String analysis = systemContent(captureAnalysisRequest(phraseFence()));
+
+        assertThat(review)
+                .contains("Set met to false only when a changed line in the diff, or a failed "
+                        + "check, contradicts the criterion.")
+                .contains("A criterion is not false because the diff does not show it.")
+                .contains("Do not reinterpret what the request states about the existing "
+                        + "screen, such as how many items it shows, as a condition with a "
+                        + "different meaning.");
+        assertThat(analysis).doesNotContain("Set met to false only when")
+                .doesNotContain("Do not reinterpret what the request states");
+    }
+
     private static GuardrailPathSelectionService phraseFence() {
         GuardrailPathSelectionService selections = mock(GuardrailPathSelectionService.class);
         when(selections.jobSnapshot(JOB)).thenReturn(List.of("frontend:src/features/site"));

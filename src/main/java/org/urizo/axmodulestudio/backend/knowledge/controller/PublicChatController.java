@@ -1,5 +1,6 @@
 package org.urizo.axmodulestudio.backend.knowledge.controller;
 
+import java.util.List;
 import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -55,7 +56,10 @@ public class PublicChatController {
             @Valid @RequestBody PublicChatContract.PublicChatQueryRequest body,
             HttpServletRequest request) {
         rateLimiter.check(request);
-        if (publicChatbotId == null) {
+        UUID chatbotId = body.projectId() == null
+                ? publicChatbotId
+                : chatbotOf(body.projectId(), trace(request));
+        if (chatbotId == null) {
             throw new ProductApiException(
                     "PUBLIC_CHATBOT_NOT_CONFIGURED",
                     "No public chatbot is configured.",
@@ -64,7 +68,7 @@ public class PublicChatController {
         // 활성 Knowledge Version 강제는 RagStore.query가 이미 한다(active_version_id만 조회).
         // 공개 경로용 추가 검증을 넣지 않는다 — 검증이 두 곳에 있으면 한 곳이 뒤처진다.
         return toPublic(rag.publicQuery(
-                publicChatbotId,
+                chatbotId,
                 trace(request),
                 new ProductApiContract.RagQueryRequest(
                         ProductApiContract.SCHEMA_VERSION,
@@ -72,7 +76,27 @@ public class PublicChatController {
                         body.conversationId(),
                         null),
                 body.category(),
-                body.previousQuery()));
+                body.previousQuery(),
+                body.projectId(),
+                body.answerStyle()));
+    }
+
+    /**
+     * 프로젝트의 공개 챗봇을 찾는다. 하나로 정해지지 않으면 아무거나 고르지 않고 거절한다 —
+     * 어느 도메인이 답했는지 방문자가 알 수 없게 되는 것이 조용히 틀린 답보다 나쁘다.
+     */
+    UUID chatbotOf(UUID projectId, UUID traceId) {
+        List<UUID> active = rag.listChatbots(projectId, traceId).items().stream()
+                .filter(chatbot -> "ACTIVE".equals(chatbot.status()))
+                .map(ProductApiContract.ChatbotResponse::chatbotId)
+                .toList();
+        if (active.size() != 1) {
+            throw new ProductApiException(
+                    "PUBLIC_CHATBOT_NOT_CONFIGURED",
+                    "The project does not have exactly one active chatbot.",
+                    HttpStatus.NOT_FOUND);
+        }
+        return active.get(0);
     }
 
     /** 관리자 전용 값(queryId, knowledgeVersionId, documentId, score)을 떨어뜨린다. */

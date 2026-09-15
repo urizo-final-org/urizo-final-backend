@@ -63,7 +63,7 @@ class ProductServiceCharacterizationTest {
     @Test
     void preservesKnowledgeBuildCommandAuthority() {
         ProductApiContract.StartKnowledgeBuildRequest request =
-                new ProductApiContract.StartKnowledgeBuildRequest("1.0", RESOURCE_ID, "v1");
+                new ProductApiContract.StartKnowledgeBuildRequest("1.0", RESOURCE_ID, null, "v1");
         ProductApiContract.JobAcceptedResponse expected = accepted("KNOWLEDGE_BUILD");
         when(store.idempotent(eq("START_KNOWLEDGE_BUILD"), eq(KEY), any(), eq(202),
                 eq(ProductApiContract.JobAcceptedResponse.class), any())).thenReturn(expected);

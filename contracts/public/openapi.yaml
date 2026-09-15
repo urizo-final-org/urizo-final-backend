@@ -1596,9 +1596,35 @@
           "documentCount": { "type": "integer", "minimum": 0 },
           "chunkCount": { "type": "integer", "minimum": 0 },
           "score": { "type": "number", "minimum": 0, "maximum": 100 },
+          "chunkingStrategy": { "$ref": "#/components/schemas/ChunkingStrategy" },
+          "evaluation": { "$ref": "#/components/schemas/BuildEvaluation" },
           "createdAt": { "type": "string", "format": "date-time" },
           "readyAt": { "type": "string", "format": "date-time" },
           "activatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ChunkingStrategy": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["maxCharacters", "overlapCharacters", "reason"],
+        "description": "AI02-018. 이 버전이 쓴 청킹 규칙. 없으면 문서당 1청크로 만든 버전이다.",
+        "properties": {
+          "maxCharacters": { "type": "integer", "minimum": 0 },
+          "overlapCharacters": { "type": "integer", "minimum": 0 },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      },
+      "BuildEvaluation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["method", "sampleSize", "hit5", "hit10", "mrr10"],
+        "description": "AI02-019. 빌드가 잰 검색 평가. method가 측정 방식이며 TITLE_SELF_RETRIEVAL은 문서 제목으로 검색해 그 문서가 상위에 돌아오는지 본 것이다(사람이 만든 시험지가 아니다).",
+        "properties": {
+          "method": { "type": "string", "enum": ["TITLE_SELF_RETRIEVAL"] },
+          "sampleSize": { "type": "integer", "minimum": 0 },
+          "hit5": { "type": "number", "minimum": 0, "maximum": 1 },
+          "hit10": { "type": "number", "minimum": 0, "maximum": 1 },
+          "mrr10": { "type": "number", "minimum": 0, "maximum": 1 }
         }
       },
       "KnowledgeVersionListResponse": {

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.UUID;
 
 import org.urizo.axmodulestudio.backend.knowledge.dto.ProductApiContract;
+import org.urizo.axmodulestudio.backend.knowledge.dto.PublicChatContract;
 
 public interface RagOperations {
 
@@ -23,11 +24,16 @@ public interface RagOperations {
             String key,
             ProductApiContract.RagQueryRequest request);
 
-    /** 공개 경로용 질의. 멱등 Key를 요구하지 않는다({@code ProductService} 구현 주석 참조). */
+    /**
+     * 공개 경로용 질의. 멱등 Key를 요구하지 않는다({@code ProductService} 구현 주석 참조).
+     * {@code projectId}는 답변 프롬프트의 도메인 선택에 쓴다 — null이면 기본(관광) 경로다.
+     */
     ProductApiContract.RagQueryResponse publicQuery(
             UUID chatbotId,
             UUID traceId,
             ProductApiContract.RagQueryRequest request,
             List<String> category,
-            String previousQuery);
+            String previousQuery,
+            UUID projectId,
+            PublicChatContract.AnswerStyle answerStyle);
 }

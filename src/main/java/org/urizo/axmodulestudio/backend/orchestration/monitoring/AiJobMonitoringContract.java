@@ -82,7 +82,14 @@ public final class AiJobMonitoringContract {
             JobSummary job,
             List<LatestNodeState> latestNodeStates,
             List<NodeOccurrence> occurrences,
-            boolean truncated) { }
+            boolean truncated,
+            AiModelCallMonitoring.Snapshot modelCalls) {
+        public JobSnapshotResponse(String schemaVersion, Instant observedAt, JobSummary job,
+                List<LatestNodeState> latestNodeStates, List<NodeOccurrence> occurrences, boolean truncated) {
+            this(schemaVersion, observedAt, job, latestNodeStates, occurrences, truncated,
+                    AiModelCallMonitoring.Snapshot.unavailable());
+        }
+    }
 
     public record JobSummary(
             UUID jobId,

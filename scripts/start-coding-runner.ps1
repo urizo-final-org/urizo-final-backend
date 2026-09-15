@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$BaseUri,
-    [ValidateRange(5, 60)][int]$WaitTimeoutSeconds = 20
+    [ValidateRange(5, 60)][int]$WaitTimeoutSeconds = 20,
+    [ValidateRange(1, 7200)][int]$DrainTimeoutSeconds = 1800
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +12,10 @@ function Resolve-RunnerWorkspace {
     param([string]$RepositoryRoot)
     $candidate = Split-Path -Parent $RepositoryRoot
     while ($candidate) {
-        if ((Test-Path -LiteralPath (Join-Path $candidate 'urizo-final-backend') -PathType Container) -and
+        # Worktree roots may contain compatibility junctions named backend/frontend.
+        # Only the parent with the Master manifest is the canonical workspace.
+        if ((Test-Path -LiteralPath (Join-Path $candidate 'urizo-final-master/repository-manifest.json') -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $candidate 'urizo-final-backend') -PathType Container) -and
             (Test-Path -LiteralPath (Join-Path $candidate 'urizo-final-frontend') -PathType Container)) {
             return $candidate
         }
@@ -28,19 +32,112 @@ function ConvertTo-RunnerHostPath {
     return $Path
 }
 
+function Read-CodingRunnerArguments {
+    param([string]$CommandLine)
+    # Only a real -File entrypoint; a diagnostic -Command containing runner.ps1 is not a Runner.
+    if ($CommandLine -notmatch '^(?:"[^"]+\.exe"|[^"\s]+\.exe)?\s*(?:(?:-NoProfile|-NonInteractive|-NoLogo|-STA|-MTA)\s+|-ExecutionPolicy\s+\w+\s+)*-File\s+(?:"(?<file>[^"]+)"|(?<file>\S+))(?<args>.*)$') { return $null }
+    $file = $Matches['file']
+    $tail = $Matches['args']
+    if ($file -notmatch '(?i)[\\/]runner\.ps1$') { return $null }
+    $result = @{ File = [IO.Path]::GetFullPath($file) }
+    foreach ($match in [regex]::Matches($tail, '(?i)(?:^|\s)"?-(?<key>\w+)"?\s+(?:"(?<value>[^"]*)"|(?<value>[^\s"]+))')) {
+        $key = $match.Groups['key'].Value
+        if ($result.ContainsKey($key)) { return $null }
+        $result[$key] = $match.Groups['value'].Value
+    }
+    foreach ($key in @('BaseUri', 'WorkRoot', 'SecretsRoot', 'StartupSignalPath', 'LifecycleId', 'SourceSha256')) {
+        if (-not $result.ContainsKey($key)) { $result[$key] = $null }
+    }
+    $result['ManagedArguments'] = $tail -match '^(?:\s+"?-(?:BaseUri|WorkRoot|SecretsRoot|StartupSignalPath|LifecycleId|SourceSha256)"?\s+(?:"[^"]*"|[^\s"]+))*\s*$'
+    return $result
+}
+
 function Get-CodingRunnerProcesses {
     # Fail closed if process inspection is unavailable; never risk a second claimant.
     return @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe' OR Name = 'pwsh.exe'" |
-        Where-Object { $_.CommandLine -and $_.CommandLine -match '(?i)[\\/]runner\.ps1(?:"|\s|$)' })
+        Where-Object { $_.CommandLine -and (Read-CodingRunnerArguments -CommandLine $_.CommandLine) })
+}
+
+function Test-RunnerPathEqual {
+    param([string]$Left, [string]$Right)
+    return $Left -and $Right -and [IO.Path]::GetFullPath($Left).TrimEnd('\', '/').Equals(
+        [IO.Path]::GetFullPath($Right).TrimEnd('\', '/'), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-CodingRunnerDrainPending {
+    param($Binding)
+    $signal = $null
+    try {
+        $signal = [Threading.EventWaitHandle]::OpenExisting("Local\AXMS-CodingRunner-Drain-$($Binding.LifecycleId)")
+        return $signal.WaitOne(0)
+    }
+    catch { throw 'Coding Runner has no live drain acknowledgement channel. Process preserved; no duplicate was started.' }
+    finally { if ($signal) { $signal.Dispose() } }
+}
+
+function Wait-CodingRunnerDrain {
+    param($Existing, $Binding, [int]$TimeoutSeconds)
+    if ($Binding.LifecycleId -notmatch '^[a-f0-9]{32}$') {
+        throw "CODING RUNNER LEGACY: PID=$($Existing.ProcessId) cannot acknowledge a safe stop. Process preserved; a one-time controlled stop is required before automatic replacement is available."
+    }
+    # A deployment task can itself invoke full startup. Waiting for its owning Runner
+    # would deadlock that task. Leave it untouched and report the boundary explicitly.
+    $ancestor = $PID
+    $seen = @{}
+    while ($ancestor -gt 0 -and -not $seen.ContainsKey($ancestor)) {
+        if ($ancestor -eq $Existing.ProcessId) {
+            throw 'Coding Runner replacement must be invoked outside its own task process tree. Process preserved.'
+        }
+        $seen[$ancestor] = $true
+        $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $ancestor"
+        if (-not $parent) { break }
+        $ancestor = [int]$parent.ParentProcessId
+    }
+    $drain = $null
+    $drained = $null
+    $process = $null
+    try {
+        try {
+            $drain = [Threading.EventWaitHandle]::OpenExisting("Local\AXMS-CodingRunner-Drain-$($Binding.LifecycleId)")
+            $drained = [Threading.EventWaitHandle]::OpenExisting("Local\AXMS-CodingRunner-Drained-$($Binding.LifecycleId)")
+        }
+        catch { throw 'Coding Runner has no live drain acknowledgement channel. Process preserved; no duplicate was started.' }
+        $process = Get-Process -Id $Existing.ProcessId -ErrorAction Stop
+        # Keep the process handle open so ExitCode remains available after it exits.
+        $null = $process.Handle
+        if ([Math]::Abs(($process.StartTime.ToUniversalTime() - $Existing.CreationDate.ToUniversalTime()).TotalMilliseconds) -ge 1) {
+            throw 'Coding Runner process identity changed during inspection. No stop was requested.'
+        }
+        [void]$drain.Set()
+        Write-Output "CODING RUNNER DRAINING: PID=$($Existing.ProcessId); waiting for the current task and outcome report before replacement."
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        do {
+            if ($process.WaitForExit(250)) {
+                if ($process.ExitCode -ne 0 -or -not $drained.WaitOne(0)) {
+                    throw "Coding Runner exited without a graceful drain acknowledgement (exit=$($process.ExitCode); acknowledged=$($drained.WaitOne(0))). Inspect its task and logs before retrying; no replacement was started."
+                }
+                Write-Output "CODING RUNNER STOPPED: PID=$($Existing.ProcessId); graceful drain completed."
+                return
+            }
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        throw 'Coding Runner drain is still pending. No task was interrupted and no replacement was started. Retry startup after the task finishes; the drain request remains active.'
+    }
+    finally {
+        if ($drain) { $drain.Dispose() }
+        if ($drained) { $drained.Dispose() }
+        if ($process) { $process.Dispose() }
+    }
 }
 
 function Start-CodingRunner {
-    param([string]$RepositoryRoot, [string]$TargetUri, [int]$TimeoutSeconds)
+    param([string]$RepositoryRoot, [string]$TargetUri, [int]$TimeoutSeconds,
+        [int]$DrainSeconds = 1800)
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Write-Output 'CODING RUNNER SKIPPED: automatic host startup is Windows-only.'
         return
     }
     $runnerPath = Join-Path $RepositoryRoot 'scripts/runner.ps1'
+    $sourceHash = (Get-FileHash -LiteralPath $runnerPath -Algorithm SHA256).Hash
     $workRoot = Join-Path (Resolve-RunnerWorkspace -RepositoryRoot $RepositoryRoot) '.worktrees'
     $composeFile = Join-Path $RepositoryRoot 'compose.dev.yaml'
     $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
@@ -80,18 +177,29 @@ function Start-CodingRunner {
         if (-not $lockHeld) { throw 'Another Coding Runner startup is still in progress. Retry after it finishes.' }
         $existing = @(Get-CodingRunnerProcesses)
         if ($existing.Count -gt 0) {
-            if ($existing.Count -eq 1 -and
-                $existing[0].CommandLine.IndexOf('"' + $runnerPath + '"', [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
-                $existing[0].CommandLine.IndexOf($bindingArguments, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                if ($existing[0].CommandLine -notmatch '-StartupSignalPath "([^"]+)"' -or
-                    -not (Test-Path -LiteralPath $Matches[1] -PathType Leaf) -or
-                    (Get-Content -LiteralPath $Matches[1] -Raw).Trim() -ne [string]$existing[0].ProcessId) {
+            if ($existing.Count -ne 1) { throw 'Multiple Coding Runners were found. Processes preserved; no duplicate was started.' }
+            $binding = Read-CodingRunnerArguments -CommandLine $existing[0].CommandLine
+            $oldRepository = Split-Path -Parent (Split-Path -Parent $binding.File)
+            if ($binding.ManagedArguments -and $binding.BaseUri -and $binding.BaseUri.TrimEnd('/') -ieq $TargetUri.TrimEnd('/') -and
+                (Test-RunnerPathEqual $binding.WorkRoot $workRoot) -and
+                (Test-RunnerPathEqual (Resolve-RunnerWorkspace $oldRepository) (Resolve-RunnerWorkspace $RepositoryRoot))) {
+                if (-not $binding.StartupSignalPath -or
+                    -not (Test-Path -LiteralPath $binding.StartupSignalPath -PathType Leaf) -or
+                    (Get-Content -LiteralPath $binding.StartupSignalPath -Raw).Trim() -ne [string]$existing[0].ProcessId) {
                     throw 'The existing Coding Runner has not confirmed its first poll. Process preserved; inspect its startup logs.'
                 }
-                Write-Output "CODING RUNNER REUSED: PID=$($existing[0].ProcessId); existing process preserved."
-                return
+                if ((Test-RunnerPathEqual $binding.File $runnerPath) -and
+                    (Test-RunnerPathEqual $binding.SecretsRoot $secretsRoot) -and $binding.SourceSha256 -eq $sourceHash -and
+                    -not (Test-CodingRunnerDrainPending -Binding $binding)) {
+                    Write-Output "CODING RUNNER REUSED: PID=$($existing[0].ProcessId); source and binding match."
+                    return
+                }
+                Wait-CodingRunnerDrain -Existing $existing[0] -Binding $binding -TimeoutSeconds $DrainSeconds
+                if (@(Get-CodingRunnerProcesses).Count -ne 0) {
+                    throw 'A Coding Runner appeared during handoff. No duplicate was started.'
+                }
             }
-            throw 'An existing Coding Runner has a different or unverified binding. It was preserved; no duplicate was started.'
+            else { throw 'An existing Coding Runner has a different or unverified binding. It was preserved; no duplicate was started.' }
         }
         $stateRoot = Join-Path $RepositoryRoot '.local/runner'
         New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
@@ -101,7 +209,8 @@ function Start-CodingRunner {
         $errorPath = Join-Path $stateRoot "$launchId.stderr.log"
         $shellPath = (Get-Process -Id $PID).Path
         $commandLine = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $runnerPath +
-            '" ' + $bindingArguments + ' -StartupSignalPath "' + $readyPath + '"'
+            '" ' + $bindingArguments + ' -StartupSignalPath "' + $readyPath +
+            '" -LifecycleId "' + $launchId + '" -SourceSha256 "' + $sourceHash + '"'
         $previousPath = $env:Path
         try {
             $env:Path = (Split-Path -Parent $docker) + [IO.Path]::PathSeparator + $env:Path
@@ -137,4 +246,4 @@ if (-not $BaseUri) {
     $BaseUri = "http://127.0.0.1:$httpPort"
 }
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-Start-CodingRunner -RepositoryRoot $repositoryRoot -TargetUri $BaseUri -TimeoutSeconds $WaitTimeoutSeconds
+Start-CodingRunner -RepositoryRoot $repositoryRoot -TargetUri $BaseUri -TimeoutSeconds $WaitTimeoutSeconds -DrainSeconds $DrainTimeoutSeconds

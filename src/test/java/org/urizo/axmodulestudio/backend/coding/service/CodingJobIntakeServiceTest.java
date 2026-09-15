@@ -29,6 +29,15 @@ import org.urizo.axmodulestudio.backend.coding.dto.CodingHandlerContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.coding.dto.CodingJobLifecycleContract;
 import org.urizo.axmodulestudio.backend.orchestration.repository.ProfileVersionRepository;
+import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.integration.ai.gateway.*;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.Arguments;
+import java.util.ArrayList;
+import java.util.Set;
+import java.util.stream.Stream;
 
 /**
  * The thirteen fields a screen cannot supply, and the one of them that must be real.
@@ -53,9 +62,13 @@ class CodingJobIntakeServiceTest {
     private final ObjectProvider<CodingModelTurnService> turnProvider =
             mock(ObjectProvider.class);
 
+    private final ProfileModelBindingService bindings = mock(ProfileModelBindingService.class);
+    @SuppressWarnings("unchecked")
+    private final ObjectProvider<ProfileModelBindingService> bindingProvider = mock(ObjectProvider.class);
+
     private CodingJobIntakeService service() {
         return new CodingJobIntakeService(
-                commands, runner, profiles, guardrail, turnProvider, mapper,
+                commands, runner, profiles, guardrail, turnProvider, bindingProvider, mapper,
                 Clock.fixed(NOW, ZoneOffset.UTC),
                 // A real wait would make the suite sleep; the polling itself is not what is
                 // under test, only what happens at each outcome.
@@ -69,7 +82,9 @@ class CodingJobIntakeServiceTest {
     private void activeProfile() {
         ObjectNode snapshot = new ObjectMapper().createObjectNode();
         for (String id : List.of("start", "guardrail", "analyze", "code", "end")) {
-            snapshot.withArray("nodes").addObject().put("id", id);
+            snapshot.withArray("nodes").addObject().put("id", id)
+                    .put("type", "analyze".equals(id) ? "agent" : "action")
+                    .put("handlerKey", "analyze".equals(id) ? "coding.analyze" : "fixture");
         }
         when(profiles.findAll("LLM_OPS")).thenReturn(List.of(
                 new ProfileVersionRepository.AdminStoredProfileVersion(
@@ -215,13 +230,125 @@ class CodingJobIntakeServiceTest {
      * so the whole pipeline ran to reach a verdict that was already decided at the request.
      */
     /** A structured classifier answer, as the turn service would hand it back. */
+    private static ProviderModelRegistration registration(ModelProvider provider) {
+        return new ProviderModelRegistration(provider, "fixture-model",
+                Set.of(ModelCapability.CHAT, ModelCapability.STRUCTURED_OUTPUT), Duration.ofSeconds(20), 1);
+    }
+
+    static Stream<Arguments> fallbackCases() {
+        List<Arguments> cases = new ArrayList<>();
+        List<ModelProvider> providers = List.of(ModelProvider.OPENAI, ModelProvider.ANTHROPIC, ModelProvider.GOOGLE_GENAI);
+        for (ModelProvider first : providers) {
+            for (ModelProvider next : providers) {
+                if (first == next) continue;
+                for (ProviderFailureKind error : ProviderFailureKind.values()) {
+                    if (error != ProviderFailureKind.INVALID_RESPONSE) {
+                        cases.add(Arguments.of(first, next, error));
+                    }
+                }
+            }
+        }
+        return cases.stream();
+    }
+
+    @ParameterizedTest
+    @MethodSource("fallbackCases")
+    void intakeUsesProfileFallbackForEveryProviderDirectionAndAvailabilityFailure(
+            ModelProvider primary, ModelProvider fallback, ProviderFailureKind error) throws Exception {
+        List<ModelProvider> calls = new ArrayList<>();
+        configureRealClassifier(primary, fallback, error, false, calls);
+        runnerAnswers(DEV_SHA);
+        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-switch", request(null));
+
+        assertThat(calls).containsExactly(primary, fallback);
+        verify(profiles).findAll("LLM_OPS");
+        ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
+                ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
+        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        assertThat(sent.getValue().profileVersionId()).isEqualTo(PROFILE);
+        assertThat(sent.getValue().repositoryId()).isEqualTo(CodingRepositories.identifierOf("frontend"));
+    }
+
+    @Test
+    void exhaustedIntakeCandidatesFailWithoutCreatingOrScanningAJob() throws Exception {
+        List<ModelProvider> calls = new ArrayList<>();
+        configureRealClassifier(ModelProvider.ANTHROPIC, ModelProvider.OPENAI,
+                ProviderFailureKind.AUTHENTICATION, true, calls);
+
+        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-exhausted", request(null)))
+                .isInstanceOf(CodingJobLifecycleException.class).hasMessageContaining("요청 내용을 읽는 데 실패");
+        assertThat(calls).containsExactly(ModelProvider.ANTHROPIC, ModelProvider.OPENAI);
+        verify(runner, never()).enqueue(any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void invalidClassifierResponseDoesNotSwitchProvidersOrCreateAJob() throws Exception {
+        List<ModelProvider> calls = new ArrayList<>();
+        configureRealClassifier(ModelProvider.OPENAI, ModelProvider.GOOGLE_GENAI,
+                ProviderFailureKind.INVALID_RESPONSE, false, calls);
+
+        assertThatThrownBy(() -> service().create(actor(), TRACE, "key-invalid", request(null)))
+                .isInstanceOf(CodingJobLifecycleException.class);
+        assertThat(calls).containsExactly(ModelProvider.OPENAI);
+        verify(runner, never()).enqueue(any(), any());
+    }
+
+    private void configureRealClassifier(ModelProvider primary, ModelProvider fallback,
+            ProviderFailureKind error, boolean allFail, List<ModelProvider> calls) throws Exception {
+        ProviderModelRegistration first = registration(primary);
+        ProviderModelRegistration next = registration(fallback);
+        ProviderCapabilityRegistry registry = new ProviderCapabilityRegistry(ProviderLane.PRODUCT,
+                ProviderCapabilityPolicy.stage2Baseline(), List.of(first, next));
+        ObjectNode snapshot = mapper.createObjectNode().put("profileVersionId", PROFILE.toString())
+                .put("profileKey", "LLM_OPS");
+        snapshot.putArray("nodes").addObject().put("id", "start").put("type", "start");
+        // A renamed node must still resolve by handler, rather than a hardcoded analyze ID.
+        snapshot.withArray("nodes").addObject().put("id", "request_analysis")
+                .put("type", "agent").put("handlerKey", "coding.analyze");
+        ObjectNode binding = snapshot.putObject("modelBindings").putObject("request_analysis")
+                .put("primary", first.selectionId());
+        binding.putArray("fallback").add(next.selectionId());
+        ObjectNode selections = binding.putObject("selections");
+        for (ProviderModelRegistration model : List.of(first, next)) {
+            selections.putObject(model.selectionId()).put("provider", model.provider().name())
+                    .put("model", model.modelId()).putObject("inference").put("reasoningIntensity", "NONE");
+        }
+        when(profiles.findAll("LLM_OPS")).thenReturn(List.of(
+                new ProfileVersionRepository.AdminStoredProfileVersion(PROFILE, "LLM_OPS", 21, "ACTIVE", NOW, snapshot)));
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        when(jdbc.queryForObject(org.mockito.ArgumentMatchers.anyString(), eq(String.class), eq(PROFILE)))
+                .thenReturn(mapper.writeValueAsString(snapshot));
+        when(bindingProvider.getIfAvailable()).thenReturn(new ProfileModelBindingService(jdbc, mapper, registry));
+        ProviderChatAdapter adapter = new ProviderChatAdapter() {
+            public Set<ModelProvider> providers() { return Set.of(primary, fallback); }
+            public ProviderChatResponse chat(ProviderModelRegistration selected, ProviderChatRequest request) {
+                calls.add(selected.provider());
+                assertThat(request.responseFormat().structured()).isTrue();
+                assertThat(request.tools()).isEmpty();
+                if (selected.provider() == primary || allFail) throw new ProviderFailure(error, null);
+                return new ProviderChatResponse(fallback, next.modelId(),
+                        "{\"target\":\"screen\",\"firstText\":\"\",\"secondText\":\"\"}", 2, 1, Duration.ZERO);
+            }
+        };
+        Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
+        when(turnProvider.getIfAvailable()).thenReturn(new CodingModelTurnService(registry,
+                new ProviderChatGateway(registry, new ProviderChatAdapterRegistry(List.of(adapter)), clock),
+                mapper, clock, false));
+    }
+
     private void classifierAnswers(String target, String firstText, String secondText) {
         when(turnProvider.getIfAvailable()).thenReturn(turns);
+        when(bindingProvider.getIfAvailable()).thenReturn(bindings);
+        when(bindings.resolve(PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT))
+                .thenReturn(List.of(registration(ModelProvider.OPENAI)));
         ObjectNode verdict = mapper.createObjectNode()
                 .put("target", target)
                 .put("firstText", firstText)
                 .put("secondText", secondText);
-        when(turns.executeNaturalCms(any())).thenReturn(new CodingModelTurnContract.Response(
+        when(turns.executeNaturalCms(any(), any())).thenReturn(new CodingModelTurnContract.Response(
                 "1.0", JOB, JOB, TRACE, "coding-intake.test-key",
                 new CodingModelTurnContract.Assistant("assistant", ""),
                 List.of(),
@@ -247,6 +374,9 @@ class CodingJobIntakeServiceTest {
                 service().create(actor(), TRACE, "key-1", request(null));
 
         assertThat(outcome.split()).isNull();
+        verify(profiles).findAll("LLM_OPS");
+        verify(bindings).resolve(PROFILE, "analyze", "coding.analyze", ModelUseCase.STRUCTURED_OUTPUT);
+        verify(turns, never()).executeNaturalCms(any());
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
         verify(commands).create(any(), any(), any(), sent.capture(), any());
@@ -296,7 +426,7 @@ class CodingJobIntakeServiceTest {
 
         ArgumentCaptor<CodingModelTurnContract.Request> asked =
                 ArgumentCaptor.forClass(CodingModelTurnContract.Request.class);
-        verify(turns).executeNaturalCms(asked.capture());
+        verify(turns).executeNaturalCms(asked.capture(), any());
         JsonNode instruction = asked.getValue().messages().get(0);
         assertThat(instruction.path("role").asText()).isEqualTo("system");
         assertThat(instruction.path("content").asText())
@@ -308,6 +438,7 @@ class CodingJobIntakeServiceTest {
     /** Guessing a side would burn a whole run discovering the guess; failing is honest. */
     @Test
     void anUnavailableClassifierFailsTheSubmissionInsteadOfGuessing() {
+        activeProfile();
         assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request(null)))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("AI 통로");
@@ -324,6 +455,7 @@ class CodingJobIntakeServiceTest {
         service().create(actor(), TRACE, "key-1", request("backend"));
 
         verify(turns, never()).executeNaturalCms(any());
+        verify(turns, never()).executeNaturalCms(any(), any());
     }
 
     @Test

@@ -62,6 +62,23 @@ class TemplateNaturalCmsTest {
                 images.get(0).url(), "New hero", "Subtitle", "Button", "/",
                 images.stream().map(TemplateHeroImage::url).toList(), images);
     }
+    @Test void compoundLayoutAndTextUpdateKeepsTheTemplateIdentity() throws Exception {
+        var service = resources();
+        var selected = new NaturalCmsContract.ResourceRef("TEMPLATE", "MINIMAL");
+        var current = new TemplateView("MINIMAL", "BOLD", "#123456", "Site", "Header", "Footer", "",
+                "Hero", "Subtitle", "Button", "/", true, Instant.parse("2026-09-11T00:00:00Z"), null, images);
+        when(cms.templates()).thenReturn(List.of(current));
+        when(cms.templateForUpdate("MINIMAL")).thenReturn(current);
+        var value = service.validateCommand(selected, command("""
+                {"layout":"MINIMAL","primaryColor":"#d53372","headerText":"Headerㅋㅋ",
+                 "footerText":"Footerㅋㅋ","heroTitle":"Heroㅋㅋ","heroSubtitle":"Subtitleㅋㅋ"}
+                """));
+        service.applyApprovedTemplate(selected, value, UUID.randomUUID(), "", service.snapshot(selected));
+        verify(cms).saveTemplate("MINIMAL", "MINIMAL", "#D53372", "Site", "Headerㅋㅋ", "Footerㅋㅋ",
+                images.get(0).url(), "Heroㅋㅋ", "Subtitleㅋㅋ", "Button", "/",
+                images.stream().map(TemplateHeroImage::url).toList(), images);
+    }
+
     @Test void acceptsReorderCaptionsUnlinkAndSuppliedReplacementOnly() throws Exception {
         var service = resources();
         var fields = mapper.createObjectNode();

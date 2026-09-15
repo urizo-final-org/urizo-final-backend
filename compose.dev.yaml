@@ -226,6 +226,18 @@ services:
       AXMS_PUBLIC_CHAT_LLM_TIMEOUT: ${AXMS_PUBLIC_CHAT_LLM_TIMEOUT:-20s}
       AXMS_PUBLIC_CHAT_LLM_PROVIDER: ${AXMS_PUBLIC_CHAT_LLM_PROVIDER:-ANTHROPIC}
       AXMS_PUBLIC_CHAT_LLM_MODEL: ${AXMS_PUBLIC_CHAT_LLM_MODEL:-}
+      # Golden-question evaluation set generation (AI02-020). Spends provider
+      # credits only on an explicit admin generate request, once per knowledge
+      # base. Off refuses generation; scoring falls back to title self-retrieval.
+      AXMS_EVAL_LLM: ${AXMS_EVAL_LLM:-false}
+      AXMS_EVAL_LLM_TIMEOUT: ${AXMS_EVAL_LLM_TIMEOUT:-30s}
+      AXMS_EVAL_LLM_PROVIDER: ${AXMS_EVAL_LLM_PROVIDER:-ANTHROPIC}
+      AXMS_EVAL_LLM_MODEL: ${AXMS_EVAL_LLM_MODEL:-}
+      # Source change monitor (AI02-022). Watches the customer API and records a
+      # change summary only — it never builds, approves or activates anything.
+      AXMS_SOURCE_MONITOR: ${AXMS_SOURCE_MONITOR:-false}
+      AXMS_SOURCE_MONITOR_INTERVAL: ${AXMS_SOURCE_MONITOR_INTERVAL:-6h}
+      AXMS_SOURCE_MONITOR_INITIAL_DELAY: ${AXMS_SOURCE_MONITOR_INITIAL_DELAY:-2m}
       AXMS_MCP_PLATFORM_ENABLED: "true"
       AXMS_MCP_PLATFORM_ENDPOINT: http://mcp-server:8091/mcp
       AXMS_MCP_PLATFORM_CREDENTIAL_FILE: /run/secrets/mcp_service_token
@@ -253,6 +265,8 @@ services:
       - valkey_password
       - auth_jwt_signing_key
       - mcp_service_token
+      - connector_sme_support_api
+      - connector_tour_api
     expose:
       - "8080"
     healthcheck:
@@ -505,6 +519,12 @@ secrets:
     file: ./.local/secrets/valkey_acl
   auth_jwt_signing_key:
     file: ./.local/secrets/auth_jwt_signing_key
+  # 커넥터 원천 인증 값. ConnectorSecretResolver가 cms-secret://<name>을
+  # connector_<name> 파일로만 해석하므로 커넥터는 위 Secret들에 닿지 못한다.
+  connector_sme_support_api:
+    file: ./.local/secrets/connector_sme_support_api
+  connector_tour_api:
+    file: ./.local/secrets/connector_tour_api
 
 volumes:
   axms_spring_core_db:

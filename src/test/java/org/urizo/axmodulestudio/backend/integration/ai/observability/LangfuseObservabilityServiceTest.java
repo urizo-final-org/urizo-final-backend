@@ -625,6 +625,103 @@ class LangfuseObservabilityServiceTest {
         }
     }
 
+    @Test
+    void tokenTrendUsesFullWindowMetricsWithFixedFiltersAndJobScopedCache() throws Exception {
+        AtomicInteger calls = new AtomicInteger();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        String job = "abcdefab-1111-4111-8111-111111111111";
+        var service = service(configured(), (endpoint, headers, timeout, maximum) -> {
+            calls.incrementAndGet();
+            assertSafeRequest(endpoint, headers);
+            assertThat(endpoint.getPath()).isEqualTo("/api/public/v2/metrics");
+            JsonNode query = mapper.readTree(URLDecoder.decode(endpoint.getRawQuery().substring(6), StandardCharsets.UTF_8));
+            assertThat(query.path("view").asText()).isEqualTo("observations");
+            assertThat(query.path("dimensions")).isEmpty();
+            assertThat(query.path("timeDimension").path("granularity").asText()).isEqualTo("hour");
+            assertThat(query.path("config").path("row_limit").asInt()).isEqualTo(50);
+            assertThat(query.path("orderBy").get(0).path("field").asText()).isEqualTo("time_dimension");
+            assertThat(query.path("fromTimestamp").asText()).isEqualTo(FROM);
+            assertThat(query.path("toTimestamp").asText()).isEqualTo(TO);
+            assertThat(query.path("filters").toString()).contains("local", "axms.model", "GENERATION");
+            if (calls.get() == 1) assertThat(query.toString()).contains("jobId", job);
+            assertThat(query.toString()).doesNotContain("scores", "prompt", "providedModelName", "cursor");
+            return new LangfuseHttpTransport.Response(200, """
+                    {"data":[
+                      {"time_dimension":"2026-09-01T02:00:00Z","sum_inputTokens":0,"sum_outputTokens":5,"sum_totalTokens":9,"raw":"must-not-escape"},
+                      {"time_dimension":"2026-09-01T00:00:00Z","sum_inputTokens":12,"sum_outputTokens":null}
+                    ]}
+                    """);
+        });
+        var result = service.tokenUsage(FROM, TO, " " + job.toUpperCase() + " ");
+        assertThat(result.status()).isEqualTo(LangfuseObservabilityService.Availability.AVAILABLE);
+        assertThat(result.points()).hasSize(24);
+        assertThat(result.points().get(0).inputTokens()).isEqualTo(12);
+        assertThat(result.points().get(0).totalTokens()).isNull();
+        assertThat(result.points().get(1).inputTokens()).isNull();
+        assertThat(result.points().get(2).inputTokens()).isZero();
+        assertThat(result.points().get(2).totalTokens()).isEqualTo(9);
+        assertThat(mapper.valueToTree(result).toString()).doesNotContain("must-not-escape", "raw");
+        assertThat(service.tokenUsage(FROM, TO, job)).isSameAs(result);
+        service.tokenUsage(FROM, TO, null);
+        service.tokenUsage(FROM, TO, "22222222-2222-4222-8222-222222222222");
+        assertThat(calls).hasValue(3);
+    }
+
+    @Test
+    void tokenTrendUsesDailyBucketsForLongWindowsAndIncludesPartialUtcBoundary() {
+        var service = service(configured(), (endpoint, headers, timeout, maximum) -> {
+            assertThat(URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8))
+                    .contains("\"granularity\":\"day\"");
+            return new LangfuseHttpTransport.Response(200,
+                    "{\"data\":[{\"time_dimension\":\"2026-09-01T00:00:00Z\",\"sum_totalTokens\":10}]}");
+        });
+        var result = service.tokenUsage("2026-09-01T12:30:00Z", "2026-10-02T12:30:00Z", null);
+        assertThat(result.granularity()).isEqualTo("day");
+        assertThat(result.points()).hasSize(32);
+        assertThat(result.points().get(0).bucketStart()).isEqualTo(Instant.parse(FROM));
+    }
+
+    @Test
+    void tokenTrendRejectsMalformedDuplicateAndOutsideBucketsWithoutCachingFailure() {
+        for (String rows : new String[]{
+                "{\"time_dimension\":\"bad\"}",
+                "{\"time_dimension\":\"2026-08-31T23:00:00Z\"}",
+                "{\"time_dimension\":\"2026-09-02T00:00:00Z\"}",
+                "{\"time_dimension\":\"2026-09-01T00:01:00Z\"}",
+                "{\"time_dimension\":\"2026-09-01T00:00:00Z\",\"sum_inputTokens\":-1}",
+                "{\"time_dimension\":\"2026-09-01T00:00:00Z\",\"sum_inputTokens\":1.5}",
+                "{\"time_dimension\":\"2026-09-01T00:00:00Z\"},{\"time_dimension\":\"2026-09-01T00:00:00Z\"}"}) {
+            AtomicInteger calls = new AtomicInteger();
+            var service = service(configured(), (endpoint, headers, timeout, maximum) ->
+                    new LangfuseHttpTransport.Response(200, calls.incrementAndGet() == 1
+                            ? "{\"data\":[" + rows + "]}" : "{\"data\":[]}"));
+            var failed = service.tokenUsage(FROM, TO, null);
+            assertThat(failed.status()).isEqualTo(LangfuseObservabilityService.Availability.UNAVAILABLE);
+            assertThat(failed.points()).isEmpty();
+            var retried = service.tokenUsage(FROM, TO, null);
+            assertThat(retried.status()).isEqualTo(LangfuseObservabilityService.Availability.AVAILABLE);
+            assertThat(retried.points()).isEmpty();
+            assertThat(calls).hasValue(2);
+        }
+    }
+
+    @Test
+    void tokenTrendValidatesInputsAndReportsDisabledOrUpstreamFailureWithoutInventingUsage() {
+        var disabled = service(new LangfuseProperties(null, null, null, Duration.ofSeconds(3),
+                Duration.ofSeconds(5), Duration.ofSeconds(30), 262_144),
+                (endpoint, headers, timeout, maximum) -> { throw new AssertionError("No upstream call"); });
+        assertThat(disabled.tokenUsage(FROM, TO, null).status()).isEqualTo(LangfuseObservabilityService.Availability.DISABLED);
+        assertThatThrownBy(() -> disabled.tokenUsage(FROM, TO, "partial")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> disabled.tokenUsage(FROM, FROM, null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> disabled.tokenUsage(FROM, "2026-10-03T00:00:00Z", null)).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> disabled.tokenUsage("2026-09-01T00:00:00+09:00", TO, null)).isInstanceOf(IllegalArgumentException.class);
+        var failed = service(configured(), (endpoint, headers, timeout, maximum) -> { throw new IOException("private upstream details"); });
+        var result = failed.tokenUsage(FROM, TO, null);
+        assertThat(result.status()).isEqualTo(LangfuseObservabilityService.Availability.UNAVAILABLE);
+        assertThat(result.errorCode()).isEqualTo("LANGFUSE_UPSTREAM_UNAVAILABLE");
+        assertThat(result.points()).isEmpty();
+    }
+
     private static LangfuseProperties configured() {
         return new LangfuseProperties(
                 "https://jp.cloud.langfuse.com", "public-key", "secret-key",

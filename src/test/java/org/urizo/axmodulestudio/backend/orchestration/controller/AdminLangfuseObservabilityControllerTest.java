@@ -53,7 +53,7 @@ class AdminLangfuseObservabilityControllerTest {
     @MockitoBean private JwtProperties jwtProperties;
 
     @Test
-    void superAdminCanReadTheThreeFixedViews() throws Exception {
+    void superAdminCanReadTheFixedViews() throws Exception {
         authenticate(AdminRole.SUPER_ADMIN);
         Instant from = Instant.parse(FROM);
         Instant to = Instant.parse(TO);
@@ -70,7 +70,12 @@ class AdminLangfuseObservabilityControllerTest {
                         LangfuseObservabilityService.Availability.AVAILABLE,
                         null, from, to, "local", List.of()));
 
-        for (String endpoint : List.of("metrics", "observations", "scores")) {
+        when(service.tokenUsage(FROM, TO, null)).thenReturn(
+                new LangfuseObservabilityService.TokenUsageResponse(
+                        LangfuseObservabilityService.Availability.AVAILABLE,
+                        null, from, to, "local", "hour", List.of()));
+
+        for (String endpoint : List.of("metrics", "observations", "scores", "token-usage")) {
             mockMvc.perform(get("/api/admin/ai/observability/" + endpoint)
                             .queryParam("from", FROM)
                             .queryParam("to", TO)
@@ -85,7 +90,7 @@ class AdminLangfuseObservabilityControllerTest {
     void generalAdminIsForbiddenBeforeTheLangfuseService() throws Exception {
         authenticate(AdminRole.GENERAL_ADMIN);
 
-        for (String endpoint : List.of("metrics", "observations", "scores")) {
+        for (String endpoint : List.of("metrics", "observations", "scores", "token-usage")) {
             mockMvc.perform(get("/api/admin/ai/observability/" + endpoint)
                         .queryParam("from", FROM)
                         .queryParam("to", TO)
@@ -134,6 +139,38 @@ class AdminLangfuseObservabilityControllerTest {
                         .queryParam("from", FROM).queryParam("to", TO))
                 .andExpect(status().isUnauthorized());
         verifyNoInteractions(service);
+    }
+
+    @Test
+    void tokenUsagePassesJobAndSerializesNullablePoints() throws Exception {
+        authenticate(AdminRole.SUPER_ADMIN);
+        when(service.tokenUsage(FROM, TO, ACTOR_ID.toString())).thenReturn(
+                new LangfuseObservabilityService.TokenUsageResponse(
+                        LangfuseObservabilityService.Availability.AVAILABLE, null,
+                        Instant.parse(FROM), Instant.parse(TO), "local", "hour",
+                        List.of(new LangfuseObservabilityService.TokenUsagePoint(Instant.parse(FROM), 0L, null, null))));
+        mockMvc.perform(get("/api/admin/ai/observability/token-usage")
+                        .queryParam("from", FROM).queryParam("to", TO).queryParam("jobId", ACTOR_ID.toString())
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.granularity").value("hour"))
+                .andExpect(jsonPath("$.points[0].bucketStart").value(FROM))
+                .andExpect(jsonPath("$.points[0].inputTokens").value(0))
+                .andExpect(jsonPath("$.points[0].totalTokens").isEmpty());
+    }
+
+    @Test
+    void tokenUsageRejectsMissingAuthenticationAndMapsInvalidInput() throws Exception {
+        mockMvc.perform(get("/api/admin/ai/observability/token-usage").queryParam("from", FROM).queryParam("to", TO))
+                .andExpect(status().isUnauthorized());
+        verifyNoInteractions(service);
+        authenticate(AdminRole.SUPER_ADMIN);
+        when(service.tokenUsage(FROM, TO, "partial")).thenThrow(new IllegalArgumentException("Job ID must be a full UUID."));
+        mockMvc.perform(get("/api/admin/ai/observability/token-usage")
+                        .queryParam("from", FROM).queryParam("to", TO).queryParam("jobId", "partial")
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code").value("INVALID_OBSERVABILITY_RANGE"));
     }
 
     private void authenticate(AdminRole role) {

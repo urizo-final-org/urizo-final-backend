@@ -28,7 +28,7 @@ class ProductApiContractCharacterizationTest {
 
         JsonNode knowledge = objectMapper.valueToTree(new ProductApiContract.KnowledgeBaseResponse(
                 "1.0", TRACE_ID, RESOURCE_ID, PROJECT_ID,
-                "Knowledge", null, null, CREATED_AT));
+                "Knowledge", null, null, null, CREATED_AT));
         assertThat(knowledge.has("description")).isFalse();
         assertThat(knowledge.has("activeVersionId")).isTrue();
         assertThat(knowledge.get("activeVersionId").isNull()).isTrue();

@@ -48,7 +48,11 @@ param(
     [switch]$RunOnce,
 
     # Optional local startup acknowledgement. Contains only this process ID, never the token.
-    [string]$StartupSignalPath
+    [string]$StartupSignalPath,
+
+    # Per-launch cooperative stop channel, used only by the host startup wrapper.
+    [ValidatePattern('^[a-f0-9]{32}$')][string]$LifecycleId,
+    [ValidatePattern('^[a-fA-F0-9]{64}$')][string]$SourceSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,6 +65,12 @@ if ($PollIntervalSeconds -lt 1 -or $PollIntervalSeconds -gt 60) {
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 
 $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
+if ($LifecycleId -or $SourceSha256) {
+    if (-not $LifecycleId -or -not $SourceSha256 -or
+        (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash -ne $SourceSha256) {
+        throw 'Runner source changed before startup or lifecycle arguments are incomplete. No task was claimed.'
+    }
+}
 $claimUri = "$BaseUri/internal/coding/runner/tasks/claim"
 $runnerId = "$($env:COMPUTERNAME)-$PID"
 
@@ -1544,12 +1554,20 @@ try {
 finally { $runnerHash.Dispose() }
 $runnerMutex = [Threading.Mutex]::new($false, "Local\AXMS-CodingRunner-$runnerKey")
 $runnerLockHeld = $false
+$runnerDrain = $null
+$runnerDrained = $null
 try {
     try { $runnerLockHeld = $runnerMutex.WaitOne(0) }
     catch [Threading.AbandonedMutexException] { $runnerLockHeld = $true }
     if (-not $runnerLockHeld) {
         Write-Output 'CODING RUNNER PRESERVED: another runner already owns this target; no task was claimed.'
         return
+    }
+    if ($LifecycleId) {
+        $runnerDrain = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset,
+            "Local\AXMS-CodingRunner-Drain-$LifecycleId")
+        $runnerDrained = [Threading.EventWaitHandle]::new($false, [Threading.EventResetMode]::ManualReset,
+            "Local\AXMS-CodingRunner-Drained-$LifecycleId")
     }
 
 Write-Output "실행기 시작 · $runnerId"
@@ -1560,6 +1578,9 @@ Write-Output "주기    ${PollIntervalSeconds}초 · 중지는 Ctrl+C"
 Write-Output ''
 
 do {
+    # Never interrupt a claim in flight, task side effects, or its outcome report.
+    # A stop requested during any of those is observed only at the next poll boundary.
+    if ($runnerDrain -and $runnerDrain.WaitOne(0)) { break }
     $stamp = (Get-Date).ToString('HH:mm:ss')
     try {
         $task = Invoke-RunnerRequest -Uri $claimUri -Body @{
@@ -1598,11 +1619,20 @@ do {
     if ($RunOnce) {
         break
     }
-    Start-Sleep -Seconds $PollIntervalSeconds
+    if ($runnerDrain) {
+        if ($runnerDrain.WaitOne($PollIntervalSeconds * 1000)) { break }
+    }
+    else { Start-Sleep -Seconds $PollIntervalSeconds }
 }
 while ($true)
+if ($runnerDrain -and $runnerDrain.WaitOne(0)) {
+    [void]$runnerDrained.Set()
+    Write-Output 'CODING RUNNER DRAINED: current task and outcome handling finished; no further claim.'
+}
 }
 finally {
+    if ($runnerDrain) { $runnerDrain.Dispose() }
+    if ($runnerDrained) { $runnerDrained.Dispose() }
     if ($runnerLockHeld) { $runnerMutex.ReleaseMutex() }
     $runnerMutex.Dispose()
 }

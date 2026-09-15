@@ -1,7 +1,9 @@
 package org.urizo.axmodulestudio.backend.orchestration.controller;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Profile;
@@ -14,6 +16,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCapabilityRegistry;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.integration.ai.local.LocalProviderSecretService;
+import org.urizo.axmodulestudio.backend.integration.ai.local.ProviderCredentialStatus;
 
 @RestController
 @Profile("local-full")
@@ -33,12 +36,14 @@ public class AdminModelCatalogController {
     @GetMapping
     CatalogView list(@RequestParam String profileKey) {
         if (!PROFILE_KEYS.contains(profileKey)) throw new IllegalArgumentException("profileKey is unsupported");
+        Map<ModelProvider, String> states = credentials.statuses().stream().collect(Collectors.toMap(
+                ProviderCredentialStatus::provider,
+                status -> status.configured() ? status.state().name() : "NOT_CONFIGURED"));
         return new CatalogView("1.0", profileKey, registry.registrations().stream()
-                .filter(model -> credentials.hasVerifiedCredential(model.provider()))
-                .map(AdminModelCatalogController::view).toList());
+                .map(model -> view(model, states.getOrDefault(model.provider(), "NOT_CONFIGURED"))).toList());
     }
 
-    private static ModelView view(ProviderModelRegistration model) {
+    private static ModelView view(ProviderModelRegistration model, String credentialState) {
         return new ModelView(selectionId(model), model.provider().name(), model.modelId(),
                 model.capabilities().stream().map(Enum::name).sorted().toList(),
                 new InferenceView(new SettingsView(
@@ -52,7 +57,8 @@ public class AdminModelCatalogController {
                                 : new BudgetView(
                                         model.inferenceSupport().reasoningBudgetTokens().min(),
                                         model.inferenceSupport().reasoningBudgetTokens().max(),
-                                        model.inferenceSupport().reasoningBudgetTokens().multipleOf())));
+                                        model.inferenceSupport().reasoningBudgetTokens().multipleOf())),
+                credentialState);
     }
 
     private static String selectionId(ProviderModelRegistration model) {
@@ -61,7 +67,7 @@ public class AdminModelCatalogController {
 
     public record CatalogView(String schemaVersion, String profileKey, List<ModelView> models) { }
     public record ModelView(String selectionId, String provider, String model,
-            List<String> capabilities, InferenceView inference) { }
+            List<String> capabilities, InferenceView inference, String credentialState) { }
     public record InferenceView(@JsonProperty("default") SettingsView defaultSettings,
             List<String> reasoningIntensity, BudgetView reasoningBudgetTokens) { }
     public record SettingsView(String reasoningIntensity, Integer reasoningBudgetTokens) { }

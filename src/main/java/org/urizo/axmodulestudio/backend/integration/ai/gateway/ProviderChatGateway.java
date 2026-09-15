@@ -4,6 +4,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.UUID;
 
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderRetryPolicy.RetryDecision;
 
@@ -18,6 +19,7 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
     private final ProviderRetryPolicy retryPolicy;
     private final Clock clock;
     private final Sleeper sleeper;
+    private final ProviderCallObserver observer;
 
     public ProviderChatGateway(
             ProviderCapabilityRegistry capabilityRegistry,
@@ -27,6 +29,12 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                 new ProviderRetryPolicy(), clock, duration -> Thread.sleep(duration.toMillis()));
     }
 
+    public ProviderChatGateway(ProviderCapabilityRegistry capabilityRegistry,
+            ProviderChatAdapterRegistry adapterRegistry, Clock clock, ProviderCallObserver observer) {
+        this(capabilityRegistry, adapterRegistry, new ProviderErrorNormalizer(),
+                new ProviderRetryPolicy(), clock, duration -> Thread.sleep(duration.toMillis()), observer);
+    }
+
     ProviderChatGateway(
             ProviderCapabilityRegistry capabilityRegistry,
             ProviderChatAdapterRegistry adapterRegistry,
@@ -34,12 +42,20 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
             ProviderRetryPolicy retryPolicy,
             Clock clock,
             Sleeper sleeper) {
+        this(capabilityRegistry, adapterRegistry, errorNormalizer, retryPolicy, clock, sleeper,
+                ProviderCallObserver.NOOP);
+    }
+
+    ProviderChatGateway(ProviderCapabilityRegistry capabilityRegistry,
+            ProviderChatAdapterRegistry adapterRegistry, ProviderErrorNormalizer errorNormalizer,
+            ProviderRetryPolicy retryPolicy, Clock clock, Sleeper sleeper, ProviderCallObserver observer) {
         this.capabilityRegistry = Objects.requireNonNull(capabilityRegistry, "capabilityRegistry is required");
         this.adapterRegistry = Objects.requireNonNull(adapterRegistry, "adapterRegistry is required");
         this.errorNormalizer = Objects.requireNonNull(errorNormalizer, "errorNormalizer is required");
         this.retryPolicy = Objects.requireNonNull(retryPolicy, "retryPolicy is required");
         this.clock = Objects.requireNonNull(clock, "clock is required");
         this.sleeper = Objects.requireNonNull(sleeper, "sleeper is required");
+        this.observer = Objects.requireNonNull(observer, "observer is required");
     }
 
     @Override
@@ -65,6 +81,7 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                         "Model provider deadline exceeded.");
             }
             completedAttempts++;
+            UUID callId = observeStart(registration, completedAttempts);
             try {
                 ProviderChatResponse response = adapter.chat(registration, boundedRequest);
                 if (!clock.instant().isBefore(deadline)) {
@@ -83,13 +100,16 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                                     + registration.provider() + " finished as "
                                     + response.finishReason());
                 }
+                observeFinish(callId, null);
                 return response;
             }
             catch (ProviderGatewayException failure) {
+                observeFinish(callId, failure.code());
                 throw failure;
             }
             catch (RuntimeException failure) {
                 NormalizedProviderError error = errorNormalizer.normalize(failure);
+                observeFinish(callId, error.code());
                 LOG.warn("Model provider call failed: provider={} model={} code={}",
                         registration.provider(), registration.modelId(), error.code());
                 RetryDecision decision = retryPolicy.evaluate(
@@ -104,6 +124,17 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
                 sleep(decision.delay());
             }
         }
+    }
+
+    private UUID observeStart(ProviderModelRegistration registration, int attempt) {
+        try { return observer.started(registration.provider(), registration.modelId(), attempt); }
+        catch (RuntimeException ignored) { return null; }
+    }
+
+    private void observeFinish(UUID callId, ModelGatewayErrorCode code) {
+        if (callId == null) return;
+        try { observer.finished(callId, code); }
+        catch (RuntimeException ignored) { /* Monitoring never changes the provider outcome. */ }
     }
 
     private void sleep(Duration delay) {

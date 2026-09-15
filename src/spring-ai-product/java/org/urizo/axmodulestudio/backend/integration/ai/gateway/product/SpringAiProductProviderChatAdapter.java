@@ -31,6 +31,7 @@ import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.google.genai.common.GoogleGenAiThinkingLevel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
@@ -66,6 +67,7 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     private final ProviderCredentialResolver credentialResolver;
     private final Map<ModelProvider, ProductChatModelFactory> factories;
     private final Clock clock;
+    private final LocalCacheUsageRecorder cacheUsageRecorder;
     // Provenance only for calls actually produced by another provider in this adapter.
     // Gemini documents this marker for imported tool history; unknown/mutated Gemini
     // history must never acquire it as a substitute for a missing native signature.
@@ -89,8 +91,18 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             ProviderCredentialResolver credentialResolver,
             List<ProductChatModelFactory> factories,
             Clock clock) {
+        this(credentialResolver, factories, clock, LocalCacheUsageRecorder.disabled());
+    }
+
+    @Autowired
+    SpringAiProductProviderChatAdapter(
+            ProviderCredentialResolver credentialResolver,
+            List<ProductChatModelFactory> factories,
+            Clock clock,
+            LocalCacheUsageRecorder cacheUsageRecorder) {
         this.credentialResolver = credentialResolver;
         this.clock = clock;
+        this.cacheUsageRecorder = cacheUsageRecorder;
         Map<ModelProvider, ProductChatModelFactory> indexed = new EnumMap<>(ModelProvider.class);
         for (ProductChatModelFactory factory : factories) {
             if (indexed.putIfAbsent(factory.provider(), factory) != null) {
@@ -119,6 +131,8 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
 
         Instant startedAt = clock.instant();
+        ChatResponse providerResponse = null;
+        boolean completed = false;
         try (ProviderCredentialLease lease = credentialResolver.resolve(request.provider())) {
             byte[] credentialBytes = lease.copySecret();
             try {
@@ -134,15 +148,26 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                     ChatResponse response;
                     try {
                         response = session.chatModel().call(prompt(registration, request));
+                        providerResponse = response;
                     } catch (RuntimeException failure) {
                         throw ProductProviderErrors.sanitizeGoogle(failure);
                     }
-                    return response(request, response, startedAt);
+                    ProviderChatResponse normalized = response(request, response, startedAt);
+                    completed = true;
+                    return normalized;
                 }
             }
             finally {
                 Arrays.fill(credentialBytes, (byte) 0);
             }
+        }
+        catch (RuntimeException failure) {
+            completed = false;
+            throw failure;
+        }
+        finally {
+            cacheUsageRecorder.record(request.provider(), request.modelId(), providerResponse,
+                    startedAt, clock.instant(), completed);
         }
     }
 

@@ -76,6 +76,58 @@ class SpringAiProductProviderChatAdapterTest {
     private static final int OUTPUT_BUDGET = 12_345;
 
     @Test
+    void recordsLocalCacheUsageWithoutExporterAndPreservesOutcomesOnWriteFailure(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path temp) throws Exception {
+        ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        ChatModel model = mock(ChatModel.class);
+        when(resolver.resolve(ModelProvider.OPENAI)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
+                ModelProvider.OPENAI, FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
+        when(factory.provider()).thenReturn(ModelProvider.OPENAI);
+        when(factory.open(FIXTURE_CREDENTIAL, "test-model", ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                .thenAnswer(ignored -> new ProductChatModelSession(model, () -> { }));
+        ChatResponse raw = new ChatResponse(List.of(new Generation(new AssistantMessage("PRIVATE_MODEL_BODY"))),
+                LocalCacheUsageRecorderTest.response(2000, 1024).getMetadata());
+        when(model.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(raw);
+        var registration = new ProviderModelRegistration(ModelProvider.OPENAI, "test-model",
+                Set.of(ModelCapability.CHAT), Duration.ofSeconds(30), 1);
+        var request = new ProviderChatRequest(ModelProvider.OPENAI, "test-model", List.of(
+                ProviderChatMessage.plain(ProviderChatMessage.Role.SYSTEM, "PRIVATE_SYSTEM"),
+                ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "PRIVATE_USER")), NOW.plusSeconds(30));
+        var file = temp.resolve("usage.jsonl");
+        var adapter = new SpringAiProductProviderChatAdapter(resolver, List.of(factory), Clock.fixed(NOW, ZoneOffset.UTC),
+                new LocalCacheUsageRecorder(true, file.toString(), false));
+        assertThat(adapter.chat(registration, request).content()).isEqualTo("PRIVATE_MODEL_BODY");
+        String recorded = java.nio.file.Files.readString(file);
+        assertThat(recorded).doesNotContain("PRIVATE_MODEL_BODY", "PRIVATE_SYSTEM", "PRIVATE_USER", FIXTURE_CREDENTIAL);
+        assertThat(new ObjectMapper().readTree(recorded).path("cachedInputTokens").intValue()).isEqualTo(1024);
+        ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
+        verify(model).call(prompt.capture());
+        assertThat(prompt.getValue().getInstructions()).extracting(message -> message.getText())
+                .containsExactly("PRIVATE_SYSTEM", "PRIVATE_USER");
+
+        var brokenRecorderAdapter = new SpringAiProductProviderChatAdapter(resolver, List.of(factory),
+                Clock.fixed(NOW, ZoneOffset.UTC), new LocalCacheUsageRecorder(true, temp.toString(), false));
+        assertThat(brokenRecorderAdapter.chat(registration, request).content()).isEqualTo("PRIVATE_MODEL_BODY");
+        var failure = new IllegalStateException("PRIVATE_FAILURE");
+        when(model.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenThrow(failure);
+        assertThatThrownBy(() -> brokenRecorderAdapter.chat(registration, request)).isSameAs(failure);
+        assertThatThrownBy(() -> adapter.chat(registration, request)).isSameAs(failure);
+        var lines = java.nio.file.Files.readAllLines(file);
+        assertThat(lines).hasSize(2);
+        assertThat(lines.get(1)).doesNotContain("PRIVATE_FAILURE");
+        assertThat(new ObjectMapper().readTree(lines.get(1)).path("outcome").textValue()).isEqualTo("FAILED");
+
+        org.mockito.Mockito.doReturn(raw).when(model).call(org.mockito.ArgumentMatchers.any(Prompt.class));
+        when(factory.open(FIXTURE_CREDENTIAL, "test-model", ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                .thenAnswer(ignored -> new ProductChatModelSession(model, () -> { throw failure; }));
+        assertThatThrownBy(() -> adapter.chat(registration, request)).isSameAs(failure);
+        JsonNode closeFailure = new ObjectMapper().readTree(java.nio.file.Files.readAllLines(file).get(2));
+        assertThat(closeFailure.path("outcome").textValue()).isEqualTo("FAILED");
+        assertThat(closeFailure.path("cachedInputTokens").intValue()).isEqualTo(1024);
+    }
+
+    @Test
     void bindsOpenAiThroughTheCmsResolverAndSpringAiChatModelContract() {
         verifiesMockContract(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT);
     }

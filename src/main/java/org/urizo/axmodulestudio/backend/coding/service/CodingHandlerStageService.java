@@ -181,6 +181,20 @@ public final class CodingHandlerStageService {
     /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
     private final int toolHistoryKeep;
 
+    @Value("${ax.coding.model-turn-bridge.search-result-grouping-enabled:false}")
+    private boolean searchResultGroupingEnabled;
+
+    @Value("${ax.coding.model-turn-bridge.small-read-history-retention-enabled:false}")
+    private boolean smallReadHistoryRetentionEnabled;
+
+    @Value("${ax.coding.model-turn-bridge.small-search-history-retention-enabled:false}")
+    private boolean smallSearchHistoryRetentionEnabled;
+
+    // Experimental limits on additional old bodies, measured before provider wrapping.
+    static final int SMALL_READ_MAX_BYTES = 2048;
+    static final int SMALL_SEARCH_MAX_BYTES = 6144;
+    static final int SMALL_READ_HISTORY_MAX_BYTES = 8192;
+
     /**
      * Three constructors mean Spring cannot guess, and without the annotation it looks for
      * a no-arg one and fails the whole context at startup. The annotated one takes the
@@ -509,7 +523,7 @@ public final class CodingHandlerStageService {
                 continue;
             }
             messages.add(assistantToolMessage(modelResponse, call));
-            messages.add(toolMessage(toolResult));
+            messages.add(toolMessage(request.handlerKey(), call.name(), toolResult));
             JsonNode decoded = decodeToolResult(toolResult);
             if (Set.of("read_diff", "apply_patch",
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
@@ -1972,13 +1986,16 @@ public final class CodingHandlerStageService {
      * and the assistant message that asked for it keeps the call's arguments, so the model
      * still sees what it read and where - only the body is gone. Already-folded messages
      * are left as they are, so the same message is never rewritten twice and the request
-     * digest of a retried turn stays what it was.
+     * digest of a retried turn stays what it was. The opt-in small-read policy can retain
+     * additional old read_file/search_code bodies within fixed per-result and shared byte limits;
+     * it never restores an already-folded body or changes the common request-size guard.
      */
     private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
             return;
         }
         int kept = 0;
+        int retainedSmallBytes = 0;
         for (int index = messages.size() - 1; index >= 0; index--) {
             JsonNode message = messages.get(index);
             if (!"tool".equals(message.path("role").textValue())
@@ -1988,6 +2005,22 @@ public final class CodingHandlerStageService {
             if (++kept <= toolHistoryKeep
                     || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
                 continue;
+            }
+            String tool = toolNameBefore(messages, index);
+            int maxBytes = "read_file".equals(tool) && smallReadHistoryRetentionEnabled
+                    ? SMALL_READ_MAX_BYTES
+                    : "search_code".equals(tool) && smallSearchHistoryRetentionEnabled ? SMALL_SEARCH_MAX_BYTES : 0;
+            if (maxBytes > 0 && message.path("content").isTextual()) {
+                String content = message.path("content").textValue();
+                // The char precheck avoids allocating a byte array for large results.
+                if (content.length() <= maxBytes) {
+                    int bytes = content.getBytes(StandardCharsets.UTF_8).length;
+                    if (bytes <= maxBytes
+                            && bytes <= SMALL_READ_HISTORY_MAX_BYTES - retainedSmallBytes) {
+                        retainedSmallBytes += bytes;
+                        continue;
+                    }
+                }
             }
             ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
         }
@@ -2001,6 +2034,15 @@ public final class CodingHandlerStageService {
     private String foldingHint(boolean foldHistory) {
         if (!foldHistory) {
             return "";
+        }
+        if (smallReadHistoryRetentionEnabled || smallSearchHistoryRetentionEnabled) {
+            String retainedTools = smallReadHistoryRetentionEnabled
+                    ? (smallSearchHistoryRetentionEnabled ? "read_file and search_code" : "read_file")
+                    : "search_code";
+            return "Older read_file and search_code results may be folded to a short note; "
+                    + "small " + retainedTools + " results may remain within a bounded history budget. Before "
+                    + "apply_patch, read_file the exact lines you will replace so oldText is "
+                    + "copied from a fresh read, never from memory. ";
         }
         return "Only your last " + toolHistoryKeep + " read_file and search_code results "
                 + "stay in the conversation; older ones are folded to a short note. Before "
@@ -2034,7 +2076,7 @@ public final class CodingHandlerStageService {
         return message;
     }
 
-    private ObjectNode toolMessage(CodingToolContract.ResultContent result) {
+    private ObjectNode toolMessage(String handler, String tool, CodingToolContract.ResultContent result) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "tool");
         message.put("toolCallId", result.toolCallId().toString());
@@ -2045,7 +2087,8 @@ public final class CodingHandlerStageService {
                         + result.executionId() + "/result")
                 .put("sizeBytes", result.sizeBytes())
                 .put("digest", result.digest());
-        message.put("content", result.content());
+        message.put("content", searchResultGroupingEnabled
+                ? SearchCodeModelView.render(handler, tool, result.content()) : result.content());
         return message;
     }
 

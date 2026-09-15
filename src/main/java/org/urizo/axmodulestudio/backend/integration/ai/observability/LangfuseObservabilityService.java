@@ -7,6 +7,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.time.format.DateTimeParseException;
 import java.util.Base64;
@@ -47,6 +49,11 @@ public final class LangfuseObservabilityService {
     private final LangfuseHttpTransport transport;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    // Read buckets are independent; neither lock is used by trace ingestion.
+    private final Object metricsReadLock = new Object();
+    private final Object generalReadLock = new Object();
+    private Instant metricsRetryAt = Instant.MIN;
+    private Instant generalRetryAt = Instant.MIN;
     private final Map<CacheKey, TimedValue> cache = new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<CacheKey, TimedValue> eldest) {
@@ -70,6 +77,12 @@ public final class LangfuseObservabilityService {
     }
 
     public MetricsResponse metrics(String from, String to, String jobId) {
+        synchronized (metricsReadLock) {
+            return readMetrics(from, to, jobId);
+        }
+    }
+
+    private MetricsResponse readMetrics(String from, String to, String jobId) {
         TimeRange range = timeRange(from, to);
         String selectedJob = optionalJobId(jobId);
         Availability unavailable = configurationAvailability();
@@ -95,6 +108,12 @@ public final class LangfuseObservabilityService {
     }
 
     public TokenUsageResponse tokenUsage(String from, String to, String jobId) {
+        synchronized (metricsReadLock) {
+            return readTokenUsage(from, to, jobId);
+        }
+    }
+
+    private TokenUsageResponse readTokenUsage(String from, String to, String jobId) {
         TimeRange range = timeRange(from, to);
         String selectedJob = optionalJobId(jobId);
         ChronoUnit unit = Duration.between(range.from(), range.to()).compareTo(Duration.ofHours(48)) <= 0
@@ -142,6 +161,13 @@ public final class LangfuseObservabilityService {
     }
 
     public ObservationsResponse observations(
+            String from, String to, String jobId, String cursor, int limit, String kind) {
+        synchronized (generalReadLock) {
+            return readObservations(from, to, jobId, cursor, limit, kind);
+        }
+    }
+
+    private ObservationsResponse readObservations(
             String from, String to, String jobId, String cursor, int limit, String kind) {
         TimeRange range = timeRange(from, to);
         String selectedJob = optionalJobId(jobId);
@@ -199,6 +225,22 @@ public final class LangfuseObservabilityService {
             String observationTraceId,
             Instant startedAt,
             Instant lastReportedAt) {
+        synchronized (generalReadLock) {
+            return readSelectedObservations(jobId, traceId, profileVersionId, pipelineAttempt, executionAttempt, nodeId, nodeSequence, observationTraceId, startedAt, lastReportedAt);
+        }
+    }
+
+    private SelectedObservationsResponse readSelectedObservations(
+            String jobId,
+            String traceId,
+            String profileVersionId,
+            int pipelineAttempt,
+            int executionAttempt,
+            String nodeId,
+            long nodeSequence,
+            String observationTraceId,
+            Instant startedAt,
+            Instant lastReportedAt) {
         TimeRange range = selectedRange(startedAt, lastReportedAt);
         SelectedObservationKey selection = new SelectedObservationKey(
                 jobId, traceId, profileVersionId, pipelineAttempt, executionAttempt,
@@ -212,7 +254,9 @@ public final class LangfuseObservabilityService {
             return SelectedObservationsResponse.empty(
                     unavailable, selection, range, false);
         }
-        CacheKey key = new CacheKey("selected:" + selection, range.from(), range.to());
+        // A running occurrence's lastReportedAt changes frequently. Reuse its bounded
+        // snapshot until TTL expiry; its response retains the actual queried range.
+        CacheKey key = new CacheKey("selected:" + selection, range.from(), range.from());
         SelectedObservationsResponse cached = cached(
                 key, SelectedObservationsResponse.class);
         if (cached != null) {
@@ -260,6 +304,12 @@ public final class LangfuseObservabilityService {
     }
 
     public ScoresResponse scores(String from, String to) {
+        synchronized (generalReadLock) {
+            return readScores(from, to);
+        }
+    }
+
+    private ScoresResponse readScores(String from, String to) {
         TimeRange range = timeRange(from, to);
         Availability unavailable = configurationAvailability();
         if (unavailable != null) {
@@ -295,6 +345,10 @@ public final class LangfuseObservabilityService {
     }
 
     private JsonNode request(String pathAndQuery) {
+        boolean metrics = pathAndQuery.startsWith("/api/public/v2/metrics?");
+        if (clock.instant().isBefore(metrics ? metricsRetryAt : generalRetryAt)) {
+            throw new UpstreamFailure();
+        }
         String credentials = properties.publicKey() + ":" + properties.secretKey();
         String authorization = "Basic " + Base64.getEncoder().encodeToString(
                 credentials.getBytes(StandardCharsets.UTF_8));
@@ -304,6 +358,11 @@ public final class LangfuseObservabilityService {
                     Map.of("Accept", "application/json", "Authorization", authorization),
                     properties.requestTimeout(),
                     properties.maxResponseBytes());
+            if (response.statusCode() == 429) {
+                Instant retryAt = retryAt(response.retryAfter());
+                if (metrics) metricsRetryAt = retryAt;
+                else generalRetryAt = retryAt;
+            }
             if (response.statusCode() != 200) {
                 throw new UpstreamFailure();
             }
@@ -320,6 +379,24 @@ public final class LangfuseObservabilityService {
         catch (IOException | RuntimeException failure) {
             throw new UpstreamFailure();
         }
+    }
+
+    private Instant retryAt(String value) {
+        Instant now = clock.instant();
+        if (value != null) {
+            try {
+                long seconds = Long.parseLong(value.trim());
+                if (seconds > 0) return now.plusSeconds(seconds);
+            }
+            catch (RuntimeException ignored) {
+                try {
+                    Instant date = ZonedDateTime.parse(value.trim(), DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+                    if (date.isAfter(now)) return date;
+                }
+                catch (RuntimeException invalidDate) { /* Use a short bounded fallback. */ }
+            }
+        }
+        return now.plusSeconds(60);
     }
 
     private String metricsPath(TimeRange range, String jobId) {

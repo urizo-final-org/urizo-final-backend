@@ -2363,10 +2363,11 @@ public final class CodingHandlerStageService {
      * alone, and Jobs 3d4b364e and 3c9062a8 left out TourPortal.tsx - the file every phrase the
      * request quoted lives in - so the excerpt came back empty and 3c9062a8 wandered for 24
      * answers. Each folder of the Job's fence is searched once for the phrase (the repository
-     * root without a fence). The phrase is adopted only when exactly one file holds it on a
-     * code line, counting tests, and that file is not a test: a match in two files, only in a
-     * test, or in a cut-off result names no file surely, so nothing is added, as before. The
-     * adopted file is then read the way a target is.
+     * root without a fence). The phrase is adopted only when exactly one file other than a test
+     * holds it on a code line: a test is not the screen, so it is not counted (Job 100af538 lost
+     * festivalBadge when portal-meta.test.ts made portal-meta.ts look ambiguous). A match in two
+     * files, only in a test, or in a cut-off result names no file surely, so nothing is added,
+     * as before. The adopted file is then read the way a target is.
      */
     private FenceMatch fenceMatch(
             String authorization,
@@ -2403,7 +2404,9 @@ public final class CodingHandlerStageService {
             }
             for (JsonNode match : found.path("matches")) {
                 String path = match.path("path").asText("");
-                if (!path.isEmpty() && isCodeLine(match.path("preview").asText(""))) {
+                // A test is not the screen, so it neither holds the phrase nor makes it ambiguous.
+                if (!path.isEmpty() && !isTestFile(path)
+                        && isCodeLine(match.path("preview").asText(""))) {
                     holders.putIfAbsent(path, match.path("line").asInt(0));
                 }
             }
@@ -2412,7 +2415,7 @@ public final class CodingHandlerStageService {
             return null;
         }
         java.util.Map.Entry<String, Integer> only = holders.entrySet().iterator().next();
-        if (isTestFile(only.getKey()) || only.getValue() <= 0
+        if (only.getValue() <= 0
                 || targets.stream().anyMatch(target -> target.path().equals(only.getKey()))) {
             return null;
         }

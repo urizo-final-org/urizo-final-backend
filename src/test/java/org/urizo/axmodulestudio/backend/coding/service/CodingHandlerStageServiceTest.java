@@ -929,9 +929,64 @@ class CodingHandlerStageServiceTest {
     }
 
     /*
-     * The measured case: '진행 중' sat on code lines of portal-meta.ts and portal-meta.test.ts.
-     * Two files name neither surely, a phrase only a test holds is not the screen, and a
-     * cut-off result may hide a second file - none of them adds an excerpt or a read.
+     * Job 100af538 (2026-09-15): '진행 중' sat on code lines of portal-meta.ts and its test.
+     * Counting the test as a second holder dropped the excerpt, so the model never saw
+     * festivalBadge and rewrote its date check with the UTC slip the helper avoids. A test is
+     * not the screen: the one source file left holds the phrase and is excerpted.
+     */
+    @Test
+    void aTestSharingThePhraseDoesNotHideTheOneSourceFileHoldingIt() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/Small.java")),
+                "'진행 중' 카드만 남겨줘");
+        when(fixture.selections().jobSnapshot(JOB))
+                .thenReturn(List.of("frontend:src/features/site"));
+        String meta = "export function festivalBadge(start: string, end: string) {\n"
+                + "  const now = today()\n  if (now >= start) return '진행 중'\n"
+                + "  return 'D-1'\n}\n";
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest -> {
+            String name = toolRequest.path("tool").path("name").asText();
+            String path = toolRequest.path("tool").path("arguments").path("path").asText("");
+            if ("search_code".equals(name)) {
+                return jsonResult(fixture,
+                        "{\"matches\":[{\"path\":\"src/features/site/portal-meta.test.ts\","
+                                + "\"line\":98,\"column\":3,"
+                                + "\"preview\":\"  expect(badge).toBe('진행 중')\"},"
+                                + "{\"path\":\"src/features/site/portal-meta.ts\",\"line\":3,"
+                                + "\"column\":3,\"preview\":\"  if (now >= start) return '진행 중'\"}],"
+                                + "\"truncated\":false}");
+            }
+            if ("read_file".equals(name)) {
+                return textResult(fixture, "src/Small.java".equals(path) ? SMALL_JAVA : meta);
+            }
+            return jsonResult(fixture, diffJson());
+        });
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "search_code", "read_file", "read_diff");
+        assertThat(submitted.get(2).path("tool").path("arguments").path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        assertThat(excerpts.get(0).path("content").asText()).contains("festivalBadge");
+    }
+
+    /*
+     * Two source files name neither surely, a phrase only a test holds is not the screen, and
+     * a cut-off result may hide a second file - none of them adds an excerpt or a read.
      */
     @Test
     void aFenceMatchInTwoFilesOnlyInATestOrCutOffIsNotUsed() throws Exception {
@@ -939,8 +994,8 @@ class CodingHandlerStageServiceTest {
         List<String> searchResults = List.of(
                 "{\"matches\":[{\"path\":\"src/features/site/portal-meta.ts\",\"line\":100,"
                         + "\"column\":3,\"preview\":\"  if (now >= start) return '진행 중'\"},"
-                        + "{\"path\":\"src/features/site/portal-meta.test.ts\",\"line\":98,"
-                        + "\"column\":3,\"preview\":\"  expect(badge).toBe('진행 중')\"}],"
+                        + "{\"path\":\"src/features/site/TourPortal.tsx\",\"line\":40,"
+                        + "\"column\":3,\"preview\":\"  const label = '진행 중'\"}],"
                         + "\"truncated\":false}",
                 searchJson(false, "src/features/site/Portal.test.tsx", 12,
                         "  expect(screen.getByText('진행 중')).toBeVisible()"),

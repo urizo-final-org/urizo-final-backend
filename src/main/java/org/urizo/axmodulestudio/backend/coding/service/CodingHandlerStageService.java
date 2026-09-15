@@ -2329,6 +2329,83 @@ public final class CodingHandlerStageService {
                 && !text.startsWith("import");
     }
 
+    /**
+     * The first line, 1-based, holding the phrase outside any block comment, or 0 when none does.
+     *
+     * <p>{@link #isCodeLine} reads one line and cannot see that it sits inside a block comment:
+     * the middle lines of a JSX {@code {/* ... *}{@code /}} comment start with ordinary text. Job
+     * b960265f lost festivalBadge that way - the second line of such a comment in
+     * PortalResultCard.tsx held the quoted phrase, the phrase looked held by a target file, and the
+     * fence search that would have found portal-meta.ts never ran. The model then invented a
+     * function the file did not have. A whole file is read from its top, so the state is known.
+     */
+    static int firstCodeLineHolding(String[] lines, String phrase) {
+        boolean inComment = false;
+        for (int index = 0; index < lines.length; index++) {
+            StringBuilder code = new StringBuilder();
+            inComment = outsideBlockComments(lines[index], inComment, code);
+            String text = code.toString();
+            if (text.contains(phrase) && isCodeLine(text)) {
+                return index + 1;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Appends the part of a line outside block comments and answers whether one is still open at
+     * its end. A {@code /*} inside quotes on the same line, or after {@code //}, opens nothing:
+     * mistaking a path string such as {@code './**}{@code /*.tsx'} for a comment would silently
+     * drop every code line after it. A template string spanning lines is not followed.
+     */
+    private static boolean outsideBlockComments(String line, boolean inComment, StringBuilder code) {
+        char quote = 0;
+        int index = 0;
+        while (index < line.length()) {
+            char current = line.charAt(index);
+            char next = index + 1 < line.length() ? line.charAt(index + 1) : 0;
+            if (inComment) {
+                if (current == '*' && next == '/') {
+                    inComment = false;
+                    index += 2;
+                }
+                else {
+                    index++;
+                }
+                continue;
+            }
+            if (quote != 0) {
+                code.append(current);
+                if (current == '\\' && next != 0) {
+                    code.append(next);
+                    index += 2;
+                    continue;
+                }
+                if (current == quote) {
+                    quote = 0;
+                }
+                index++;
+                continue;
+            }
+            if (current == '/' && next == '/') {
+                // The rest is a line comment; isCodeLine still judges a line that starts with it.
+                code.append(line, index, line.length());
+                break;
+            }
+            if (current == '/' && next == '*') {
+                inComment = true;
+                index += 2;
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+            }
+            code.append(current);
+            index++;
+        }
+        return inComment;
+    }
+
     /** The first code line of the file holding the phrase, or 0 when it holds none. */
     private int firstCodeMatch(
             String authorization,
@@ -2343,12 +2420,7 @@ public final class CodingHandlerStageService {
             String phrase,
             int phraseIndex) {
         if (file.lines() != null) {
-            for (int index = 0; index < file.lines().length; index++) {
-                if (file.lines()[index].contains(phrase) && isCodeLine(file.lines()[index])) {
-                    return index + 1;
-                }
-            }
-            return 0;
+            return firstCodeLineHolding(file.lines(), phrase);
         }
         if (!allowedTools.contains("search_code")) {
             return 0;

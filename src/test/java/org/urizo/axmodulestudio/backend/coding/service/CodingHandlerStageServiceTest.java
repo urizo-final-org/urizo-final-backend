@@ -985,6 +985,112 @@ class CodingHandlerStageServiceTest {
     }
 
     /*
+     * Job b960265f (2026-09-15): the target PortalResultCard.tsx held '진행 중' only on the middle
+     * line of a JSX block comment (frontend c3345be). Read one line at a time that line looked
+     * like code, the phrase looked held by a target, and the fence search that finds
+     * festivalBadge never ran - the model then invented isOngoingFestival. The whole target is
+     * now walked with its comment state, so the fence search runs and portal-meta.ts is excerpted.
+     */
+    @Test
+    void aPhraseOnlyInsideAMultiLineJsxCommentOfATargetStillSearchesTheFence() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(
+                mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
+                List.of(analysisNaming(mapper, "src/features/site/PortalResultCard.tsx")),
+                "'진행 중' 표시가 붙은 카드만 남겨줘");
+        when(fixture.selections().jobSnapshot(JOB))
+                .thenReturn(List.of("frontend:src/features/site"));
+        String card = "export function PortalResultCard() {\n"
+                + "  return <div>\n"
+                + "        {/* 카테고리 뱃지와 **모양으로** 갈린다 — 저쪽은 테두리형, 이쪽은 채움형이다. 둘 다\n"
+                + "            테두리형이던 때는 두 카드가 한눈에 거의 같아 보여서, 진행 중 행사와 종료된 행사를\n"
+                + "            나란히 놓아도 사람이 차이를 못 짚었다. 색만으로 구분하지 않으려고 \"종료된 행사\"\n"
+                + "            참고 정보라 오류가 아니다. */}\n"
+                + "        {ended && <span>종료된 행사</span>}\n"
+                + "  </div>\n}\n";
+        String meta = "export function festivalBadge(start: string, end: string) {\n"
+                + "  const now = today()\n  if (now >= start) return '진행 중'\n"
+                + "  return 'D-1'\n}\n";
+        List<JsonNode> submitted = new ArrayList<>();
+        answerToolsByRequest(fixture, submitted, toolRequest -> {
+            String name = toolRequest.path("tool").path("name").asText();
+            String path = toolRequest.path("tool").path("arguments").path("path").asText("");
+            if ("search_code".equals(name)) {
+                return jsonResult(fixture, searchJson(false,
+                        "src/features/site/portal-meta.ts", 3, "  if (now >= start) return '진행 중'"));
+            }
+            if ("read_file".equals(name)) {
+                return textResult(fixture,
+                        "src/features/site/PortalResultCard.tsx".equals(path) ? card : meta);
+            }
+            return jsonResult(fixture, diffJson());
+        });
+        when(fixture.gateway().chat(any())).thenReturn(terminalReply());
+
+        fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request());
+
+        assertThat(submitted)
+                .extracting(toolRequest -> toolRequest.path("tool").path("name").asText())
+                .containsExactly("read_file", "search_code", "read_file", "read_diff");
+        assertThat(submitted.get(1).path("tool").path("arguments").path("query").asText())
+                .isEqualTo("진행 중");
+        assertThat(submitted.get(2).path("tool").path("arguments").path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        ArgumentCaptor<ProviderChatRequest> routed =
+                ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway()).chat(routed.capture());
+        JsonNode excerpts = mapper.readTree(firstUserMessage(routed.getValue()))
+                .path("targetFileExcerpts");
+        assertThat(excerpts).hasSize(1);
+        assertThat(excerpts.get(0).path("path").asText())
+                .isEqualTo("src/features/site/portal-meta.ts");
+        assertThat(excerpts.get(0).path("content").asText()).contains("festivalBadge");
+    }
+
+    /* The comment shape of frontend PortalResultCard.tsx:53-61 (c3345be), line for line. */
+    @Test
+    void aPhraseInsideAMultiLineJsxCommentIsNotOnACodeLine() {
+        String[] lines = {
+                "      {(badge != null || ended) && <div className=\"flex flex-wrap gap-1.5\">",
+                "        {/* 카테고리 뱃지와 **모양으로** 갈린다 — 저쪽은 테두리형, 이쪽은 채움형이다. 둘 다",
+                "            테두리형이던 때는 두 카드가 한눈에 거의 같아 보여서, 진행 중 행사와 종료된 행사를",
+                "            나란히 놓아도 사람이 차이를 못 짚었다. 색만으로 구분하지 않으려고 \"종료된 행사\"",
+                "            참고 정보라 오류가 아니다. */}",
+                "        {ended && <span className=\"rounded-md\">종료된 행사</span>}",
+                "      </div>}"};
+
+        // One line alone is fooled by the middle line - the reason the whole file is walked.
+        assertThat(CodingHandlerStageService.isCodeLine(lines[2])).isTrue();
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(lines, "진행 중")).isZero();
+        // After the comment closes, the same kind of text is code again.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(lines, "종료된 행사")).isEqualTo(6);
+    }
+
+    @Test
+    void commentTrackingKeepsCodeBesideCommentsAndIgnoresMarksInStringsAndLineComments() {
+        // Code before a comment that opens on the same line is still code.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(new String[] {
+                "  if (now >= start) return '진행 중' /* badge", "  still comment */"}, "진행 중"))
+                .isEqualTo(1);
+        // A JSDoc block hides its body; the declaration after it is found.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(new String[] {
+                "/**", " * 진행 중 뱃지", " */", "const label = '진행 중'"}, "진행 중"))
+                .isEqualTo(4);
+        // A path string holding /* opens no comment, so the next line stays code.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(new String[] {
+                "const pages = import.meta.glob('./**/*.tsx')", "<p>진행 중</p>"}, "진행 중"))
+                .isEqualTo(2);
+        // Nor does a /* after //.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(new String[] {
+                "// see /* the badge helper", "<p>진행 중</p>"}, "진행 중"))
+                .isEqualTo(2);
+        // A line comment holding the phrase is still not code.
+        assertThat(CodingHandlerStageService.firstCodeLineHolding(new String[] {
+                "// 진행 중", "const shown = 1"}, "진행 중"))
+                .isZero();
+    }
+
+    /*
      * Two source files name neither surely, a phrase only a test holds is not the screen, and
      * a cut-off result may hide a second file - none of them adds an excerpt or a read.
      */

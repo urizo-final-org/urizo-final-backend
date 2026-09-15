@@ -87,4 +87,36 @@ class CodingRunnerScriptContractTest {
                 .doesNotContain("Join-Path $WorkRoot 'ai-frontend'")
                 .doesNotContain("$frontendWorktree = ''");
     }
+
+    @Test
+    void searchesQuotedTextOnlyInsideTheSentFoldersWithoutAShellAndWithinBounds()
+            throws Exception {
+        String script = Files.readString(Path.of("scripts", "runner.ps1"), StandardCharsets.UTF_8);
+        String search = script.substring(
+                script.indexOf("function Get-ScanPhraseMatches"),
+                script.indexOf("function Add-ScanPhraseMatches"));
+        String scan = script.substring(
+                script.indexOf("function Invoke-PrepareScanWorktree"),
+                script.indexOf("function Get-PreviewArguments"));
+
+        // The request's text never reaches a command line: git reads it from a file as fixed
+        // strings, and only the folders the Backend sent follow the pathspec separator.
+        assertThat(search)
+                .contains("grep -n -I -F --no-color -f `\"$patternFile`\" -- $pathspec")
+                .contains("[IO.Path]::GetTempFileName()")
+                .contains("$start.UseShellExecute = $false")
+                .contains("[Text.Encoding]::UTF8.GetString($buffer, 0, $filled)")
+                .contains("$read.Wait([int]$wait)")
+                .contains("$process.WaitForExit($left)")
+                .contains("$process.Kill()")
+                .contains("[int]$PerPhraseMilliseconds = 2000")
+                .contains("[int]$TotalMilliseconds = 6000")
+                .contains("[int]$MaxLinesPerPhrase = 20")
+                .contains("[int]$MaxBytesPerPhrase = 65536")
+                .doesNotContain("Invoke-Expression")
+                .doesNotContain("cmd.exe")
+                .doesNotContain("& git");
+        // Every result the scan returns - fresh, reused, or kept dirty - carries the search.
+        assertThat(scan.split("Add-ScanPhraseMatches", -1)).hasSize(4);
+    }
 }

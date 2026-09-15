@@ -71,6 +71,20 @@ result metadata therefore describes the stored original, not the model view.
 
 ## Offline validation
 
+### Local compatibility with Backend PR #111
+
+The local integration includes PR #111 head `37a995119893b8cb3fd8f664b4c112a4eee890da`;
+it does not merge the GitHub PR or deploy its code. Its reading-answer depth and six-body
+baseline cap remain in force. The opt-in byte allowance is additional to that baseline,
+so eligible older results can remain beyond six bodies, within the shared extra 8192 bytes.
+Batched results are associated with their executed tool calls before rendering; raw stored
+results and the existing provider instrumentation remain unchanged.
+
+PR #111 also stops a first code round after 12 reading answers without an edit by default.
+The retention flags do not disable that independent brake. Rework and an attempted patch
+follow the PR's existing exceptions. Earlier experiment results predate this change and
+must not be treated as measurements of the integrated behavior.
+
 ### Bounded small-read history candidate
 
 `AX_CODING_SMALL_READ_HISTORY_RETENTION_ENABLED` defaults to `false`, independently of search grouping.

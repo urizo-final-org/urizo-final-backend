@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -71,6 +73,37 @@ public final class CodingHandlerStageService {
     private static final int MAX_OUTLINED_TARGET_FILES = 3;
     /** Tool sequence numbers of those reads, clear of the answers' own 1 to 24. */
     private static final int TARGET_OUTLINE_SEQUENCE_BASE = 1000;
+    /** Tool sequence number of the read_diff the code stage runs before its first answer. */
+    private static final int PRE_EDIT_DIFF_SEQUENCE = 1099;
+    /** The most of an earlier round's diff a rework round's first message carries. */
+    private static final int MAX_CURRENT_DIFF_CHARACTERS = 8_000;
+    /**
+     * The lines the request itself names, read before the first answer. On the four measured
+     * haiku Jobs of one request the model spent two to three answers finding the quoted
+     * screen text, and on 543eb70f it read the same PortalHome range nine times over three
+     * rounds. A phrase the request quotes is looked up in the target files, and the
+     * declaration it sits in is handed over as an excerpt - at most two, bounded, because an
+     * excerpt sits in the first message and is re-sent with every answer.
+     */
+    private static final int MAX_EXCERPT_PHRASES = 4;
+    private static final int MAX_EXCERPTS = 2;
+    private static final int MAX_EXCERPT_LINES = 120;
+    private static final int MAX_EXCERPT_CHARACTERS = 8_000;
+    /** Tool sequence numbers of the excerpt searches (one per file and phrase) and reads. */
+    private static final int EXCERPT_SEARCH_SEQUENCE_BASE = 1200;
+    private static final int EXCERPT_READ_SEQUENCE_BASE = 1300;
+    /** Text a request quotes: straight or curly single and double quotes, two or more characters. */
+    private static final Pattern QUOTED_PHRASE = Pattern.compile(
+            "'([^'\\n]{2,})'|\"([^\"\\n]{2,})\"|\u2018([^\u2019\\n]{2,})\u2019|\u201c([^\u201d\\n]{2,})\u201d");
+    /** The line numbers an outline lists, in the form {@code "<line>: <declaration>"}. */
+    private static final Pattern OUTLINE_LINE = Pattern.compile("(?m)^(\\d+): ");
+    private static final Pattern OUTLINE_LINE_COUNT = Pattern.compile("(\\d+) lines");
+    /**
+     * How many read_file/search_code bodies the code stage keeps unfolded at most, whatever
+     * the fold depth counts. The depth counts answers, and one answer may carry up to
+     * {@link #MAX_BATCHED_READS} reads, so this caps three kept answers at six bodies.
+     */
+    private static final int MAX_KEPT_TOOL_RESULTS = 6;
     /**
      * Bounds for the generated pull request body. A body is only useful if a reviewer reads all
      * of it, so a request of ten thousand characters or a change touching a thousand files is
@@ -94,6 +127,21 @@ public final class CodingHandlerStageService {
     private static final Set<String> REASKABLE_TOOL_FAILURES = Set.of(
             "TOOL_RESULT_NOT_READY", "TOOL_EXECUTION_FAILED", "PATH_POLICY_DENIED",
             "TOOL_ARGUMENTS_INVALID");
+    /**
+     * Read-only tools the code stage runs several of from one answer. Every answer re-sends
+     * the whole conversation, so an answer that is not needed costs everything said so far:
+     * the recorded code stages of Jobs bff4fd0b, 6c75d4ce, 375651f7 and 99748158, replayed
+     * with their consecutive reads grouped three to an answer, lose 28-55% of their input
+     * tokens. Only reads are grouped - they change nothing, so running them in the order
+     * given is the same as running them one answer at a time. An edit still goes alone.
+     */
+    private static final Set<String> BATCHABLE_TOOLS = Set.of("read_file", "search_code");
+    /**
+     * At most this many grouped reads run from one answer. Each read's body rides along on
+     * every later answer and the request is bounded at 65,536 characters; three reads at the
+     * measured p90 of 11,201 bytes already fill half of it.
+     */
+    private static final int MAX_BATCHED_READS = 3;
     /**
      * The workspace applies a patch with git apply --check --whitespace=error-all, so a
      * hunk is refused unless its context matches the file exactly. A model that guessed
@@ -178,8 +226,17 @@ public final class CodingHandlerStageService {
      */
     private final int maxRunnerPolls;
     private final Duration runnerPollInterval;
-    /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
+    /** How many recent reading answers the code stage keeps, subject to the body cap; 0 folds none. */
     private final int toolHistoryKeep;
+    /**
+     * How many answers the first code round may spend reading before its first edit. Job
+     * 3c9062a8 read for all 24 answers, never edited, and failed at the turn limit after
+     * 218,644 input tokens; the successful runs of the same request edited after 3 to 12
+     * reading answers (b3a872c3, 3d4b364e, 543eb70f). Ending at the brake costs the same
+     * failure a fraction of the tokens. 0 disables it.
+     */
+    private final int readOnlyAnswerLimit;
+    static final int DEFAULT_READ_ONLY_ANSWER_LIMIT = 12;
 
     @Value("${ax.coding.model-turn-bridge.search-result-grouping-enabled:false}")
     private boolean searchResultGroupingEnabled;
@@ -215,10 +272,12 @@ public final class CodingHandlerStageService {
             GuardrailRuleService guardrailRules,
             ObjectMapper objectMapper,
             Clock clock,
-            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep) {
+            @Value("${ax.coding.model-turn-bridge.tool-history-keep:3}") int toolHistoryKeep,
+            @Value("${ax.coding.model-turn-bridge.read-only-answer-limit:12}")
+            int readOnlyAnswerLimit) {
         this(results, tools, modelGuard, models, runner, deploymentAdapter,
                 profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
-                clock, 120, Duration.ofMillis(500), toolHistoryKeep);
+                clock, 120, Duration.ofMillis(500), toolHistoryKeep, readOnlyAnswerLimit);
     }
 
     CodingHandlerStageService(
@@ -273,7 +332,31 @@ public final class CodingHandlerStageService {
             int maxRunnerPolls,
             Duration runnerPollInterval,
             int toolHistoryKeep) {
+        this(results, tools, modelGuard, models, runner, deploymentAdapter,
+                profileModelBindings, guardrailSelections, guardrailRules, objectMapper,
+                clock, maxRunnerPolls, runnerPollInterval, toolHistoryKeep,
+                DEFAULT_READ_ONLY_ANSWER_LIMIT);
+    }
+
+    /** The full wiring; a test sets the read-only answer limit here. */
+    CodingHandlerStageService(
+            CodingHandlerResultService results,
+            CodingToolService tools,
+            CodingModelTurnGuard modelGuard,
+            CodingModelTurnService models,
+            CodingRunnerService runner,
+            DeploymentAdapter deploymentAdapter,
+            ProfileModelBindingService profileModelBindings,
+            GuardrailPathSelectionService guardrailSelections,
+            GuardrailRuleService guardrailRules,
+            ObjectMapper objectMapper,
+            Clock clock,
+            int maxRunnerPolls,
+            Duration runnerPollInterval,
+            int toolHistoryKeep,
+            int readOnlyAnswerLimit) {
         this.toolHistoryKeep = toolHistoryKeep;
+        this.readOnlyAnswerLimit = readOnlyAnswerLimit;
         this.runner = Objects.requireNonNull(runner, "runner is required");
         this.deploymentAdapter = Objects.requireNonNull(
                 deploymentAdapter, "deploymentAdapter is required");
@@ -359,7 +442,7 @@ public final class CodingHandlerStageService {
                 authorization, jobId, resultId, request, authority, aggregate,
                 1, List.of(),
                 initialMessages(request.handlerKey(), aggregate, false,
-                        objectMapper.createArrayNode()),
+                        objectMapper.createArrayNode(), objectMapper.createArrayNode(), null),
                 outcomeResponseFormat(),
                 modelBindings(authority, request, ModelUseCase.STRUCTURED_OUTPUT));
         if (!(response.responseFormat()
@@ -449,13 +532,22 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         boolean foldHistory = foldsToolHistory(modelBindings);
-        ArrayNode targetOutlines = "coding.code".equals(request.handlerKey())
+        List<TargetFile> targets = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("read_file")
-                ? targetFileOutlines(authorization, jobId, request, authority, aggregate, resultId)
-                : objectMapper.createArrayNode();
+                ? targetFiles(authorization, jobId, request, authority, aggregate, resultId)
+                : List.of();
+        ArrayNode targetExcerpts = targets.isEmpty()
+                ? objectMapper.createArrayNode()
+                : targetFileExcerpts(authorization, jobId, request, authority, aggregate,
+                        resultId, allowedTools, targets);
+        JsonNode latestDiff = "coding.code".equals(request.handlerKey())
+                && allowedTools.contains("apply_patch")
+                ? establishDiffBeforeEdits(
+                        authorization, jobId, request, authority, aggregate, resultId)
+                : null;
         List<JsonNode> messages = new ArrayList<>(initialMessages(
-                request.handlerKey(), aggregate, foldHistory, targetOutlines));
-        JsonNode latestDiff = null;
+                request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
+                targetExcerpts, currentDiffText(latestDiff)));
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
         // different things - it looked and the change was already there, or it tried and
@@ -496,38 +588,66 @@ public final class CodingHandlerStageService {
                     continue;
                 }
             }
-            CodingModelTurnContract.ToolCall call = modelResponse.toolCalls().get(0);
-            patchAttempted = patchAttempted || "apply_patch".equals(call.name());
-            if (!allowedTools.contains(call.name())) {
-                throw contract("The model selected a tool outside the stage allowlist.");
-            }
-            CodingToolContract.ResultContent toolResult;
-            try {
-                toolResult = executeTool(
-                        authorization, jobId, request, authority, aggregate,
-                        resultId, turn, call);
-            }
-            catch (CodingToolException failure) {
-                // A refusal the model caused is handed back as feedback instead of ending
-                // the Job, because the refusal reason is already a correction instruction.
-                // Anything else - authority, storage, gateway - stays fatal.
-                if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
-                        || turn == MAX_MODEL_TURNS) {
-                    throw failure;
+            List<CodingModelTurnContract.ToolCall> batch =
+                    executableBatch(request.handlerKey(), modelResponse.toolCalls());
+            for (CodingModelTurnContract.ToolCall call : batch) {
+                if (!allowedTools.contains(call.name())) {
+                    throw contract("The model selected a tool outside the stage allowlist.");
                 }
+            }
+            patchAttempted = patchAttempted || "apply_patch".equals(batch.get(0).name());
+            List<CodingModelTurnContract.ToolCall> executed = new ArrayList<>();
+            List<CodingToolContract.ResultContent> toolResults = new ArrayList<>();
+            CodingModelTurnContract.ToolCall refused = null;
+            CodingToolException refusal = null;
+            for (CodingModelTurnContract.ToolCall call : batch) {
+                try {
+                    toolResults.add(executeTool(
+                            authorization, jobId, request, authority, aggregate,
+                            resultId, turn, call));
+                    executed.add(call);
+                }
+                catch (CodingToolException failure) {
+                    // A refusal the model caused is handed back as feedback instead of ending
+                    // the Job, because the refusal reason is already a correction instruction.
+                    // Anything else - authority, storage, gateway - stays fatal.
+                    if (!REASKABLE_TOOL_FAILURES.contains(failure.code())
+                            || turn == MAX_MODEL_TURNS) {
+                        throw failure;
+                    }
+                    refused = call;
+                    refusal = failure;
+                    break;
+                }
+            }
+            // Only the calls that ran are recorded, in the order the model gave them. A call
+            // after a refusal never ran, and a tool result needs a real execution behind it.
+            // Keeping the ran calls as a leading run also leaves each call at the position
+            // its Gemini thought signature was issued for.
+            if (executed.isEmpty()) {
                 messages.add(plainAssistantMessage(modelResponse));
-                messages.add(userMessage("Your " + call.name() + " call was refused: "
-                        + failure.getMessage()
+            }
+            else {
+                messages.add(assistantToolMessage(modelResponse, executed));
+                for (int resultIndex = 0; resultIndex < toolResults.size(); resultIndex++) {
+                    messages.add(toolMessage(request.handlerKey(), executed.get(resultIndex).name(),
+                            toolResults.get(resultIndex)));
+                }
+            }
+            List<JsonNode> decodedResults = toolResults.stream()
+                    .map(this::decodeToolResult)
+                    .toList();
+            if (refusal != null) {
+                messages.add(userMessage("Your " + refused.name() + " call was refused: "
+                        + refusal.getMessage()
                         + " Correct the call and continue the task."
-                        + ("apply_patch".equals(call.name()) ? APPLY_PATCH_RETRY_HINT : "")));
+                        + ("apply_patch".equals(refused.name()) ? APPLY_PATCH_RETRY_HINT : "")));
                 continue;
             }
-            messages.add(assistantToolMessage(modelResponse, call));
-            messages.add(toolMessage(request.handlerKey(), call.name(), toolResult));
-            JsonNode decoded = decodeToolResult(toolResult);
+            CodingModelTurnContract.ToolCall call = executed.get(executed.size() - 1);
             if (Set.of("read_diff", "apply_patch",
                     "check_package_allowlist", "scan_changed_files").contains(call.name())) {
-                latestDiff = decoded;
+                latestDiff = decodedResults.get(decodedResults.size() - 1);
             }
             if ("apply_patch".equals(call.name())) {
                 // Measured on Job cb3cd98b: the model applied a working patch, then kept
@@ -547,6 +667,27 @@ public final class CodingHandlerStageService {
                         + "runs the checks itself, so checking is not this stage's job. Call "
                         + "apply_patch again only for a part of the request that is still "
                         + "missing - do not re-edit work that is already correct."));
+            }
+            // The brake: a first code round that has only read for readOnlyAnswerLimit answers
+            // ends here instead of reading on to the turn limit. With no edit attempted in this
+            // stage every answer that called a tool was a reading answer. A rework round is
+            // left alone - it starts from a diff that already exists.
+            if ("coding.code".equals(request.handlerKey()) && readOnlyAnswerLimit > 0
+                    && !patchAttempted
+                    && latestResultOrNull(aggregate, "coding.code", "completed") == null) {
+                int readingAnswers = 0;
+                for (JsonNode message : messages) {
+                    if ("assistant".equals(message.path("role").textValue())
+                            && !message.path("toolCalls").isEmpty()) {
+                        readingAnswers++;
+                    }
+                }
+                if (readingAnswers >= readOnlyAnswerLimit) {
+                    throw new ProviderGatewayException(
+                            ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                            "Coding Model read for " + readOnlyAnswerLimit
+                                    + " answers without an edit.");
+                }
             }
             if (turn == MAX_MODEL_TURNS) {
                 throw new ProviderGatewayException(
@@ -1494,7 +1635,9 @@ public final class CodingHandlerStageService {
             String handlerKey,
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             boolean foldHistory,
-            ArrayNode targetFileOutlines) {
+            ArrayNode targetFileOutlines,
+            ArrayNode targetFileExcerpts,
+            String currentDiff) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1543,6 +1686,21 @@ public final class CodingHandlerStageService {
                         ArrayNode fenceFiles = guardrail.putArray("files");
                         files.forEach(fenceFiles::add);
                     }
+                    // Where the request's quoted text already is, found by the scan at
+                    // submission. From names alone, the file holding a quoted heading was left
+                    // out whenever its name did not suggest the screen: 18 runs of one request,
+                    // Gemini 11/11, haiku 2/4, nano 1/3. Left out when nothing was found, so
+                    // every other request's context is unchanged.
+                    List<GuardrailJobSnapshotWriter.PhraseMatch> matches =
+                            guardrailSelections.jobPhraseMatches(aggregate.jobId());
+                    if (!matches.isEmpty()) {
+                        ArrayNode phraseMatches = guardrail.putArray("phraseMatches");
+                        matches.forEach(match -> phraseMatches.addObject()
+                                .put("phrase", match.phrase())
+                                .put("path", match.path())
+                                .put("line", match.line())
+                                .put("preview", match.preview()));
+                    }
                     guardrailRules.jobRules(aggregate.jobId()).ifPresent(rules -> {
                         guardrail.put("allowNewDependency", rules.allowNewDependency());
                         guardrail.put("maxChangedFiles", rules.maxChangedFiles());
@@ -1573,6 +1731,14 @@ public final class CodingHandlerStageService {
         // Left out when there is nothing to show, so every other stage's context is unchanged.
         if (!targetFileOutlines.isEmpty()) {
             context.set("targetFileOutlines", targetFileOutlines);
+        }
+        // The lines the request quotes, already read; left out when nothing was found.
+        if (!targetFileExcerpts.isEmpty()) {
+            context.set("targetFileExcerpts", targetFileExcerpts);
+        }
+        // What an earlier round of this attempt already changed; left out on a first round.
+        if (currentDiff != null) {
+            context.put("currentDiff", currentDiff);
         }
         ArrayNode feedback = context.putArray("approvalFeedback");
         aggregate.decisions().stream()
@@ -1652,6 +1818,16 @@ public final class CodingHandlerStageService {
                     + "array of objects each holding \"criterion\", copied verbatim from the "
                     + "acceptanceCriteria in the coding.analyze payload you were given, and "
                     + "\"met\", either true or false. "
+                    // Measured on Jobs 543eb70f, b3a872c3, efadcf37 and c54876c1 (gpt-5.4-nano):
+                    // eight of ten rejections said only that the diff could not confirm a
+                    // criterion, and three read "all four cards are shown again" as "exactly
+                    // four cards must always render". With nothing to fix, the coding stage
+                    // handed the same candidate back until the rework limit ended the job.
+                    + "Set met to false only when a changed line in the diff, or a failed "
+                    + "check, contradicts the criterion. A criterion is not false because the "
+                    + "diff does not show it. Do not reinterpret what the request states about "
+                    + "the existing screen, such as how many items it shows, as a condition "
+                    + "with a different meaning. "
                     // The reviewer sees the finished candidate, so it is the first stage that
                     // can tell the difference between "not done yet" and "cannot be done here".
                     // Without this field both arrive as changes_requested and the gate, which
@@ -1674,22 +1850,51 @@ public final class CodingHandlerStageService {
                     + "permissions, or the guardrail at all. ";
             default -> "";
         };
+        // Said only when the list is there: an instruction about a list the context does not
+        // carry would have the analyst hunt for it.
+        String phraseHint = context.path("guardrail").has("phraseMatches")
+                ? "guardrail.phraseMatches lists where text the request quotes already appears "
+                        + "in code; when the change edits that text, name those files first in "
+                        + "targetFiles. It is a hint, not the answer. "
+                : "";
         String system = "You are executing " + handlerKey + ". Stay within the supplied request "
                 + "and approved tools. When finished, return only JSON with exactly fields port "
                 + "and payload. port must be exactly " + ports + ", copied verbatim with no "
                 + "synonym or rewording, and payload must be an object. " + payloadFields
+                + phraseHint
                 + ("coding.code".equals(handlerKey)
-                    // One call per answer is the pipeline's contract: the loop runs the first
-                    // call alone and the history records only that one, so a batch of calls
-                    // silently loses all but its head unless the model is told.
-                    ? "Request one tool call per answer; when an answer carries several, only "
-                        + "the first is executed. "
+                    // The loop runs up to MAX_BATCHED_READS reads from one answer and any other
+                    // tool alone, so the model is told both halves - otherwise a mixed answer
+                    // silently loses all but its head. Grouping is asked only for reads that
+                    // do not wait on each other: a read guessed before the result it depends on
+                    // is a read the stage then carries on every later answer.
+                    // Measured on Job 3d4b364e: told only that grouping was allowed, haiku
+                    // grouped one answer of twelve; three unrelated reads went out one per
+                    // answer, and 13,873 input tokens rode on the two answers grouping would
+                    // have saved. The cost and what to group are therefore said out loud.
+                    ? "Every later answer re-sends the whole conversation, so each extra "
+                        + "reading answer is paid for again and again. Before an answer that "
+                        + "reads, decide every read_file or search_code you already know you "
+                        + "will need - the lines to change and the definition or helper those "
+                        + "lines use once its location is known - and request them together "
+                        + "in that one answer, up to " + MAX_BATCHED_READS + "; they run in "
+                        + "the order given. Only a read whose path or range you cannot know "
+                        + "until an earlier result arrives waits for that result. When you "
+                        + "need several nearby ranges of one file, request one range that "
+                        + "covers them instead of several overlapping reads. Every other tool "
+                        + "goes alone in its answer: an answer "
+                        + "that mixes it with other calls runs only its first call, and reads "
+                        + "past the " + MAX_BATCHED_READS + "th are not run. "
                         // apply_patch's own result carries the final diff digest (measured,
                         // Job 60401f37), and the review stage re-reads the diff itself, so
                         // a read_diff after the last edit only re-buys conversation weight.
-                        + "Use read_diff once before the first apply_patch; after a "
-                        + "successful apply_patch its result already reports the change, so "
-                        + "do not call read_diff again - hand the stage result over. "
+                        // The stage ran that read_diff itself before this answer (measured:
+                        // every Job spent one answer on it), so the model starts editing.
+                        + "The current diff is already established for you, so apply_patch "
+                        + "is available from your first answer: do not call read_diff before "
+                        + "an edit. After a successful apply_patch its result already reports "
+                        + "the change, so do not call read_diff again - hand the stage "
+                        + "result over. "
                         // A measured failure spent four of its turns on a natural-language
                         // query that can never match code and on near-duplicate retries of
                         // searches that had already answered. The budget and the search
@@ -1704,14 +1909,20 @@ public final class CodingHandlerStageService {
                         // 46k tokens for a file no edit touched. Every read is permanent
                         // conversation weight, so files are opened one at a time.
                         + "this change from the guardrail's own list: start with the first "
-                        + "targetFile. "
+                        + "targetFile - ranges of it you already know you need may be "
+                        + "requested together. "
                         // Measured on Job 45593ba8: refused a whole 558-line screen file, the
                         // model read lines 1-130 and 130-300 to land two edits at 162 and 230,
                         // and both reads rode along on fifteen later answers.
                         + "targetFileOutlines, when present, gives each target file's line "
                         + "count and the line numbers of its declarations: pick the declaration "
                         + "the change belongs to and read_file only that range with startLine "
-                        + "and endLine, not the whole file. Open a later "
+                        + "and endLine, not the whole file. targetFileExcerpts, when present, "
+                        + "holds the lines the request itself names, already read: edit from "
+                        + "them without reading them again, and read only what they do not "
+                        + "show. currentDiff, when present, is the change an earlier round "
+                        + "of this request already made: continue from it and do not redo "
+                        + "it; call read_diff for it only when it says truncated. Open a later "
                         + "targetFile only when the requested change does not belong in the "
                         + "files already read - every file you read is re-sent with every "
                         + "later answer, so an unneeded read keeps costing until the stage "
@@ -1916,18 +2127,76 @@ public final class CodingHandlerStageService {
      * limit - leaves that file out rather than failing the stage: the outline is a head start,
      * not a precondition.
      */
-    private ArrayNode targetFileOutlines(
+    /**
+     * The diff an earlier round of this attempt left, for a rework round's first message. On
+     * b3a872c3 and 543eb70f the second and third code rounds took about two thirds of the code
+     * stage's input tokens: each began from the request alone and searched out the same files
+     * again. Null for an empty diff (a first round) or a refused read_diff; a long diff is cut
+     * at {@link #MAX_CURRENT_DIFF_CHARACTERS}, because the first message is re-sent with every
+     * answer.
+     */
+    static String currentDiffText(JsonNode diff) {
+        if (diff == null) {
+            return null;
+        }
+        String text = diff.path("diff").asText("");
+        if (text.isEmpty()) {
+            return null;
+        }
+        if (text.length() <= MAX_CURRENT_DIFF_CHARACTERS) {
+            return text;
+        }
+        return text.substring(0, MAX_CURRENT_DIFF_CHARACTERS)
+                + "\n(truncated: the diff is " + text.length()
+                + " characters; read_diff shows it whole)";
+    }
+
+    /**
+     * Runs the code stage's first read_diff itself, before the model's first answer.
+     * apply_patch refuses an edit until a read_diff has established the current diff digest,
+     * so every measured Job spent one answer on a read_diff before its first edit
+     * (543eb70f, 3d4b364e, bff4fd0b, 60401f37). The execution is recorded like a model's,
+     * so apply_patch finds its digest the same way; the body is not shown to the model.
+     * It also seeds the stage's diff, so a stage that never edits still ends as an empty
+     * diff rather than as a missing one. A refusal is left to the model's own read_diff,
+     * which the tool's safety net still asks for.
+     */
+    private JsonNode establishDiffBeforeEdits(
             String authorization,
             UUID jobId,
             CodingHandlerContract.StageExecutionRequest request,
             CodingToolService.StageAuthority authority,
             CodingHandlerContract.AttemptAggregateResponse aggregate,
             UUID resultId) {
-        ArrayNode outlines = objectMapper.createArrayNode();
+        try {
+            return executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    PRE_EDIT_DIFF_SEQUENCE, "read_diff", objectMapper.createObjectNode());
+        }
+        catch (CodingToolException refused) {
+            return null;
+        }
+    }
+
+    /**
+     * A target file the stage read before the first answer: its outline, and its lines when
+     * the workspace returned it whole ({@code null} for a file refused as too large, whose
+     * outline then comes from the refusal).
+     */
+    private record TargetFile(String path, String outline, String[] lines) { }
+
+    private List<TargetFile> targetFiles(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId) {
+        List<TargetFile> files = new ArrayList<>();
         CodingHandlerContract.HandlerResultResponse analysis =
                 latestResultOrNull(aggregate, "coding.analyze", "feasible");
         if (analysis == null || analysis.payload() == null) {
-            return outlines;
+            return files;
         }
         List<String> targets = new ArrayList<>();
         for (JsonNode target : analysis.payload().path("targetFiles")) {
@@ -1937,28 +2206,471 @@ public final class CodingHandlerStageService {
             }
         }
         for (int index = 0; index < targets.size(); index++) {
-            String path = targets.get(index);
-            String outline;
-            try {
-                JsonNode read = executeDeterministicTool(
-                        authorization, jobId, request, authority, aggregate, resultId,
-                        TARGET_OUTLINE_SEQUENCE_BASE + index, "read_file",
-                        objectMapper.createObjectNode().put("path", path));
-                // Counted the way read_file counts, so a later ranged read lands on these lines.
-                String[] lines = read.path("content").asText("").split("\n", -1);
-                outline = lines.length + " lines." + CodingToolService.fileOutline(path, lines);
+            TargetFile file = readTargetFile(authorization, jobId, request, authority,
+                    aggregate, resultId, TARGET_OUTLINE_SEQUENCE_BASE + index, targets.get(index));
+            if (file != null) {
+                files.add(file);
             }
-            catch (CodingToolException refused) {
-                if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
-                        || !String.valueOf(refused.getMessage())
-                                .contains("too large to read whole")) {
-                    continue;
-                }
-                outline = refused.getMessage();
+        }
+        return files;
+    }
+
+    /**
+     * Reads one file the way the code stage outlines a target: whole, or - when the workspace
+     * refuses it as too large - through the refusal, which already carries the line count and
+     * the declarations. Null when the workspace will not return it at all.
+     */
+    private TargetFile readTargetFile(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            int sequence,
+            String path) {
+        try {
+            JsonNode read = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    sequence, "read_file",
+                    objectMapper.createObjectNode().put("path", path));
+            // Counted the way read_file counts, so a later ranged read lands on these lines.
+            String[] lines = read.path("content").asText("").split("\n", -1);
+            return new TargetFile(path,
+                    lines.length + " lines." + CodingToolService.fileOutline(path, lines),
+                    lines);
+        }
+        catch (CodingToolException refused) {
+            if (!"TOOL_ARGUMENTS_INVALID".equals(refused.code())
+                    || !String.valueOf(refused.getMessage())
+                            .contains("too large to read whole")) {
+                return null;
             }
-            outlines.addObject().put("path", path).put("outline", outline);
+            return new TargetFile(path, refused.getMessage(), null);
+        }
+    }
+
+    private ArrayNode outlineNodes(List<TargetFile> files) {
+        ArrayNode outlines = objectMapper.createArrayNode();
+        for (TargetFile file : files) {
+            outlines.addObject().put("path", file.path()).put("outline", file.outline());
         }
         return outlines;
+    }
+
+    /**
+     * The excerpts of the target files that hold the text the request quotes. A phrase is
+     * adopted only when exactly one target file holds it on a code line - a match in a
+     * comment or an import is not the screen - and the excerpt is the declaration that
+     * match sits in, up to {@link #MAX_EXCERPT_LINES}. A file read whole is searched in
+     * memory; a file refused as too large is searched by the workspace, within that file
+     * only, and its range read once. Nothing found means nothing added, as before.
+     */
+    private ArrayNode targetFileExcerpts(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            List<TargetFile> files) {
+        ArrayNode excerpts = objectMapper.createArrayNode();
+        List<String> phrases = quotedPhrases(aggregate.requestText());
+        Set<String> taken = new LinkedHashSet<>();
+        int characters = 0;
+        for (int phraseIndex = 0; phraseIndex < phrases.size()
+                && excerpts.size() < MAX_EXCERPTS; phraseIndex++) {
+            String phrase = phrases.get(phraseIndex);
+            TargetFile found = null;
+            int line = 0;
+            int holders = 0;
+            for (int index = 0; index < files.size(); index++) {
+                int match = firstCodeMatch(authorization, jobId, request, authority, aggregate,
+                        resultId, allowedTools, files.get(index), index, phrase, phraseIndex);
+                if (match <= 0) {
+                    continue;
+                }
+                holders++;
+                found = files.get(index);
+                line = match;
+            }
+            if (holders > 1) {
+                // Two target files hold the phrase: neither is surely the one.
+                continue;
+            }
+            if (holders == 0) {
+                // No target holds it: the analysis may have picked the wrong files.
+                FenceMatch fence = fenceMatch(authorization, jobId, request, authority,
+                        aggregate, resultId, allowedTools, files, phrase, phraseIndex);
+                if (fence == null) {
+                    continue;
+                }
+                found = fence.file();
+                line = fence.line();
+            }
+            if (found == null || line <= 0) {
+                continue;
+            }
+            int[] range = excerptRange(found, line);
+            if (!taken.add(found.path() + ":" + range[0])) {
+                continue;
+            }
+            String content = excerptText(authorization, jobId, request, authority, aggregate,
+                    resultId, excerpts.size(), found, range[0], range[1]);
+            if (content == null || content.isEmpty()) {
+                continue;
+            }
+            if (characters + content.length() > MAX_EXCERPT_CHARACTERS) {
+                break;
+            }
+            characters += content.length();
+            excerpts.addObject()
+                    .put("path", found.path())
+                    .put("startLine", range[0])
+                    .put("endLine", range[1])
+                    .put("content", content);
+        }
+        return excerpts;
+    }
+
+    /** The text a request quotes, in order, without repeats - at most four phrases. */
+    static List<String> quotedPhrases(String requestText) {
+        Set<String> phrases = new LinkedHashSet<>();
+        Matcher matcher = QUOTED_PHRASE.matcher(requestText == null ? "" : requestText);
+        while (matcher.find() && phrases.size() < MAX_EXCERPT_PHRASES) {
+            for (int group = 1; group <= matcher.groupCount(); group++) {
+                String phrase = matcher.group(group);
+                if (phrase != null && phrase.trim().length() >= 2) {
+                    phrases.add(phrase.trim());
+                }
+            }
+        }
+        return List.copyOf(phrases);
+    }
+
+    /** A line of code rather than a comment or an import - the screen text lives in code. */
+    static boolean isCodeLine(String line) {
+        String text = line.trim();
+        return !text.startsWith("//") && !text.startsWith("*") && !text.startsWith("/*")
+                && !text.startsWith("import");
+    }
+
+    /**
+     * The first line, 1-based, holding the phrase outside any block comment, or 0 when none does.
+     *
+     * <p>{@link #isCodeLine} reads one line and cannot see that it sits inside a block comment:
+     * the middle lines of a JSX {@code {/* ... *}{@code /}} comment start with ordinary text. Job
+     * b960265f lost festivalBadge that way - the second line of such a comment in
+     * PortalResultCard.tsx held the quoted phrase, the phrase looked held by a target file, and the
+     * fence search that would have found portal-meta.ts never ran. The model then invented a
+     * function the file did not have. A whole file is read from its top, so the state is known.
+     */
+    static int firstCodeLineHolding(String[] lines, String phrase) {
+        boolean inComment = false;
+        for (int index = 0; index < lines.length; index++) {
+            StringBuilder code = new StringBuilder();
+            inComment = outsideBlockComments(lines[index], inComment, code);
+            String text = code.toString();
+            if (text.contains(phrase) && isCodeLine(text)) {
+                return index + 1;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Appends the part of a line outside block comments and answers whether one is still open at
+     * its end. A {@code /*} inside quotes on the same line, or after {@code //}, opens nothing:
+     * mistaking a path string such as {@code './**}{@code /*.tsx'} for a comment would silently
+     * drop every code line after it. A template string spanning lines is not followed.
+     */
+    private static boolean outsideBlockComments(String line, boolean inComment, StringBuilder code) {
+        char quote = 0;
+        int index = 0;
+        while (index < line.length()) {
+            char current = line.charAt(index);
+            char next = index + 1 < line.length() ? line.charAt(index + 1) : 0;
+            if (inComment) {
+                if (current == '*' && next == '/') {
+                    inComment = false;
+                    index += 2;
+                }
+                else {
+                    index++;
+                }
+                continue;
+            }
+            if (quote != 0) {
+                code.append(current);
+                if (current == '\\' && next != 0) {
+                    code.append(next);
+                    index += 2;
+                    continue;
+                }
+                if (current == quote) {
+                    quote = 0;
+                }
+                index++;
+                continue;
+            }
+            if (current == '/' && next == '/') {
+                // The rest is a line comment; isCodeLine still judges a line that starts with it.
+                code.append(line, index, line.length());
+                break;
+            }
+            if (current == '/' && next == '*') {
+                inComment = true;
+                index += 2;
+                continue;
+            }
+            if (current == '\'' || current == '"' || current == '`') {
+                quote = current;
+            }
+            code.append(current);
+            index++;
+        }
+        return inComment;
+    }
+
+    /** The first code line of the file holding the phrase, or 0 when it holds none. */
+    private int firstCodeMatch(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            TargetFile file,
+            int fileIndex,
+            String phrase,
+            int phraseIndex) {
+        if (file.lines() != null) {
+            return firstCodeLineHolding(file.lines(), phrase);
+        }
+        if (!allowedTools.contains("search_code")) {
+            return 0;
+        }
+        try {
+            JsonNode found = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    EXCERPT_SEARCH_SEQUENCE_BASE + fileIndex * MAX_EXCERPT_PHRASES + phraseIndex,
+                    "search_code",
+                    objectMapper.createObjectNode().put("query", phrase).put("scope", file.path()));
+            for (JsonNode match : found.path("matches")) {
+                if (file.path().equals(match.path("path").asText())
+                        && isCodeLine(match.path("preview").asText(""))) {
+                    return match.path("line").asInt(0);
+                }
+            }
+            return 0;
+        }
+        catch (CodingToolException refused) {
+            return 0;
+        }
+    }
+
+    /** Tool sequence numbers of the fence searches (one per folder and phrase) and fence reads. */
+    private static final int FENCE_SEARCH_SEQUENCE_BASE = 1400;
+    private static final int FENCE_READ_SEQUENCE_BASE = 1500;
+    /** The most fence folders one phrase is searched in. */
+    private static final int MAX_FENCE_SEARCH_FOLDERS = 3;
+    /** Tool sequence numbers of the re-reads that settle an ambiguous fence match. */
+    private static final int FENCE_RECHECK_SEQUENCE_BASE = 1600;
+    /** Past this many candidate files a phrase names no file surely, so none is re-read. */
+    private static final int MAX_FENCE_RECHECK_FILES = 4;
+
+    /** The one file outside the targets that holds a phrase, and the line it holds it on. */
+    private record FenceMatch(TargetFile file, int line) { }
+
+    /**
+     * Where a phrase no target file holds actually is. The analysis picks target files by name
+     * alone, and Jobs 3d4b364e and 3c9062a8 left out TourPortal.tsx - the file every phrase the
+     * request quoted lives in - so the excerpt came back empty and 3c9062a8 wandered for 24
+     * answers. Each folder of the Job's fence is searched once for the phrase (the repository
+     * root without a fence). The phrase is adopted only when exactly one file other than a test
+     * holds it on a code line: a test is not the screen, so it is not counted (Job 100af538 lost
+     * festivalBadge when portal-meta.test.ts made portal-meta.ts look ambiguous). A match in two
+     * to four files is settled by walking those files whole for block comments; whatever still
+     * holds it in more than one file, only in a test, or in a cut-off result names no file surely,
+     * so nothing is added, as before. The adopted file is then read the way a target is.
+     */
+    private FenceMatch fenceMatch(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            Set<String> allowedTools,
+            List<TargetFile> targets,
+            String phrase,
+            int phraseIndex) {
+        if (!allowedTools.contains("search_code")) {
+            return null;
+        }
+        List<String> folders = fenceFolders(guardrailSelections.jobSnapshot(aggregate.jobId()));
+        java.util.Map<String, Integer> holders = new java.util.LinkedHashMap<>();
+        for (int folderIndex = 0; folderIndex < folders.size(); folderIndex++) {
+            JsonNode found;
+            try {
+                found = executeDeterministicTool(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        FENCE_SEARCH_SEQUENCE_BASE + folderIndex * MAX_EXCERPT_PHRASES
+                                + phraseIndex,
+                        "search_code",
+                        objectMapper.createObjectNode()
+                                .put("query", phrase).put("scope", folders.get(folderIndex)));
+            }
+            catch (CodingToolException refused) {
+                continue;
+            }
+            if (found.path("truncated").asBoolean(false)) {
+                return null;
+            }
+            for (JsonNode match : found.path("matches")) {
+                String path = match.path("path").asText("");
+                // A test is not the screen, so it neither holds the phrase nor makes it ambiguous.
+                if (!path.isEmpty() && !isTestFile(path)
+                        && isCodeLine(match.path("preview").asText(""))) {
+                    holders.putIfAbsent(path, match.path("line").asInt(0));
+                }
+            }
+        }
+        // Job b960265f: one preview line cannot show that it sits inside a block comment, so
+        // PortalResultCard.tsx:56 - the middle line of a JSX comment - and portal-meta.ts:148
+        // looked equally held and festivalBadge was never excerpted. Only when a phrase looks
+        // held by more than one file are the candidates walked whole: a target from the copy
+        // already read, any other file read once. A file that cannot be read whole stays a
+        // candidate, as before.
+        java.util.Map<String, TargetFile> walked = new java.util.HashMap<>();
+        if (holders.size() > 1 && holders.size() <= MAX_FENCE_RECHECK_FILES) {
+            int candidateIndex = 0;
+            for (String path : List.copyOf(holders.keySet())) {
+                TargetFile target = targets.stream()
+                        .filter(candidate -> candidate.path().equals(path))
+                        .findFirst()
+                        .orElse(null);
+                TargetFile file = target != null ? target : readTargetFile(
+                        authorization, jobId, request, authority, aggregate, resultId,
+                        FENCE_RECHECK_SEQUENCE_BASE + phraseIndex * MAX_FENCE_RECHECK_FILES
+                                + candidateIndex, path);
+                candidateIndex++;
+                if (file == null || file.lines() == null) {
+                    continue;
+                }
+                int line = firstCodeLineHolding(file.lines(), phrase);
+                if (line <= 0) {
+                    holders.remove(path);
+                }
+                else {
+                    holders.put(path, line);
+                    walked.put(path, file);
+                }
+            }
+        }
+        if (holders.size() != 1) {
+            return null;
+        }
+        java.util.Map.Entry<String, Integer> only = holders.entrySet().iterator().next();
+        if (only.getValue() <= 0
+                || targets.stream().anyMatch(target -> target.path().equals(only.getKey()))) {
+            return null;
+        }
+        TargetFile file = walked.containsKey(only.getKey())
+                ? walked.get(only.getKey())
+                : readTargetFile(authorization, jobId, request, authority, aggregate,
+                        resultId, FENCE_READ_SEQUENCE_BASE + phraseIndex, only.getKey());
+        return file == null ? null : new FenceMatch(file, only.getValue());
+    }
+
+    /**
+     * The folders of the Job's fence, read the way the analysis check reads them (the part
+     * after the repository label), at most {@link #MAX_FENCE_SEARCH_FOLDERS}; the repository
+     * root when the Job has no fence.
+     */
+    static List<String> fenceFolders(List<String> snapshot) {
+        List<String> folders = snapshot == null ? List.of() : snapshot.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
+                .distinct()
+                .limit(MAX_FENCE_SEARCH_FOLDERS)
+                .toList();
+        return folders.isEmpty() ? List.of(".") : folders;
+    }
+
+    /** A test source: its text is not the screen the request is about. */
+    static boolean isTestFile(String path) {
+        String name = path.substring(path.lastIndexOf('/') + 1);
+        return name.contains(".test.") || name.contains(".spec.")
+                || name.endsWith("Test.java") || name.endsWith("Tests.java")
+                || name.endsWith("Test.kt") || path.startsWith("test/")
+                || path.contains("/test/") || path.contains("__tests__/");
+    }
+
+    /**
+     * The declaration a matched line belongs to: from the nearest outlined declaration at or
+     * before it (the line itself when none precedes it) to the line before the next one,
+     * never past the file's end or {@link #MAX_EXCERPT_LINES}.
+     */
+    static int[] excerptRange(TargetFile file, int line) {
+        int start = line;
+        int end = 0;
+        Matcher matcher = OUTLINE_LINE.matcher(file.outline());
+        while (matcher.find()) {
+            int declaration = Integer.parseInt(matcher.group(1));
+            if (declaration <= line) {
+                start = declaration;
+            }
+            else if (end == 0) {
+                end = declaration - 1;
+            }
+        }
+        int lineCount = file.lines() != null ? file.lines().length : 0;
+        if (lineCount == 0) {
+            Matcher count = OUTLINE_LINE_COUNT.matcher(file.outline());
+            lineCount = count.find() ? Integer.parseInt(count.group(1)) : 0;
+        }
+        if (end == 0) {
+            end = lineCount > 0 ? lineCount : start + MAX_EXCERPT_LINES - 1;
+        }
+        end = Math.min(end, start + MAX_EXCERPT_LINES - 1);
+        if (lineCount > 0) {
+            end = Math.min(end, lineCount);
+        }
+        return new int[] {start, Math.max(start, end)};
+    }
+
+    /** The excerpt's text: sliced in memory from a file read whole, read once otherwise. */
+    private String excerptText(
+            String authorization,
+            UUID jobId,
+            CodingHandlerContract.StageExecutionRequest request,
+            CodingToolService.StageAuthority authority,
+            CodingHandlerContract.AttemptAggregateResponse aggregate,
+            UUID resultId,
+            int excerptIndex,
+            TargetFile file,
+            int startLine,
+            int endLine) {
+        if (file.lines() != null) {
+            int end = Math.min(endLine, file.lines().length);
+            return String.join("\n", List.of(file.lines()).subList(startLine - 1, end));
+        }
+        try {
+            JsonNode read = executeDeterministicTool(
+                    authorization, jobId, request, authority, aggregate, resultId,
+                    EXCERPT_READ_SEQUENCE_BASE + excerptIndex, "read_file",
+                    objectMapper.createObjectNode()
+                            .put("path", file.path())
+                            .put("startLine", startLine)
+                            .put("endLine", endLine));
+            return read.path("content").asText("");
+        }
+        catch (CodingToolException refused) {
+            return null;
+        }
     }
 
     /**
@@ -1982,19 +2694,28 @@ public final class CodingHandlerStageService {
 
     /**
      * Folds every read_file/search_code result older than the last {@code toolHistoryKeep}
-     * of them, in the code stage only. The tool message keeps its ids and result metadata,
-     * and the assistant message that asked for it keeps the call's arguments, so the model
-     * still sees what it read and where - only the body is gone. Already-folded messages
-     * are left as they are, so the same message is never rewritten twice and the request
-     * digest of a retried turn stays what it was. The opt-in small-read policy can retain
-     * additional old read_file/search_code bodies within fixed per-result and shared byte limits;
-     * it never restores an already-folded body or changes the common request-size guard.
+     * answers that read, in the code stage only. The tool message keeps its ids and result
+     * metadata, and the assistant message that asked for it keeps the call's arguments, so
+     * the model still sees what it read and where - only the body is gone. Already-folded
+     * messages are left as they are, so the same message is never rewritten twice and the
+     * request digest of a retried turn stays what it was.
+     *
+     * <p>The depth counts answers, not results. Counting results, one answer that grouped
+     * three reads filled the whole depth at once, and from the next answer on every new read
+     * folded a body the model was still working from: on Job 543eb70f all six re-reads of
+     * the code stage came right after the fold of the range they re-read (38% of its input).
+     * The results of one answer stay or fold together; {@link #MAX_KEPT_TOOL_RESULTS} bounds
+     * what three grouped answers can keep by default. Opt-in small-result retention may
+     * retain additional old bodies within per-result and shared byte limits. It does not
+     * restore folded bodies or change the common request-size guard.
      */
     private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
             return;
         }
-        int kept = 0;
+        int keptAnswers = 0;
+        int keptResults = 0;
+        int keptAnswer = -1;
         int retainedSmallBytes = 0;
         for (int index = messages.size() - 1; index >= 0; index--) {
             JsonNode message = messages.get(index);
@@ -2002,8 +2723,14 @@ public final class CodingHandlerStageService {
                     || !FOLDABLE_TOOLS.contains(toolNameBefore(messages, index))) {
                 continue;
             }
-            if (++kept <= toolHistoryKeep
-                    || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
+            int answer = answerIndexBefore(messages, index);
+            if (answer != keptAnswer) {
+                keptAnswer = answer;
+                keptAnswers++;
+            }
+            boolean kept = keptAnswers <= toolHistoryKeep
+                    && ++keptResults <= MAX_KEPT_TOOL_RESULTS;
+            if (kept || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
                 continue;
             }
             String tool = toolNameBefore(messages, index);
@@ -2044,36 +2771,78 @@ public final class CodingHandlerStageService {
                     + "apply_patch, read_file the exact lines you will replace so oldText is "
                     + "copied from a fresh read, never from memory. ";
         }
-        return "Only your last " + toolHistoryKeep + " read_file and search_code results "
-                + "stay in the conversation; older ones are folded to a short note. Before "
+        return "Results from your last " + toolHistoryKeep + " reading answers stay in the conversation, "
+                + "up to " + MAX_KEPT_TOOL_RESULTS + " read_file/search_code bodies; older results are folded to a short note. Before "
                 + "apply_patch, read_file the exact lines you will replace so oldText is "
                 + "copied from a fresh read, never from memory. ";
     }
 
-    /** The tool message carries no name; the assistant message right before it does. */
+    /**
+     * The tool message carries no name; the assistant message that asked for it does. Grouped
+     * reads put several results after one assistant message, so the call is matched by its id
+     * in the nearest assistant message before the result - not by position, which names only
+     * the first result of a group and leaves the rest unfolded.
+     */
     private static String toolNameBefore(List<JsonNode> messages, int toolIndex) {
-        if (toolIndex == 0) {
+        String toolCallId = messages.get(toolIndex).path("toolCallId").asText("");
+        int answer = answerIndexBefore(messages, toolIndex);
+        if (answer < 0) {
             return "";
         }
-        return messages.get(toolIndex - 1).path("toolCalls").path(0).path("name").asText("");
+        for (JsonNode call : messages.get(answer).path("toolCalls")) {
+            if (toolCallId.equals(call.path("toolCallId").asText())) {
+                return call.path("name").asText("");
+            }
+        }
+        return "";
+    }
+
+    /** The index of the nearest assistant message before a tool result, or -1 without one. */
+    private static int answerIndexBefore(List<JsonNode> messages, int toolIndex) {
+        for (int index = toolIndex - 1; index >= 0; index--) {
+            if ("assistant".equals(messages.get(index).path("role").textValue())) {
+                return index;
+            }
+        }
+        return -1;
     }
 
     /**
-     * Replays only the call that actually ran. A model may hand back several tool calls in one
-     * answer, but this loop executes the first alone - replaying the rest would leave the next
-     * turn declaring calls that have no result, which the message contract rightly refuses.
-     * The history must record what the pipeline did, not what the model asked for.
+     * Replays only the calls that actually ran. A model may hand back more calls in one answer
+     * than the loop runs - an edit runs alone, reads at most {@link #MAX_BATCHED_READS} - and
+     * replaying the rest would leave the next turn declaring calls that have no result, which
+     * the message contract rightly refuses. The history must record what the pipeline did,
+     * not what the model asked for.
      */
     private ObjectNode assistantToolMessage(
-            CodingModelTurnContract.Response response, CodingModelTurnContract.ToolCall executed) {
+            CodingModelTurnContract.Response response,
+            List<CodingModelTurnContract.ToolCall> executed) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "assistant");
         message.put("content", response.assistant().content());
-        ObjectNode value = message.putArray("toolCalls").addObject();
-        value.put("toolCallId", executed.toolCallId().toString());
-        value.put("name", executed.name());
-        value.set("arguments", executed.arguments());
+        ArrayNode calls = message.putArray("toolCalls");
+        for (CodingModelTurnContract.ToolCall call : executed) {
+            ObjectNode value = calls.addObject();
+            value.put("toolCallId", call.toolCallId().toString());
+            value.put("name", call.name());
+            value.set("arguments", call.arguments());
+        }
         return message;
+    }
+
+    /**
+     * The calls of one answer that are run. Several run only in the code stage and only when
+     * every call is a read, at most {@link #MAX_BATCHED_READS} of them from the front. Anything
+     * else - an edit among the calls, or the review stage - runs the first call alone, as the
+     * loop always did.
+     */
+    static List<CodingModelTurnContract.ToolCall> executableBatch(
+            String handlerKey, List<CodingModelTurnContract.ToolCall> calls) {
+        if (!"coding.code".equals(handlerKey)
+                || !calls.stream().allMatch(call -> BATCHABLE_TOOLS.contains(call.name()))) {
+            return List.of(calls.get(0));
+        }
+        return List.copyOf(calls.subList(0, Math.min(calls.size(), MAX_BATCHED_READS)));
     }
 
     private ObjectNode toolMessage(String handler, String tool, CodingToolContract.ResultContent result) {

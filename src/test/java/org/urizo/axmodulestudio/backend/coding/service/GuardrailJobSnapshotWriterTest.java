@@ -227,4 +227,65 @@ class GuardrailJobSnapshotWriterTest {
         assertThat(writtenSnapshot().path("files").isArray()).isTrue();
         assertThat(writtenSnapshot().path("files")).isEmpty();
     }
+
+    private static GuardrailJobSnapshotWriter.PhraseMatch match(
+            String path, int line, String preview) {
+        return new GuardrailJobSnapshotWriter.PhraseMatch("지금 열리는 축제·행사", path, line, preview);
+    }
+
+    @Test
+    @DisplayName("요청 문구가 나온 줄은 울타리 안, 거부 목록 밖, 테스트 아닌 파일의 코드 줄만 남긴다")
+    void storesOnlyPhraseMatchesOnCodeLinesInsideTheFence() throws Exception {
+        storedRules(false, null, null);
+        storedSelections(
+                row("frontend", "src/features/site", true, "사이트 화면"),
+                row("frontend", "src/features/boards", false, "게시판"),
+                row("backend", "src/main/resources", true, "설정"));
+
+        writer.capture(JOB, List.of(), List.of(
+                match("src/features/site/TourPortal.tsx", 307,
+                        "          <h2>지금 열리는 축제·행사</h2>"),
+                match("src/features/boards/BoardBrowser.tsx", 12, "<p>지금 열리는 축제·행사</p>"),
+                match("src/features/site/TourPortal.test.tsx", 40,
+                        "screen.getByText('지금 열리는 축제·행사')"),
+                match("src/features/site/PortalHome.tsx", 3, "// 지금 열리는 축제·행사 카드"),
+                match("src/main/resources/db/migration/V1__seed.sql", 5, "'지금 열리는 축제·행사'")));
+
+        JsonNode matches = writtenSnapshot().path("phraseMatches");
+        assertThat(matches).hasSize(1);
+        assertThat(matches.get(0).path("phrase").asText()).isEqualTo("지금 열리는 축제·행사");
+        assertThat(matches.get(0).path("path").asText())
+                .isEqualTo("src/features/site/TourPortal.tsx");
+        assertThat(matches.get(0).path("line").asInt()).isEqualTo(307);
+        assertThat(matches.get(0).path("preview").asText())
+                .isEqualTo("<h2>지금 열리는 축제·행사</h2>");
+    }
+
+    @Test
+    @DisplayName("요청 문구 줄은 12개까지만, 미리보기는 160자까지만 담는다")
+    void boundsThePhraseMatchesAndTheirPreviews() throws Exception {
+        storedRules(false, null, null);
+        storedSelections(row("frontend", "src/features/site", true, "사이트 화면"));
+
+        writer.capture(JOB, List.of(), java.util.stream.IntStream.rangeClosed(1, 15)
+                .mapToObj(line -> match("src/features/site/TourPortal.tsx", line,
+                        "<h2>지금 열리는 축제·행사</h2>" + "x".repeat(200)))
+                .toList());
+
+        JsonNode matches = writtenSnapshot().path("phraseMatches");
+        assertThat(matches).hasSize(12);
+        assertThat(matches.get(0).path("preview").asText()).hasSize(160);
+    }
+
+    @Test
+    @DisplayName("문구 검색이 없던 호출도 빈 배열로 자리를 남긴다")
+    void writesAnEmptyPhraseMatchListForTheOlderCall() throws Exception {
+        storedRules(false, null, null);
+        storedSelections(row("frontend", "src/features/site", true, "사이트 화면"));
+
+        writer.capture(JOB, List.of("src/features/site/TourPortal.tsx"));
+
+        assertThat(writtenSnapshot().path("phraseMatches").isArray()).isTrue();
+        assertThat(writtenSnapshot().path("phraseMatches")).isEmpty();
+    }
 }

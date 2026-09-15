@@ -38,6 +38,19 @@ class JdkLangfuseHttpTransportTest {
     }
 
     @Test
+    void retainsRetryAfterWithoutForwardingOtherHeaders() throws Exception {
+        server.createContext("/limited", exchange -> {
+            exchange.getResponseHeaders().add("Retry-After", "16153");
+            exchange.sendResponseHeaders(429, -1);
+            exchange.close();
+        });
+        var response = transport.get(URI.create("http://127.0.0.1:" + server.getAddress().getPort() + "/limited"),
+                Map.of(), Duration.ofSeconds(2), 1024);
+        assertThat(response.statusCode()).isEqualTo(429);
+        assertThat(response.retryAfter()).isEqualTo("16153");
+    }
+
+    @Test
     void receivesUtf8BodyAtTheExactSizeLimit() throws Exception {
         byte[] bytes = "{\"data\":\"정상\"}".getBytes(StandardCharsets.UTF_8);
         server.createContext("/normal", exchange -> {

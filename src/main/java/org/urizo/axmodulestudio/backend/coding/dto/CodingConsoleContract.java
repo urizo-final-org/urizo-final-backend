@@ -120,6 +120,7 @@ public final class CodingConsoleContract {
             List<DecisionRecord> decisions,
             Handover handover,
             PreviewLink preview,
+            Merge merge,
             Technical technical,
             Instant createdAt,
             Instant finishedAt,
@@ -253,6 +254,32 @@ public final class CodingConsoleContract {
             String url,
             String checkFailure,
             String blocked) { }
+
+    /**
+     * Whether the pull request this Job opened is in {@code dev} yet.
+     *
+     * <p>The server has always known this: {@code coding.dev_merge_check} asks the runner and
+     * records {@code merged}, {@code not_merged} or {@code blocked}, and the DEPLOY gate is
+     * built to open twice because of it - once before the merge and once after. What was
+     * missing was any way for the person at that gate to see which of the two presses they
+     * were on. They pressed approve, the same gate came back, and nothing on the screen said
+     * why. This object is that answer.
+     *
+     * <p>Unlike {@link Technical} it is sent to both roles. A general administrator cannot
+     * press this gate - DEPLOY requires a super administrator - but they approved the two
+     * gates before it and are the one waiting on the result, so they are told where it stands.
+     * It carries no path, no diff and no candidate sha; the PR number and URL are the whole of
+     * it.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Merge(
+            String status,
+            Integer prNumber,
+            String prUrl,
+            String head,
+            String mergeSha,
+            String reason,
+            Instant checkedAt) { }
 
     /**
      * Super administrator only. The server omits this whole object for anyone else, so a

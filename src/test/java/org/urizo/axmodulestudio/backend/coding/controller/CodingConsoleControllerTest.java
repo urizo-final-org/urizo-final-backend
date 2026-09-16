@@ -63,6 +63,9 @@ class CodingConsoleControllerTest {
     private static final String ACCESS_TOKEN = "coding-console-test-token";
     private static final String BASE_SHA = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     private static final String CHANGED_PATH = "src/main/java/org/urizo/Member.java";
+    private static final String MERGE_SHA = "sha1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    private static final String PR_URL =
+            "https://github.com/urizo-final-org/urizo-final-backend/pull/93";
 
     @Autowired
     private MockMvc mockMvc;
@@ -193,6 +196,44 @@ class CodingConsoleControllerTest {
     }
 
     @Test
+    void aGeneralAdministratorIsToldWhereTheMergeStandsWithoutReadingTheCode() throws Exception {
+        // They approved gates 1 and 2 and cannot press this one - DEPLOY is super admin only -
+        // but they are the one waiting on the answer, and before this they had no way to get
+        // it. The verdict travels; the diff still does not.
+        authenticate(AdminRole.GENERAL_ADMIN);
+        when(service.detail(eq(JOB), eq(AdminRole.GENERAL_ADMIN))).thenReturn(detail(null,
+                new CodingConsoleContract.Merge("NOT_MERGED", 93, PR_URL,
+                        "system/llmops-8edb08e5", null, null,
+                        Instant.parse("2026-09-16T01:30:00Z"))));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/{jobId}", JOB)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.merge.status").value("NOT_MERGED"))
+                .andExpect(jsonPath("$.merge.prNumber").value(93))
+                .andExpect(jsonPath("$.merge.prUrl").value(PR_URL))
+                .andExpect(jsonPath("$.merge.mergeSha").doesNotExist())
+                .andExpect(jsonPath("$.technical").doesNotExist());
+    }
+
+    @Test
+    void aMergedRequestCarriesTheShaThatProvesIt() throws Exception {
+        authenticate(AdminRole.SUPER_ADMIN);
+        when(service.detail(eq(JOB), eq(AdminRole.SUPER_ADMIN))).thenReturn(detail(technical(),
+                new CodingConsoleContract.Merge("MERGED", 93, PR_URL,
+                        "system/llmops-8edb08e5", MERGE_SHA, null,
+                        Instant.parse("2026-09-16T01:45:00Z"))));
+
+        mockMvc.perform(get("/api/admin/coding/jobs/{jobId}", JOB)
+                        .header(HttpHeaders.AUTHORIZATION, "Bearer " + ACCESS_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.merge.status").value("MERGED"))
+                .andExpect(jsonPath("$.merge.mergeSha").value(MERGE_SHA))
+                // The button that was empty for as long as the field was hard-coded null.
+                .andExpect(jsonPath("$.technical.pullRequestUrl").value(PR_URL));
+    }
+
+    @Test
     void aSuperAdministratorAlsoReadsTheDiffEvidence() throws Exception {
         authenticate(AdminRole.SUPER_ADMIN);
         when(service.detail(eq(JOB), eq(AdminRole.SUPER_ADMIN))).thenReturn(detail(technical()));
@@ -272,6 +313,15 @@ class CodingConsoleControllerTest {
 
     private static CodingConsoleContract.JobDetail detail(
             CodingConsoleContract.Technical technical) {
+        return detail(technical, null);
+    }
+
+    /**
+     * The merge verdict is the one piece of pull request news both roles are given, so the
+     * fixture takes it apart from {@code technical} rather than inside it.
+     */
+    private static CodingConsoleContract.JobDetail detail(
+            CodingConsoleContract.Technical technical, CodingConsoleContract.Merge merge) {
         return new CodingConsoleContract.JobDetail(
                 "1.0", JOB, "backend", "회원 목록에 가입일도 보이게 해줘",
                 "WAITING_APPROVAL", "코드 검토", 1, 3,
@@ -283,7 +333,7 @@ class CodingConsoleControllerTest {
                                 "목록에 가입일이 보인다", true))),
                 pendingApproval(), List.of(), null,
                 new CodingConsoleContract.PreviewLink(true, "http://127.0.0.1:18081/", null, null),
-                technical, Instant.parse("2026-09-02T00:00:00Z"), null, false);
+                merge, technical, Instant.parse("2026-09-02T00:00:00Z"), null, false);
     }
 
     /**
@@ -301,7 +351,7 @@ class CodingConsoleControllerTest {
                 BASE_SHA, BASE_SHA, "sha256:" + "c".repeat(64),
                 List.of(CHANGED_PATH),
                 "diff --git a/README.md b/README.md +데모 확인",
-                "maven-verify", null, null, null);
+                "maven-verify", PR_URL, null, null);
     }
 
     @Test

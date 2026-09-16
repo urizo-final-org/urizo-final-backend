@@ -1580,11 +1580,18 @@ public final class CodingHandlerStageService {
         // still satisfies "must be an object", which is exactly what the model returned before
         // these names existed.
         String payloadFields = switch (handlerKey) {
+            // Measured on Job e1ecd920: told only "in the language of the request" inside an
+            // English instruction, haiku answered a Korean request with an English plan and
+            // English criteria, and the approval screen showed both to a Korean administrator.
+            // The criteria had no language clause at all.
             case "coding.analyze" -> "payload must contain \"planSummary\", one plain-language "
-                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "paragraph that a non-developer can read, "
                     + "with no file paths, class names, or code, \"acceptanceCriteria\", an "
                     + "array of short plain-language statements that will each be true once the "
                     + "request is done, and \"targetFiles\", the files the change will edit. "
+                    + "Write planSummary and every acceptanceCriteria statement in the same "
+                    + "language as the request text, not the language of these instructions: "
+                    + "a Korean request gets Korean sentences. "
                     // The analyst reads the fence's file list and the coding stage inherits
                     // this answer, which is the whole point: the stage that has tools should
                     // spend its turns editing, not discovering what the analyst could see.
@@ -1623,17 +1630,22 @@ public final class CodingHandlerStageService {
                     + "first sentence - say that the request cannot be carried out and why, "
                     + "and never describe the work as if it were going ahead. Explain in the "
                     + "language of the "
-                    + "request, naming the areas only by the guardrail labels, and end that "
-                    + "refusal by asking the reader to request a guardrail change from the "
+                    + "request, naming the areas only by the labels listed in "
+                    + "guardrail.allowedAreas and guardrail.deniedAreas, and end that "
+                    + "refusal by asking the reader to ask the 최고관리자 to widen the permitted "
                     // Live run 2026-09-02: without this clause the refusal ending leaked into
                     // a feasible plan, which told the reader to escalate work that had just
                     // been accepted.
-                    + "super administrator if the work is still wanted; a feasible answer "
-                    + "must not mention the super administrator or the guardrail. planSummary "
+                    // Job f4e6b6bb: the role was translated to "슈퍼 관리자" and the refusal
+                    // said "guardrail". 최고관리자 is the screen's own name for the role.
+                    + "work areas if the work is still wanted. Write the role name exactly as "
+                    + "최고관리자, and never write the word guardrail in planSummary. A feasible "
+                    + "answer must not mention the 최고관리자 or the permitted areas. planSummary "
                     + "is read by a non-developer: never mention folder paths, file names, or "
                     + "technical vocabulary. If it is genuinely unclear, proceed as feasible. ";
             case "coding.review" -> "payload must contain \"reportSummary\", one plain-language "
-                    + "paragraph in the language of the request that a non-developer can read, "
+                    + "paragraph written in the same language as the request text, not the "
+                    + "language of these instructions, that a non-developer can read, "
                     + "with no file paths, class names, or code, and \"criteriaResults\", an "
                     + "array of objects each holding \"criterion\", copied verbatim from the "
                     + "acceptanceCriteria in the coding.analyze payload you were given, and "
@@ -1651,11 +1663,13 @@ public final class CodingHandlerStageService {
                     + "when the remaining work is ordinary and simply not finished yet. When it "
                     + "is true, still answer port \"changes_requested\" and let reportSummary "
                     + "explain in plain language that the request cannot be completed within "
-                    + "the permitted areas, naming areas only by the guardrail labels and never "
+                    + "the permitted areas. In that reportSummary, never write the word "
+                    + "guardrail, name areas only by the labels listed in "
+                    + "guardrail.allowedAreas and never by path or file name, and "
                     // Live run 2026-09-09 (Job c26fd4aa): asking for a file outside the fence
                     // to be updated reads to a general administrator as ordinary feedback, so
                     // the summary has to say the work stops rather than that it continues.
-                    + "by path or file name, and never describe the work as if it will "
+                    + "never describe the work as if it will "
                     + "continue. When it is false, reportSummary must not mention areas, "
                     + "permissions, or the guardrail at all. ";
             default -> "";

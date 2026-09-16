@@ -8,6 +8,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -63,7 +64,7 @@ public class ProductJobStore {
             throw conflict(
                     "CONNECTOR_VERSION_NOT_ACTIVE", "An ACTIVE connector version is required.");
         }
-        connectors.requireFixture(config.config().path("baseUrl").asText());
+        connectors.requireSupportedSource(config.config().path("baseUrl").asText());
         UUID jobId = UUID.randomUUID();
         Instant now = Instant.now(clock);
         List<ProductApiContract.ResourceRef> refs = List.of(
@@ -103,7 +104,9 @@ public class ProductJobStore {
             throw conflict(
                     "CONNECTOR_VERSION_NOT_ACTIVE", "An ACTIVE connector version is required.");
         }
-        connectors.requireFixture(context.config().path("baseUrl").asText());
+        connectors.requireSupportedSource(context.config().path("baseUrl").asText());
+        List<OverlaySource> overlays =
+                overlaySources(context, request.overlayConnectorVersionIds());
         Integer nextVersion = jdbc.queryForObject(
                 "SELECT COALESCE(MAX(version_number), 0) + 1 FROM app.knowledge_version "
                         + "WHERE knowledge_base_id = ?",
@@ -111,14 +114,23 @@ public class ProductJobStore {
         UUID jobId = UUID.randomUUID();
         UUID knowledgeVersionId = UUID.randomUUID();
         Instant now = Instant.now(clock);
-        String digest = sha256(
-                context.configDigest() + ":" + Objects.toString(request.label(), ""));
-        List<ProductApiContract.ResourceRef> refs = List.of(
+        // 원천 조합이 버전 정체성의 일부다. OVERLAY가 없으면 문자열이 예전과 같아 기존 단일
+        // 원천 빌드의 digest는 바뀌지 않는다.
+        StringBuilder sources = new StringBuilder(context.configDigest());
+        for (OverlaySource overlay : overlays) {
+            sources.append('+').append(overlay.configDigest());
+        }
+        String digest = sha256(sources + ":" + Objects.toString(request.label(), ""));
+        List<ProductApiContract.ResourceRef> refs = new ArrayList<>(List.of(
                 new ProductApiContract.ResourceRef("KNOWLEDGE_BASE", knowledgeBaseId, null),
                 new ProductApiContract.ResourceRef(
                         "KNOWLEDGE_VERSION", knowledgeVersionId, digest),
                 new ProductApiContract.ResourceRef(
-                        "CONNECTOR_VERSION", request.connectorVersionId(), context.configDigest()));
+                        "CONNECTOR_VERSION", request.connectorVersionId(), context.configDigest())));
+        for (OverlaySource overlay : overlays) {
+            refs.add(new ProductApiContract.ResourceRef(
+                    "CONNECTOR_VERSION", overlay.connectorVersionId(), overlay.configDigest()));
+        }
         insertProductJob(jobId, traceId, context.projectId(), "KNOWLEDGE_BUILD", refs, now);
         jdbc.update(
                 "INSERT INTO app.knowledge_version "
@@ -127,11 +139,67 @@ public class ProductJobStore {
                         + "VALUES (?, ?, ?, ?, ?, ?, 'BUILD_REQUESTED', ?, ?)",
                 knowledgeVersionId, knowledgeBaseId, request.connectorVersionId(), jobId,
                 nextVersion, blankToNull(request.label()), digest, Timestamp.from(now));
+        pinSource(knowledgeVersionId, request.connectorVersionId(), "BASE");
+        for (OverlaySource overlay : overlays) {
+            pinSource(knowledgeVersionId, overlay.connectorVersionId(), "OVERLAY");
+        }
         insertProductOutbox(jobId, 1);
         return accepted(
                 traceId, jobId, "KNOWLEDGE_BUILD", now,
                 knowledgeVersionId, request.connectorVersionId(), digest);
     }
+
+    /**
+     * OVERLAY 원천을 검증한다. BASE와 같은 조건을 요구한다 — 같은 프로젝트, ACTIVE, 허용 호스트.
+     * 검증을 느슨하게 두면 남의 프로젝트 자료가 이 버전의 문서에 섞인다.
+     */
+    private List<OverlaySource> overlaySources(KnowledgeBuildContext base, List<UUID> requested) {
+        List<OverlaySource> overlays = new ArrayList<>();
+        for (UUID versionId : requested) {
+            if (versionId.equals(base.connectorVersionId())
+                    || overlays.stream().anyMatch(o -> o.connectorVersionId().equals(versionId))) {
+                throw conflict(
+                        "DUPLICATE_CONNECTOR_VERSION",
+                        "Each connector version is pinned to a build once.");
+            }
+            OverlaySource overlay = one(jdbc.query(
+                    "SELECT cv.connector_version_id, cv.status, cv.config_digest, "
+                            + "cv.config_json::text, c.project_id FROM app.connector_version cv "
+                            + "JOIN app.connector c ON c.connector_id = cv.connector_id "
+                            + "WHERE cv.connector_version_id = ?",
+                    (rs, row) -> new OverlaySource(
+                            rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3),
+                            decodeTree(rs.getString(4)), rs.getObject(5, UUID.class)),
+                    versionId),
+                    "BUILD_INPUT_NOT_FOUND", "Knowledge base or connector version not found.");
+            if (!base.projectId().equals(overlay.connectorProjectId())) {
+                throw conflict(
+                        "PROJECT_SCOPE_MISMATCH",
+                        "Connector and knowledge base must belong to one project.");
+            }
+            if (!"ACTIVE".equals(overlay.status())) {
+                throw conflict(
+                        "CONNECTOR_VERSION_NOT_ACTIVE", "An ACTIVE connector version is required.");
+            }
+            connectors.requireSupportedSource(overlay.config().path("baseUrl").asText());
+            overlays.add(overlay);
+        }
+        return overlays;
+    }
+
+    private void pinSource(UUID knowledgeVersionId, UUID connectorVersionId, String role) {
+        jdbc.update(
+                "INSERT INTO app.knowledge_version_connector "
+                        + "(knowledge_version_id, connector_version_id, role) VALUES (?, ?, ?)",
+                knowledgeVersionId, connectorVersionId, role);
+    }
+
+    private record OverlaySource(
+            UUID connectorVersionId,
+            String status,
+            String configDigest,
+            JsonNode config,
+            UUID connectorProjectId) { }
 
     public ProductApiContract.AgentJobResponse getJob(UUID jobId, UUID traceId) {
         return one(jdbc.query(jobSelect() + " WHERE job_id = ?",

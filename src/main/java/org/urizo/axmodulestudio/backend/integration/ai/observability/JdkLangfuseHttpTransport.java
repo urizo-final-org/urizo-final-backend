@@ -44,7 +44,8 @@ final class JdkLangfuseHttpTransport implements LangfuseHttpTransport {
             // The future completes only after the bounded body has been received.
             HttpResponse<byte[]> response = pending.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
             return new Response(response.statusCode(),
-                    new String(response.body(), StandardCharsets.UTF_8));
+                    new String(response.body(), StandardCharsets.UTF_8),
+                    response.headers().firstValue("Retry-After").orElse(null));
         }
         catch (TimeoutException failure) {
             pending.cancel(true);

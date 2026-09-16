@@ -849,10 +849,24 @@ function Invoke-FrontendChecks {
     # BUILD has already produced this image from the same workspace and the dev dependencies
     # are in it, so the checks run in what is there. Building a second image would double the
     # wait and could check something other than what the preview is about to serve.
+    #
+    # The worker cap is the whole reason this is not `pnpm run verify`. vitest sizes its worker
+    # pool from the CPU count it can see, and inside a container that is every core on the
+    # machine - including the ones the nine stack containers are already using. It then starves
+    # its own workers, individual tests drift past the 5000ms default timeout, and whichever
+    # test happened to be mid-flight fails. Measured on 2026-09-16, same image, same suite:
+    #
+    #   default (12 workers)  2 of 3 runs failed   cumulative test time 138-168s
+    #   --maxWorkers=50%      passed               cumulative test time 89s
+    #   --maxWorkers=4        passed twice         cumulative test time 72s
+    #
+    # Fewer workers is also not slower here: 33.9s against 34-50s on the wall clock. A
+    # percentage rather than a number because teammates' machines have different core counts,
+    # and what matters is leaving half of them to the stack this check runs beside.
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     try {
-        $output = & docker run --rm $PreviewFrontendImage pnpm run verify 2>&1
+        $output = & docker run --rm $PreviewFrontendImage sh -c 'pnpm vitest run --maxWorkers=50% && pnpm run build' 2>&1
         $exit = $LASTEXITCODE
     }
     finally {

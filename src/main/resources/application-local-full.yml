@@ -75,6 +75,42 @@ ax:
       # 이미지 재빌드가 실측 4.9분이라 모델 교체는 코드가 아니라 환경으로 한다.
       provider: ${AXMS_PUBLIC_CHAT_LLM_PROVIDER:ANTHROPIC}
       model: ${AXMS_PUBLIC_CHAT_LLM_MODEL:}
+    chunking-llm:
+      # 빌드의 CHUNK 단계에서 LLM이 청킹 규칙을 정한다(AI02-018). 챗봇 스위치와 분리한
+      # 이유는 과금 성격이 달라서다 — 챗봇은 질의마다, 이쪽은 빌드 한 번에 한 번이다.
+      # 꺼 두면 문서당 1청크로 기존과 동일하게 동작한다.
+      enabled: ${AXMS_CHUNKING_LLM:false}
+      # 벽시계 상한. 넘기면 전략 없이 계속 진행한다 — 8분짜리 빌드를 여기서 죽이지 않는다.
+      timeout: ${AXMS_CHUNKING_LLM_TIMEOUT:30s}
+      provider: ${AXMS_CHUNKING_LLM_PROVIDER:ANTHROPIC}
+      model: ${AXMS_CHUNKING_LLM_MODEL:}
+    evaluation-llm:
+      # 골든 질문 평가셋 생성(AI02-020). 빌드가 아니라 관리자의 명시적 생성 요청에서만,
+      # 지식베이스당 한 번 호출된다. 검수·동결(CONFIRMED) 전의 세트는 어떤 점수에도
+      # 쓰이지 않는다. 꺼 두면 생성이 거절되고 평가는 기존 제목 자가검색 그대로다.
+      enabled: ${AXMS_EVAL_LLM:false}
+      # 호출 한 번의 벽시계 상한. 생성은 빌드 밖에서 돌므로 빌드 시간과 무관하다.
+      timeout: ${AXMS_EVAL_LLM_TIMEOUT:30s}
+      provider: ${AXMS_EVAL_LLM_PROVIDER:ANTHROPIC}
+      model: ${AXMS_EVAL_LLM_MODEL:}
+    source-monitor:
+      # 원천 API를 주기 조회해 활성 버전과의 차이(신규·수정·소멸)를 요약으로만 기록한다
+      # (AI02-022). 빌드·활성화는 절대 하지 않는다 — 알림 재료를 만들 뿐이다. 기본 꺼짐.
+      enabled: ${AXMS_SOURCE_MONITOR:false}
+      # 원천 갱신이 평일 오후 배치 1회로 관측돼 6시간이면 넉넉하다. 시연 때만 짧게 줄인다.
+      interval: ${AXMS_SOURCE_MONITOR_INTERVAL:6h}
+      initial-delay: ${AXMS_SOURCE_MONITOR_INITIAL_DELAY:2m}
+    diagnosis-llm:
+      # 품질 진단 에이전트(AI02-027). 관리자가 "왜 이 점수인가"를 물은 순간에만 돌고,
+      # 조사 한 번에 모델을 여러 번 부른다 — 다른 세 스위치와 과금 성격이 또 다르다.
+      enabled: ${AXMS_DIAGNOSIS_LLM:false}
+      # 모델 호출 한 번의 상한. budget은 조사 전체(도구 실행 포함)의 상한이다.
+      timeout: ${AXMS_DIAGNOSIS_LLM_TIMEOUT:30s}
+      budget: ${AXMS_DIAGNOSIS_BUDGET:90s}
+      # 정상 조사는 개요2 + 채점1 + 원문2 = 5회다. 나머지는 모델이 헤맬 때의 여유.
+      max-tool-calls: ${AXMS_DIAGNOSIS_MAX_TOOL_CALLS:8}
+      provider: ${AXMS_DIAGNOSIS_LLM_PROVIDER:ANTHROPIC}
+      model: ${AXMS_DIAGNOSIS_LLM_MODEL:}
     embedding:
       # 임베딩 서비스는 컨테이너 밖 호스트에서 동작한다. Compose를 바꾸지 않고
       # 컨테이너가 호스트에 닿도록 host.docker.internal을 기본값으로 둔다.

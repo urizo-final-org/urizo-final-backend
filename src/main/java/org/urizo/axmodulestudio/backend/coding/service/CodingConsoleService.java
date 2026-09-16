@@ -53,7 +53,10 @@ public class CodingConsoleService {
             "coding.review", "코드 검토",
             "coding.preview", "미리보기 준비",
             "coding.pr_request", "PR 요청",
-            "coding.deploy_request", "배포 요청");
+            "coding.deploy_request", "배포 요청",
+            // The gate that opens twice. Without a label here the raw handler key reaches the
+            // screen, because stageLabel falls back to the key it was given.
+            "coding.dev_merge_check", "병합 확인");
 
     /**
      * The states a request can still be called off from. A Job that has finished has nothing to
@@ -351,6 +354,8 @@ public class CodingConsoleService {
                 decisions(jobId),
                 handover(job.finishedAt(), results),
                 previewLink(work, preview != null),
+                // Both roles: it says where the request stands, not what is in it.
+                merge(results),
                 // Everything a general administrator must not read lives in this one object,
                 // and for them it is simply absent from the response.
                 role == AdminRole.SUPER_ADMIN
@@ -556,9 +561,55 @@ public class CodingConsoleService {
         return verdicts;
     }
 
+    /**
+     * Where the pull request stands against {@code dev}, for the person at the DEPLOY gate.
+     *
+     * <p>Two rows answer one question. {@code coding.dev_merge_check} holds the verdict and the
+     * merge sha; the PR number and URL live on {@code coding.pr_complete}, which is also the
+     * only row that ever knew the URL. Both are read at their latest, which is what
+     * {@code results} is already ordered for.
+     *
+     * <p>Null until the check has run at all - that is every Job before its first DEPLOY
+     * approval, and the field is simply absent for them rather than saying "not merged" about
+     * a pull request nobody has opened yet.
+     */
+    static CodingConsoleContract.Merge merge(List<ResultRow> results) {
+        ResultRow check = latest(results, "coding.dev_merge_check");
+        if (check == null || check.payload() == null || !check.payload().isObject()) {
+            return null;
+        }
+        String status = text(check.payload(), "status");
+        if (status == null) {
+            return null;
+        }
+        ResultRow pullRequest = latest(results, "coding.pr_complete");
+        JsonNode pr = pullRequest == null ? null : pullRequest.payload();
+        return new CodingConsoleContract.Merge(
+                status,
+                integer(check.payload(), "prNumber"),
+                pr == null || !pr.isObject() ? null : text(pr, "prUrl"),
+                text(check.payload(), "head"),
+                text(check.payload(), "mergeSha"),
+                text(check.payload(), "reason"),
+                check.recordedAt());
+    }
+
+    private static ResultRow latest(List<ResultRow> results, String handlerKey) {
+        return results.stream()
+                .filter(row -> handlerKey.equals(row.handlerKey()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static Integer integer(JsonNode node, String field) {
+        JsonNode value = node.path(field);
+        return value.isInt() ? value.intValue() : null;
+    }
+
     private CodingConsoleContract.Technical technical(
             JobRow job, UUID jobId, List<ResultRow> results, JsonNode preview,
             List<RunnerRow> work) {
+        ResultRow pullRequest = latest(results, "coding.pr_complete");
         ResultRow candidate = results.stream()
                 .filter(row -> "coding.preview".equals(row.handlerKey()))
                 .findFirst()
@@ -573,7 +624,11 @@ public class CodingConsoleService {
                 preview == null ? List.of() : strings(preview.path("changedPaths")),
                 diff(jobId),
                 preview == null ? null : text(preview, "checkProfile"),
-                null,
+                // Held at null while queuing CREATE_PR was a later slice. The receipt has
+                // carried the URL since that slice landed, so the button stops lying now.
+                pullRequest == null || pullRequest.payload() == null
+                        || !pullRequest.payload().isObject()
+                        ? null : text(pullRequest.payload(), "prUrl"),
                 null,
                 runnerFailure(work));
     }

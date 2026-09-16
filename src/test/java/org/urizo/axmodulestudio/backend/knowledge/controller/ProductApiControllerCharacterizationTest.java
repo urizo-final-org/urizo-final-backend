@@ -163,7 +163,7 @@ class ProductApiControllerCharacterizationTest {
     private static ProductApiContract.KnowledgeBaseResponse knowledgeBaseResponse() {
         return new ProductApiContract.KnowledgeBaseResponse(
                 "1.0", TRACE_ID, KNOWLEDGE_BASE_ID, PROJECT_ID,
-                "Knowledge", null, null, CREATED_AT);
+                "Knowledge", null, null, null, CREATED_AT);
     }
 
     private static ProductApiContract.ChatbotResponse chatbotResponse() {

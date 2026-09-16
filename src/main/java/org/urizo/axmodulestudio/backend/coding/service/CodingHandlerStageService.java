@@ -552,6 +552,17 @@ public final class CodingHandlerStageService {
         // different things - it looked and the change was already there, or it tried and
         // could not land one - and only this tells them apart.
         boolean patchAttempted = false;
+        boolean reviewEvidenceRequested = false;
+        Set<String> reviewedSourcePaths = new LinkedHashSet<>();
+        Set<String> reviewTargetPaths = new LinkedHashSet<>();
+        if ("coding.review".equals(request.handlerKey())) {
+            var analysis = latestResultOrNull(aggregate, "coding.analyze", "feasible");
+            if (analysis != null && analysis.payload() != null) {
+                for (JsonNode path : analysis.payload().path("targetFiles")) {
+                    if (path.isTextual()) reviewTargetPaths.add(normalizedPath(path.asText()));
+                }
+            }
+        }
         CodingModelTurnContract.Response modelResponse = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             if (foldHistory) {
@@ -570,6 +581,30 @@ public final class CodingHandlerStageService {
                 try {
                     terminalOutcome = parseOutcome(
                             request.handlerKey(), modelResponse.assistant().content(), ports);
+                    // A missing hunk is not a defect. Job 27999fef was sent through three
+                    // rework rounds because the reviewer never read the existing four-item
+                    // list. Require a successful source read before accepting a rejection;
+                    // one correction opportunity stays inside this review, not a code retry.
+                    if ("coding.review".equals(request.handlerKey())
+                            && "changes_requested".equals(terminalOutcome.port())
+                            && reviewedSourcePaths.stream().noneMatch(reviewTargetPaths::contains)) {
+                        if (reviewEvidenceRequested || !allowedTools.contains("read_file")
+                                || turn == MAX_MODEL_TURNS) {
+                            throw new ProviderGatewayException(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                                    "Coding review rejected the candidate without reading relevant source evidence.");
+                        }
+                        reviewEvidenceRequested = true;
+                        terminalOutcome = null;
+                        messages.add(plainAssistantMessage(modelResponse));
+                        messages.add(userMessage("Your rejection has not been accepted. Before asking "
+                                + "for code rework, use read_file on the relevant target or changed file, "
+                                + "including the existing data or helper the criterion depends on. "
+                                + "Use search_code or ranged reads if needed. A fact missing from the diff "
+                                + "is not evidence of a defect. Re-evaluate against the actual source; "
+                                + "do not add a requirement the user did not request. This is the only "
+                                + "evidence correction opportunity; do not repeat an unsupported rejection."));
+                        continue;
+                    }
                     break;
                 }
                 catch (CodingWorkerException failure) {
@@ -639,6 +674,22 @@ public final class CodingHandlerStageService {
             List<JsonNode> decodedResults = toolResults.stream()
                     .map(this::decodeToolResult)
                     .toList();
+            if ("coding.review".equals(request.handlerKey())) {
+                for (int index = 0; index < executed.size(); index++) {
+                    var executedCall = executed.get(index);
+                    JsonNode decoded = decodedResults.get(index);
+                    if ("read_file".equals(executedCall.name())
+                            && decoded.path("content").isTextual()
+                            && !decoded.path("content").asText().isBlank()) {
+                        reviewedSourcePaths.add(normalizedPath(executedCall.arguments().path("path").asText()));
+                    }
+                    if ("read_diff".equals(executedCall.name())) {
+                        for (JsonNode path : decoded.path("changedPaths")) {
+                            if (path.isTextual()) reviewTargetPaths.add(normalizedPath(path.asText()));
+                        }
+                    }
+                }
+            }
             if (refusal != null) {
                 messages.add(userMessage("Your " + refused.name() + " call was refused: "
                         + refusal.getMessage()
@@ -1974,7 +2025,14 @@ public final class CodingHandlerStageService {
                         + foldingHint(foldHistory, retainSmallToolResults)
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
-                    : "Do not request apply_patch in this stage. A later stage performs "
+                    : "coding.review".equals(handlerKey)
+                        ? "Do not request apply_patch. Review the existing candidate against the "
+                            + "agreed criteria, not the feasibility of the request. Before returning "
+                            + "changes_requested, read_file the relevant target or changed source "
+                            + "and inspect existing data and helpers outside the diff as needed. "
+                            + "An absent hunk or an unperformed behavior test does not prove failure. "
+                            + "Explain the concrete contradiction in each unmet criterion's reason. "
+                        : "Do not request apply_patch in this stage. A later stage performs "
                         + "the file changes, so judge only whether the request itself "
                         + "can be carried out. ");
         return List.of(

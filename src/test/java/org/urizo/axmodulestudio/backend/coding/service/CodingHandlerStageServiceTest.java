@@ -3726,6 +3726,105 @@ class CodingHandlerStageServiceTest {
         verify(runner, never()).enqueue(any(UUID.class), any(), any());
     }
 
+    private static ProviderChatResponse reviewVerdict(String port) {
+        return new ProviderChatResponse(ModelProvider.OPENAI, "coding-test-model",
+                "{\"port\":\"" + port + "\",\"payload\":{\"reportSummary\":\"검토 결과\","
+                        + "\"criteriaResults\":[{\"criterion\":\"네 카드 복원\",\"met\":"
+                        + port.equals("passed") + ",\"reason\":\"검토 근거\"}]}}",
+                12, 6, Duration.ZERO);
+    }
+
+    private static StageFixture reviewEvidenceFixture(ObjectMapper mapper, String content) {
+        ObjectNode analysisPayload = mapper.createObjectNode();
+        analysisPayload.putArray("targetFiles").add("src/App.java");
+        analysisPayload.putArray("acceptanceCriteria").add("네 카드 복원");
+        var analysis = new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.analyze",
+                CodingHandlerContract.ResultType.ANALYSIS, "feasible", WORKSPACE, null,
+                null, null, analysisPayload, NOW);
+        var code = new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.code",
+                CodingHandlerContract.ResultType.CANDIDATE, "completed", WORKSPACE, BASE_SHA,
+                DIFF_DIGEST, null, mapper.createObjectNode(), NOW);
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1,
+                ModelProvider.OPENAI, List.of(analysis, code));
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.toolService().result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent("1.0", UUID.randomUUID(),
+                        fixture.submittedToolCall().get(), JOB, TRACE, "read_file.result", EXECUTION,
+                        "application/json", content.length(), DIFF_DIGEST,
+                        mapper.createObjectNode().put("content", content).toString()));
+        return fixture;
+    }
+
+    private static CodingHandlerContract.StageExecutionResponse executeReview(StageFixture fixture) {
+        return fixture.service().execute("Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.review", RESULT));
+    }
+
+    @Test
+    void unsupportedReviewRejectionGetsOneCorrectionAndCannotStartCodeRework() {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), "four existing cards");
+        when(fixture.gateway().chat(any())).thenReturn(reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        ArgumentCaptor<ProviderChatRequest> sent = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(sent.capture());
+        assertThat(sent.getAllValues().get(1).messages().get(3).content())
+                .contains("including the existing data or helper")
+                .contains("A fact missing from the diff is not evidence of a defect");
+        verify(fixture.toolService(), never()).submitForNode(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"passed", "changes_requested"})
+    void reviewCanCorrectItsVerdictOrReportARealDefectAfterReadingSource(String verdict) {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(),
+                "const FESTIVALS = [a, b, c, d];\nconst cards = filter ? active : FESTIVALS;");
+        when(fixture.gateway().chat(any())).thenReturn(reviewVerdict("changes_requested"),
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"src/App.java\"}"), reviewVerdict(verdict));
+        var result = executeReview(fixture);
+        assertThat(result.resultPort()).isEqualTo(verdict);
+        assertThat(result.candidateSha()).isEqualTo(BASE_SHA);
+        assertThat(result.diffDigest()).isEqualTo(DIFF_DIGEST);
+        verify(fixture.gateway(), times(3)).chat(any());
+        verify(fixture.toolService()).submitForNode(eq("Bearer worker"), any(), eq("review"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"src/Unrelated.java,unrelated source", "src/App.java,''"})
+    void unrelatedOrEmptyReadDoesNotSatisfyReviewEvidence(String path, String content) {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), content);
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"" + path + "\"}"),
+                reviewVerdict("changes_requested"), reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        verify(fixture.gateway(), times(3)).chat(any());
+    }
+
+    @Test
+    void refusedReadDoesNotCountAsReviewEvidence() {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), "unused");
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
+                .thenThrow(new CodingToolException("TOOL_ARGUMENTS_INVALID",
+                        "File too large to read whole; use a range.", HttpStatus.UNPROCESSABLE_ENTITY));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"src/App.java\"}"),
+                reviewVerdict("changes_requested"), reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        verify(fixture.gateway(), times(3)).chat(any());
+    }
+
     @Test
     void reviewIsAskedForAPlainLanguageReportAndIsGivenTheAgreedCriteria() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
@@ -3832,6 +3931,8 @@ class CodingHandlerStageServiceTest {
                 .toList().toString();
         // The order asks for the two fields approval 2 renders.
         assertThat(system).contains("reportSummary").contains("criteriaResults");
+        assertThat(system).contains("Review the existing candidate")
+                .doesNotContain("judge only whether the request itself");
         // And the criteria agreed at approval 1 actually reach the reviewer.
         assertThat(user).contains("acceptanceCriteria");
         // The reviewer's context carries neither of the code stage's pre-read structures.

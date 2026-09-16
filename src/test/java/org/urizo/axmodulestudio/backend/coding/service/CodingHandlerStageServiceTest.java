@@ -2525,7 +2525,14 @@ class CodingHandlerStageServiceTest {
         assertThat(systemPrompt).contains("guardrail.allowedAreas");
         assertThat(systemPrompt).contains("guardrail.deniedAreas");
         assertThat(systemPrompt).contains("\"infeasible\"");
-        assertThat(systemPrompt).contains("super administrator");
+        // The screen's own name for the role, and no system word: Job f4e6b6bb's refusal told a
+        // Korean administrator to ask the "슈퍼 관리자" for a "guardrail" change.
+        assertThat(systemPrompt).contains("최고관리자");
+        assertThat(systemPrompt).doesNotContain("super administrator");
+        assertThat(systemPrompt).contains("never write the word guardrail");
+        // Job e1ecd920: a Korean request came back with an English plan and English criteria.
+        assertThat(systemPrompt).contains("Write planSummary and every acceptanceCriteria "
+                + "statement in the same language as the request text");
         // Data-versus-code refusal: a stored menu name cannot be edited here (Job a40a115d
         // burned 326k tokens tracing one), while wording hard-coded in a screen file can.
         // The unsure case must stay feasible, or screen-wording requests start bouncing.

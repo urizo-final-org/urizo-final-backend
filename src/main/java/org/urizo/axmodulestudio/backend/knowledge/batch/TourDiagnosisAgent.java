@@ -52,7 +52,8 @@ public class TourDiagnosisAgent {
 
     /** 프롬프트가 바뀌면 올린다. 어떤 기준으로 내린 진단인지 결과에 남는다. */
     /** v2에서 화면 문장을 존댓말로 통일하고 각 칸의 길이를 묶었다. 조사 흐름은 그대로다. */
-    public static final String PROMPT_VERSION = "v2";
+    /** v3에서 remedy 한 칸을 더 받는다. 조사 흐름과 나머지 네 칸의 규격은 그대로다. */
+    public static final String PROMPT_VERSION = "v3";
 
     static final String SYSTEM_PROMPT = """
             너는 관광 정보 RAG의 검색 품질이 왜 그 점수인지 조사하는 도구다.
@@ -197,7 +198,15 @@ public class TourDiagnosisAgent {
                         // 한 문단이 길어지면 화면에서 여러 줄로 접혀 진단이 묻힌다.
                         + "reasoning에는 실패한 문항 하나를 실제로 인용하되 120자 이내로 쓴다. "
                         + "recommendation은 무엇을 하면 되는지 80자 이내 한 문장으로 쓴다. "
-                        + "confidence는 HIGH·MEDIUM·LOW 중 하나로 쓴다."
+                        + "confidence는 HIGH·MEDIUM·LOW 중 하나로 쓴다. "
+                        // 진단만 하고 끝내면 관리자는 읽고 나서 할 일을 한 번 더 찾아야 한다.
+                        // 자료를 더 붙여 다시 만들면 되는 원인일 때만 화면이 그 버튼을 띄운다.
+                        + "remedy는 ADD_SOURCE 또는 NONE 중 하나로 쓴다. 문서에 설명·본문이 "
+                        + "없어 검색할 내용 자체가 부족한 것이 원인이면 ADD_SOURCE로 두고, "
+                        + "recommendation에는 어떤 정보가 없어서 무엇을 덧붙여 다시 만들어야 "
+                        + "하는지 적는다. 자료를 더 붙여도 나아지지 않는 원인이면 NONE으로 둔다. "
+                        // 도구는 커넥터 목록을 주지 않는다. 이름을 적게 하면 지어내게 된다.
+                        + "자료 출처의 이름은 도구가 알려 주지 않았으므로 지어내지 않는다."
                         + ("MODEL_CONCLUDED".equals(stopReason) ? ""
                         : " 조사가 상한에 걸려 중단됐다(" + stopReason
                                 + "). 근거가 얕으면 confidence를 낮춰라.")));
@@ -213,6 +222,8 @@ public class TourDiagnosisAgent {
         fallback.put("reasoning", "");
         fallback.put("recommendation", "잠시 후 다시 시도하세요.");
         fallback.put("confidence", "LOW");
+        // 원인을 못 냈으므로 무엇을 고치라고도 못 한다. 화면이 버튼을 띄우지 않는다.
+        fallback.put("remedy", "NONE");
         return fallback;
     }
 
@@ -309,9 +320,11 @@ public class TourDiagnosisAgent {
         properties.set("recommendation", objectMapper.createObjectNode().put("type", "string"));
         // 값은 HIGH·MEDIUM·LOW 셋 중 하나를 프롬프트가 지시한다(위 actionSchema 주석 참조).
         properties.set("confidence", objectMapper.createObjectNode().put("type", "string"));
+        // ADD_SOURCE·NONE도 같은 이유로 프롬프트가 지시하고, 화면은 ADD_SOURCE만 알아본다.
+        properties.set("remedy", objectMapper.createObjectNode().put("type", "string"));
         root.set("required", objectMapper.createArrayNode()
                 .add("verdict").add("evidence").add("reasoning")
-                .add("recommendation").add("confidence"));
+                .add("recommendation").add("confidence").add("remedy"));
         return root;
     }
 }

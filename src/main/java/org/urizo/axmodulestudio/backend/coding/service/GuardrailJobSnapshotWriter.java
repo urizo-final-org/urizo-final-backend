@@ -54,6 +54,16 @@ public class GuardrailJobSnapshotWriter {
      * @param repositoryFiles every tracked file the scan saw, filtered here to the fence
      */
     public List<String> capture(UUID jobId, List<String> repositoryFiles) {
+        return capture(jobId, repositoryFiles, List.of());
+    }
+
+    /**
+     * @param phraseMatches where the scan found text the request quotes, filtered here again:
+     *     the runner is a separate program reading a separate checkout, and this copy is what
+     *     the analyst is shown
+     */
+    public List<String> capture(
+            UUID jobId, List<String> repositoryFiles, List<PhraseMatch> phraseMatches) {
         Objects.requireNonNull(jobId, "jobId is required");
         List<StoredSelection> stored = jdbc.query(
                 "SELECT repository, path, enabled, label FROM app.guardrail_path_selection "
@@ -72,6 +82,12 @@ public class GuardrailJobSnapshotWriter {
         areas(snapshot, "deniedAreas", stored, false);
         ArrayNode files = snapshot.putArray("files");
         insideFence(repositoryFiles, allowed).forEach(files::add);
+        ArrayNode matches = snapshot.putArray("phraseMatches");
+        usableMatches(phraseMatches, allowed).forEach(match -> matches.addObject()
+                .put("phrase", match.phrase())
+                .put("path", match.path())
+                .put("line", match.line())
+                .put("preview", match.preview()));
         snapshot.set("rules", rules());
         // The job request is replayable, so a repeated initialize must not rewrite the copy.
         jdbc.update("INSERT INTO app.guardrail_job_snapshot (job_id, snapshot_json) "
@@ -80,11 +96,21 @@ public class GuardrailJobSnapshotWriter {
         return List.copyOf(allowed);
     }
 
+    /** One line holding text the request quotes, as the scan reported it. */
+    public record PhraseMatch(String phrase, String path, int line, String preview) { }
+
     /**
      * A file list is worth a prompt, not a repository. Beyond this the list stops being a
      * shortcut and becomes the wandering it was meant to replace.
      */
     private static final int MAX_SNAPSHOT_FILES = 300;
+
+    /**
+     * A hint for the analyst, not a result to page through. A phrase common enough to pass this
+     * many lines no longer points at one screen.
+     */
+    private static final int MAX_PHRASE_MATCHES = 12;
+    private static final int MAX_PREVIEW_CHARACTERS = 160;
 
     /**
      * The files a job may change, out of every file the scan saw.
@@ -97,14 +123,51 @@ public class GuardrailJobSnapshotWriter {
         if (repositoryFiles == null || repositoryFiles.isEmpty() || allowed.isEmpty()) {
             return List.of();
         }
-        List<String> folders = allowed.stream()
-                .map(entry -> entry.substring(entry.indexOf(':') + 1))
-                .filter(folder -> !folder.isBlank())
-                .toList();
+        List<String> folders = folders(allowed);
         return repositoryFiles.stream()
                 .filter(file -> folders.stream().anyMatch(folder -> file.startsWith(folder + "/")))
                 .distinct()
                 .limit(MAX_SNAPSHOT_FILES)
+                .toList();
+    }
+
+    /**
+     * The matches the analyst may be shown. A test file or a comment holds the words without
+     * being the screen that shows them, and a denied file inside an allowed folder is still one
+     * the job may never change.
+     */
+    private static List<PhraseMatch> usableMatches(
+            List<PhraseMatch> phraseMatches, List<String> allowed) {
+        if (phraseMatches == null || phraseMatches.isEmpty() || allowed.isEmpty()) {
+            return List.of();
+        }
+        List<String> folders = folders(allowed);
+        return phraseMatches.stream()
+                .filter(match -> match != null && match.line() > 0 && match.phrase() != null
+                        && match.path() != null && match.preview() != null)
+                .filter(match -> folders.stream()
+                        .anyMatch(folder -> match.path().startsWith(folder + "/")))
+                .filter(match -> !match.path().contains("..")
+                        && !GuardrailPathPolicy.isDenied(match.path())
+                        && !CodingHandlerStageService.isTestFile(match.path())
+                        && CodingHandlerStageService.isCodeLine(match.preview()))
+                .map(match -> new PhraseMatch(
+                        match.phrase(), match.path(), match.line(), preview(match.preview())))
+                .distinct()
+                .limit(MAX_PHRASE_MATCHES)
+                .toList();
+    }
+
+    private static String preview(String line) {
+        String text = line.strip();
+        return text.length() <= MAX_PREVIEW_CHARACTERS
+                ? text : text.substring(0, MAX_PREVIEW_CHARACTERS);
+    }
+
+    private static List<String> folders(List<String> allowed) {
+        return allowed.stream()
+                .map(entry -> entry.substring(entry.indexOf(':') + 1))
+                .filter(folder -> !folder.isBlank())
                 .toList();
     }
 

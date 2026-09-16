@@ -95,7 +95,7 @@ class CodingJobIntakeServiceTest {
     void aCreatedJobQueuesTheWorkspaceItsCodeStageWillNeed() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 
@@ -137,13 +137,13 @@ class CodingJobIntakeServiceTest {
     void fillsTheContractFromTheActiveProfileAndTheRunnersRealHead() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), eq(TRACE), eq("key-1"), sent.capture(), any());
+        verify(commands).create(any(), eq(TRACE), eq("key-1"), sent.capture(), any(), any());
         CodingHandlerContract.CreateCodingJobRequest built = sent.getValue();
 
         // The runner reports a bare sha; the Job contract's pattern demands the prefix.
@@ -175,7 +175,7 @@ class CodingJobIntakeServiceTest {
         assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("backend")))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("현재 코드 기준");
-        verify(commands, never()).create(any(), any(), any(), any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -190,7 +190,7 @@ class CodingJobIntakeServiceTest {
         assertThatThrownBy(() -> service().create(actor(), TRACE, "key-1", request("backend")))
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("실행기가 응답하지 않습니다");
-        verify(commands, never()).create(any(), any(), any(), any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -200,13 +200,13 @@ class CodingJobIntakeServiceTest {
         // reads that back rather than assuming the only repository there used to be.
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("frontend"));
 
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        verify(commands).create(any(), any(), any(), sent.capture(), any(), any());
         assertThat(sent.getValue().repositoryId())
                 .isEqualTo(CodingRepositories.identifierOf("frontend"));
 
@@ -258,7 +258,7 @@ class CodingJobIntakeServiceTest {
         List<ModelProvider> calls = new ArrayList<>();
         configureRealClassifier(primary, fallback, error, false, calls);
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-switch", request(null));
 
@@ -266,7 +266,7 @@ class CodingJobIntakeServiceTest {
         verify(profiles).findAll("LLM_OPS");
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        verify(commands).create(any(), any(), any(), sent.capture(), any(), any());
         assertThat(sent.getValue().profileVersionId()).isEqualTo(PROFILE);
         assertThat(sent.getValue().repositoryId()).isEqualTo(CodingRepositories.identifierOf("frontend"));
     }
@@ -281,7 +281,7 @@ class CodingJobIntakeServiceTest {
                 .isInstanceOf(CodingJobLifecycleException.class).hasMessageContaining("요청 내용을 읽는 데 실패");
         assertThat(calls).containsExactly(ModelProvider.ANTHROPIC, ModelProvider.OPENAI);
         verify(runner, never()).enqueue(any(), any());
-        verify(commands, never()).create(any(), any(), any(), any(), any());
+        verify(commands, never()).create(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -368,7 +368,7 @@ class CodingJobIntakeServiceTest {
         activeProfile();
         runnerAnswers(DEV_SHA);
         classifierAnswers("screen", "", "");
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         CodingConsoleContract.CreateJobOutcome outcome =
                 service().create(actor(), TRACE, "key-1", request(null));
@@ -379,7 +379,7 @@ class CodingJobIntakeServiceTest {
         verify(turns, never()).executeNaturalCms(any());
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        verify(commands).create(any(), any(), any(), sent.capture(), any(), any());
         assertThat(sent.getValue().repositoryId())
                 .isEqualTo(CodingRepositories.identifierOf("frontend"));
     }
@@ -394,7 +394,7 @@ class CodingJobIntakeServiceTest {
         activeProfile();
         runnerAnswers(DEV_SHA);
         classifierAnswers("both", "회원 목록에 가입일 정보가 담기게 해줘", "목록 화면에 가입일 칸을 보이게 해줘");
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         CodingConsoleContract.CreateJobOutcome outcome =
                 service().create(actor(), TRACE, "key-1", request(null));
@@ -404,7 +404,7 @@ class CodingJobIntakeServiceTest {
         assertThat(outcome.split().secondText()).contains("보이게");
         ArgumentCaptor<CodingHandlerContract.CreateCodingJobRequest> sent =
                 ArgumentCaptor.forClass(CodingHandlerContract.CreateCodingJobRequest.class);
-        verify(commands).create(any(), any(), any(), sent.capture(), any());
+        verify(commands).create(any(), any(), any(), sent.capture(), any(), any());
         assertThat(sent.getValue().repositoryId())
                 .isEqualTo(CodingRepositories.identifierOf("backend"));
         assertThat(sent.getValue().requestText()).isEqualTo("회원 목록에 가입일 정보가 담기게 해줘");
@@ -420,7 +420,7 @@ class CodingJobIntakeServiceTest {
         activeProfile();
         runnerAnswers(DEV_SHA);
         classifierAnswers("screen", "", "");
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request(null));
 
@@ -450,7 +450,7 @@ class CodingJobIntakeServiceTest {
     void anExplicitRepositoryNeverAsksTheClassifier() {
         activeProfile();
         runnerAnswers(DEV_SHA);
-        when(commands.create(any(), any(), any(), any(), any())).thenReturn(created());
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
 
         service().create(actor(), TRACE, "key-1", request("backend"));
 
@@ -498,5 +498,119 @@ class CodingJobIntakeServiceTest {
                 .isInstanceOf(CodingJobLifecycleException.class)
                 .hasMessageContaining("활성화된 AI 설정");
         verify(runner, never()).enqueue(any(), any());
+    }
+
+    private static CodingConsoleContract.CreateJobRequest quotedRequest() {
+        return new CodingConsoleContract.CreateJobRequest(
+                "frontend", "홈 화면 '지금 열리는 축제·행사' 에 진행 중만 보는 버튼을 넣어줘");
+    }
+
+    private void runnerAnswersWithMatches(JsonNode phraseMatches) {
+        UUID taskId = UUID.fromString("99999999-9999-4999-8999-999999999999");
+        when(runner.enqueue(eq("PREPARE_SCAN_WORKTREE"), any(JsonNode.class))).thenReturn(taskId);
+        ObjectNode result = mapper.createObjectNode().put("repo", "frontend").put("sha", DEV_SHA);
+        if (phraseMatches != null) {
+            result.set("phraseMatches", phraseMatches);
+        }
+        when(runner.taskOutcome(taskId, "PREPARE_SCAN_WORKTREE"))
+                .thenReturn(new CodingRunnerService.TaskOutcome("SUCCEEDED", null, result));
+    }
+
+    private JsonNode scanPayload() {
+        ArgumentCaptor<JsonNode> payload = ArgumentCaptor.forClass(JsonNode.class);
+        verify(runner).enqueue(eq("PREPARE_SCAN_WORKTREE"), payload.capture());
+        return payload.getValue();
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private List<GuardrailJobSnapshotWriter.PhraseMatch> sentMatches() {
+        ArgumentCaptor<List> matches = ArgumentCaptor.forClass(List.class);
+        verify(commands).create(any(), any(), any(), any(), any(), matches.capture());
+        return matches.getValue();
+    }
+
+    @Test
+    void sendsTheQuotedTextAndTheFencesFoldersToTheScan() {
+        activeProfile();
+        when(guardrail.enabledPaths("frontend"))
+                .thenReturn(List.of("src/features/coding", "src/features/site"));
+        runnerAnswersWithMatches(null);
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", quotedRequest());
+
+        JsonNode payload = scanPayload();
+        assertThat(payload.path("repo").asText()).isEqualTo("frontend");
+        assertThat(payload.path("phrases")).extracting(JsonNode::asText)
+                .containsExactly("지금 열리는 축제·행사");
+        // A denied folder cannot be stored, but what the runner may search is bounded here
+        // again rather than trusted.
+        assertThat(payload.path("paths")).extracting(JsonNode::asText)
+                .containsExactly("src/features/site");
+    }
+
+    @Test
+    void aRequestThatQuotesNothingScansExactlyAsBefore() {
+        activeProfile();
+        when(guardrail.enabledPaths("frontend")).thenReturn(List.of("src/features/site"));
+        runnerAnswers(DEV_SHA);
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", request("frontend"));
+
+        JsonNode payload = scanPayload();
+        assertThat(payload.has("phrases")).isFalse();
+        assertThat(payload.has("paths")).isFalse();
+        assertThat(sentMatches()).isEmpty();
+    }
+
+    @Test
+    void anUnconfiguredFenceSendsNoSearch() {
+        // Nothing chosen anywhere is an open system: there is no boundary to search within.
+        activeProfile();
+        runnerAnswersWithMatches(null);
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", quotedRequest());
+
+        JsonNode payload = scanPayload();
+        assertThat(payload.has("phrases")).isFalse();
+        assertThat(payload.has("paths")).isFalse();
+    }
+
+    @Test
+    void passesOnTheRunnersMatchesForTheQuotedTextOnly() {
+        activeProfile();
+        when(guardrail.enabledPaths("frontend")).thenReturn(List.of("src/features/site"));
+        var matches = mapper.createArrayNode();
+        matches.addObject().put("phrase", "지금 열리는 축제·행사")
+                .put("path", "src/features/site/TourPortal.tsx").put("line", 307)
+                .put("preview", "<h2>지금 열리는 축제·행사</h2>");
+        matches.addObject().put("phrase", "요청에 없는 문구")
+                .put("path", "src/features/site/Other.tsx").put("line", 1)
+                .put("preview", "요청에 없는 문구");
+        matches.addObject().put("phrase", "지금 열리는 축제·행사")
+                .put("path", "src/features/site/NoLine.tsx")
+                .put("preview", "지금 열리는 축제·행사");
+        runnerAnswersWithMatches(matches);
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", quotedRequest());
+
+        assertThat(sentMatches()).containsExactly(new GuardrailJobSnapshotWriter.PhraseMatch(
+                "지금 열리는 축제·행사", "src/features/site/TourPortal.tsx", 307,
+                "<h2>지금 열리는 축제·행사</h2>"));
+    }
+
+    @Test
+    void anOlderRunnerThatDidNotSearchCreatesTheJobWithNoMatches() {
+        activeProfile();
+        when(guardrail.enabledPaths("frontend")).thenReturn(List.of("src/features/site"));
+        runnerAnswersWithMatches(null);
+        when(commands.create(any(), any(), any(), any(), any(), any())).thenReturn(created());
+
+        service().create(actor(), TRACE, "key-1", quotedRequest());
+
+        assertThat(sentMatches()).isEmpty();
     }
 }

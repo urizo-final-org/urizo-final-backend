@@ -71,3 +71,6 @@ ax:
       # Recent read_file/search_code results the code stage keeps verbatim; older ones
       # fold to a note. 0 disables folding.
       tool-history-keep: 3
+      # Answers the code stage may spend reading before its first edit; the stage ends with
+      # MODEL_RESPONSE_INVALID when it reaches this many without one. 0 disables the brake.
+      read-only-answer-limit: 12

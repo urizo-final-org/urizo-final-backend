@@ -99,6 +99,20 @@ public final class CodingHandlerCommandService {
             String idempotencyKey,
             CodingHandlerContract.CreateCodingJobRequest request,
             List<String> repositoryFiles) {
+        return create(actor, traceId, idempotencyKey, request, repositoryFiles, List.of());
+    }
+
+    /**
+     * @param phraseMatches where the scan found text the request quotes, stored in the same
+     *     guardrail copy for the same reason as the file list
+     */
+    public CodingHandlerContract.CreateCodingJobResponse create(
+            AuthenticatedActor actor,
+            UUID traceId,
+            String idempotencyKey,
+            CodingHandlerContract.CreateCodingJobRequest request,
+            List<String> repositoryFiles,
+            List<GuardrailJobSnapshotWriter.PhraseMatch> phraseMatches) {
         Objects.requireNonNull(actor, "actor is required");
         Objects.requireNonNull(traceId, "traceId is required");
         requireIdempotencyKey(idempotencyKey);
@@ -114,7 +128,8 @@ public final class CodingHandlerCommandService {
                             CodingHandlerContract.SCHEMA_VERSION,
                             job.traceId(),
                             request.requestText()),
-                    repositoryFiles);
+                    repositoryFiles,
+                    phraseMatches);
             return new CodingHandlerContract.CreateCodingJobResponse(
                     CodingHandlerContract.SCHEMA_VERSION, job, initialized);
         });
@@ -136,6 +151,15 @@ public final class CodingHandlerCommandService {
             UUID jobId,
             CodingHandlerContract.InitializeRequest request,
             List<String> repositoryFiles) {
+        return initialize(actor, jobId, request, repositoryFiles, List.of());
+    }
+
+    public CodingHandlerContract.JobRequestResponse initialize(
+            AuthenticatedActor actor,
+            UUID jobId,
+            CodingHandlerContract.InitializeRequest request,
+            List<String> repositoryFiles,
+            List<GuardrailJobSnapshotWriter.PhraseMatch> phraseMatches) {
         Objects.requireNonNull(actor, "actor is required");
         Objects.requireNonNull(jobId, "jobId is required");
         // Before anything is written or any model is called. A request that was never going to be
@@ -192,7 +216,7 @@ public final class CodingHandlerCommandService {
                         Timestamp.from(now));
                 // Same transaction as the request row, so a job can never exist without the
                 // guardrail it will be judged against.
-                guardrailSnapshots.capture(jobId, repositoryFiles);
+                guardrailSnapshots.capture(jobId, repositoryFiles, phraseMatches);
                 if (inserted != 1) {
                     throw unavailable();
                 }

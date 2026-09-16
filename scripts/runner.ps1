@@ -517,6 +517,166 @@ function Get-ScanFolders {
     return $folders.ToArray()
 }
 
+function Get-ScanPhraseMatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        $Phrases,
+        $Paths,
+        [int]$PerPhraseMilliseconds = 2000,
+        [int]$TotalMilliseconds = 6000,
+        [int]$MaxLinesPerPhrase = 20,
+        [int]$MaxBytesPerPhrase = 65536
+    )
+
+    # The analyst picks target files from names alone, and a heading the request quotes can sit
+    # in a file whose name says nothing about that screen. The Backend sends the quoted text and
+    # the fence's own folders; this answers where the text already is. Only those folders are
+    # searched, the text travels in a file rather than on a command line, and every phrase is
+    # bounded in time and output. A failed search never fails the scan: its product is the sha.
+    $phraseList = @(@($Phrases) | Where-Object {
+            $_ -is [string] -and $_.Length -ge 2 -and $_.Length -le 80 -and
+            $_ -notmatch '[\r\n\x00]'
+        } | Select-Object -Unique -First 4)
+    $pathList = @(@($Paths) | Where-Object {
+            $_ -is [string] -and $_.Length -ge 1 -and $_.Length -le 200 -and
+            -not $_.StartsWith('/') -and -not $_.StartsWith('-') -and
+            $_ -notmatch '\.\.|\\|:|"|[\x00-\x1f]'
+        } | Select-Object -Unique -First 20)
+    if ($phraseList.Count -eq 0 -or $pathList.Count -eq 0) {
+        return $null
+    }
+
+    $found = [System.Collections.Generic.List[object]]::new()
+    $timedOut = $false
+    $truncated = $false
+    $pathspec = ($pathList | ForEach-Object { '"' + $_ + '"' }) -join ' '
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    foreach ($phrase in $phraseList) {
+        $remaining = $TotalMilliseconds - $clock.ElapsedMilliseconds
+        if ($remaining -le 0) {
+            $timedOut = $true
+            break
+        }
+        $budget = [int][Math]::Min($PerPhraseMilliseconds, $remaining)
+        $patternFile = $null
+        $process = $null
+        try {
+            # Outside the scan folder, so the search can never list its own pattern.
+            $patternFile = [IO.Path]::GetTempFileName()
+            [IO.File]::WriteAllText($patternFile, $phrase, [Text.UTF8Encoding]::new($false))
+            $start = [Diagnostics.ProcessStartInfo]::new()
+            $start.FileName = 'git'
+            $start.WorkingDirectory = $Root
+            $start.Arguments = "-c core.quotepath=off grep -n -I -F --no-color -f `"$patternFile`" -- $pathspec"
+            $start.UseShellExecute = $false
+            $start.CreateNoWindow = $true
+            $start.RedirectStandardOutput = $true
+            $start.RedirectStandardError = $true
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $start
+            if (-not $process.Start()) {
+                continue
+            }
+            # Read as bytes against the clock. A synchronous read would wait on git past any
+            # limit, and decoding here rather than through the console keeps Korean intact
+            # whatever code page the runner window has.
+            $null = $process.StandardError.ReadToEndAsync()
+            $stream = $process.StandardOutput.BaseStream
+            $buffer = [byte[]]::new($MaxBytesPerPhrase)
+            $filled = 0
+            $phraseClock = [Diagnostics.Stopwatch]::StartNew()
+            $phraseTimedOut = $false
+            while ($filled -lt $buffer.Length) {
+                $read = $stream.ReadAsync($buffer, $filled, $buffer.Length - $filled)
+                $wait = $budget - $phraseClock.ElapsedMilliseconds
+                if ($wait -le 0 -or -not $read.Wait([int]$wait)) {
+                    $phraseTimedOut = $true
+                    break
+                }
+                if ($read.Result -eq 0) {
+                    break
+                }
+                $filled += $read.Result
+            }
+            $full = $filled -ge $buffer.Length
+            if (-not $full -and -not $phraseTimedOut) {
+                $left = [int][Math]::Max(0, $budget - $phraseClock.ElapsedMilliseconds)
+                if (-not $process.WaitForExit($left)) {
+                    $phraseTimedOut = $true
+                }
+            }
+            if ($full -or $phraseTimedOut) {
+                try { $process.Kill() } catch { }
+                $truncated = $truncated -or $full
+                $timedOut = $timedOut -or $phraseTimedOut
+            }
+            elseif ($process.ExitCode -gt 1) {
+                # 1 means no line matched; anything above is git failing, not an answer.
+                continue
+            }
+
+            $lines = [Text.Encoding]::UTF8.GetString($buffer, 0, $filled) -split "`n"
+            if ($full -or $phraseTimedOut) {
+                # The last line may have been cut in the middle of a character.
+                $lines = @($lines | Select-Object -SkipLast 1)
+            }
+            $count = 0
+            foreach ($line in $lines) {
+                $parsed = [regex]::Match($line.TrimEnd([char]13), '^(.+?):(\d+):(.*)$')
+                if (-not $parsed.Success) {
+                    continue
+                }
+                if ($count -ge $MaxLinesPerPhrase) {
+                    $truncated = $true
+                    break
+                }
+                $preview = $parsed.Groups[3].Value.Trim()
+                if ($preview.Length -gt 160) {
+                    $preview = $preview.Substring(0, 160)
+                }
+                $found.Add([ordered]@{
+                        phrase = $phrase
+                        path = $parsed.Groups[1].Value
+                        line = [int]$parsed.Groups[2].Value
+                        preview = $preview
+                    })
+                $count++
+            }
+        }
+        catch {
+            # A search that cannot run leaves this phrase without matches; the scan goes on.
+            continue
+        }
+        finally {
+            if ($null -ne $process) { $process.Dispose() }
+            if ($patternFile) {
+                Remove-Item -LiteralPath $patternFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    return @{ Matches = $found.ToArray(); TimedOut = $timedOut; Truncated = $truncated }
+}
+
+function Add-ScanPhraseMatches {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$Result,
+        $Payload,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
+
+    # Optional on both sides: a Backend that sends no phrases, and the administrator's folder
+    # scan, get the result shape they always had, with no phraseMatches key at all.
+    $search = Get-ScanPhraseMatches -Root $Root `
+        -Phrases (Get-PayloadValue -Payload $Payload -Name 'phrases') `
+        -Paths (Get-PayloadValue -Payload $Payload -Name 'paths')
+    if ($null -ne $search) {
+        $Result.phraseMatches = $search.Matches
+        if ($search.TimedOut) { $Result.phraseSearchTimedOut = $true }
+        if ($search.Truncated) { $Result.phraseMatchesTruncated = $true }
+    }
+    return $Result
+}
+
 function Invoke-PrepareScanWorktree {
     param($Payload)
 
@@ -550,12 +710,12 @@ function Invoke-PrepareScanWorktree {
             if ($LASTEXITCODE -eq 0 -and $dirty) {
                 # Nothing should ever edit this folder. If something did, keep it
                 # and let a person look rather than overwriting the evidence.
-                return @{
+                return (Add-ScanPhraseMatches -Payload $Payload -Root $target -Result @{
                     repo = $repository; scanPath = $target; sha = 'unchanged'
                     note = '로컬 변경이 있어 갱신하지 않았습니다.'
                     folders = (Get-ScanFolders -Repository $repository -Root $target)
                     files = (Get-ScanFiles -Root $target)
-                }
+                })
             }
             $current = "$(& git -C $target rev-parse HEAD 2>&1)".Trim()
             if ($current -ne $baseSha) {
@@ -564,11 +724,11 @@ function Invoke-PrepareScanWorktree {
                     throw "RUNNER_SCAN_FAILED|스캔 폴더 갱신 실패: $(($moved | Select-Object -Last 2) -join ' ')"
                 }
             }
-            return @{
+            return (Add-ScanPhraseMatches -Payload $Payload -Root $target -Result @{
                 repo = $repository; scanPath = $target; sha = $baseSha; reused = $true
                 folders = (Get-ScanFolders -Repository $repository -Root $target)
                 files = (Get-ScanFiles -Root $target)
-            }
+            })
         }
 
         $created = & git -C $source worktree add --detach $target $baseSha 2>&1
@@ -579,11 +739,11 @@ function Invoke-PrepareScanWorktree {
     finally {
         $ErrorActionPreference = $previous
     }
-    return @{
+    return (Add-ScanPhraseMatches -Payload $Payload -Root $target -Result @{
         repo = $repository; scanPath = $target; sha = $baseSha; reused = $false
         folders = (Get-ScanFolders -Repository $repository -Root $target)
         files = (Get-ScanFiles -Root $target)
-    }
+    })
 }
 
 function Get-PreviewArguments {

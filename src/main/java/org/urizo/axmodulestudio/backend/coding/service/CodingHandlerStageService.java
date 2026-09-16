@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -39,6 +40,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseF
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.CodingInputOptions;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -238,14 +240,8 @@ public final class CodingHandlerStageService {
     private final int readOnlyAnswerLimit;
     static final int DEFAULT_READ_ONLY_ANSWER_LIMIT = 12;
 
-    @Value("${ax.coding.model-turn-bridge.search-result-grouping-enabled:false}")
-    private boolean searchResultGroupingEnabled;
-
-    @Value("${ax.coding.model-turn-bridge.small-read-history-retention-enabled:false}")
-    private boolean smallReadHistoryRetentionEnabled;
-
-    @Value("${ax.coding.model-turn-bridge.small-search-history-retention-enabled:false}")
-    private boolean smallSearchHistoryRetentionEnabled;
+    @org.springframework.beans.factory.annotation.Autowired
+    private RtkSearchModelView rtkModelView;
 
     // Experimental limits on additional old bodies, measured before provider wrapping.
     static final int SMALL_READ_MAX_BYTES = 2048;
@@ -532,6 +528,9 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         boolean foldHistory = foldsToolHistory(modelBindings);
+        CodingInputOptions inputOptions = Objects.requireNonNullElse(profileModelBindings.inputOptions(
+                authority.profileVersionId(), request.nodeId(), request.handlerKey()), CodingInputOptions.OFF);
+        Map<String, RtkSearchModelView.View> rtkViews = new java.util.LinkedHashMap<>();
         List<TargetFile> targets = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("read_file")
                 ? targetFiles(authorization, jobId, request, authority, aggregate, resultId)
@@ -547,7 +546,7 @@ public final class CodingHandlerStageService {
                 : null;
         List<JsonNode> messages = new ArrayList<>(initialMessages(
                 request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
-                targetExcerpts, currentDiffText(latestDiff)));
+                targetExcerpts, currentDiffText(latestDiff), inputOptions.retainSmallToolResults()));
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
         // different things - it looked and the change was already there, or it tried and
@@ -556,11 +555,14 @@ public final class CodingHandlerStageService {
         CodingModelTurnContract.Response modelResponse = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
             if (foldHistory) {
-                foldOldToolResults(messages, request.handlerKey());
+                foldOldToolResults(messages, request.handlerKey(),
+                        inputOptions.retainSmallToolResults(), inputOptions.retainSmallToolResults());
             }
+            List<JsonNode> modelMessages = inputOptions.rtkSearchEnabled()
+                    ? rtkModelView.apply(messages, rtkViews).messages() : messages;
             CodingModelTurnContract.Response execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages,
+                    turn, schemas, modelMessages,
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
             modelResponse = execution;
@@ -1638,6 +1640,14 @@ public final class CodingHandlerStageService {
             ArrayNode targetFileOutlines,
             ArrayNode targetFileExcerpts,
             String currentDiff) {
+        return initialMessages(handlerKey, aggregate, foldHistory, targetFileOutlines, targetFileExcerpts,
+                currentDiff, false);
+    }
+
+    private List<JsonNode> initialMessages(String handlerKey,
+            CodingHandlerContract.AttemptAggregateResponse aggregate, boolean foldHistory,
+            ArrayNode targetFileOutlines, ArrayNode targetFileExcerpts, String currentDiff,
+            boolean retainSmallToolResults) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1947,7 +1957,7 @@ public final class CodingHandlerStageService {
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
                         + "recovered. "
-                        + foldingHint(foldHistory)
+                        + foldingHint(foldHistory, retainSmallToolResults)
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
                     : "Do not request apply_patch in this stage. A later stage performs "
@@ -2709,7 +2719,8 @@ public final class CodingHandlerStageService {
      * retain additional old bodies within per-result and shared byte limits. It does not
      * restore folded bodies or change the common request-size guard.
      */
-    private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
+    private void foldOldToolResults(List<JsonNode> messages, String handlerKey,
+            boolean smallReadHistoryRetentionEnabled, boolean smallSearchHistoryRetentionEnabled) {
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
             return;
         }
@@ -2758,21 +2769,19 @@ public final class CodingHandlerStageService {
      * where it expects a file would otherwise copy oldText from memory - and apply_patch
      * refuses text that does not match the file exactly.
      */
-    private String foldingHint(boolean foldHistory) {
+    private String foldingHint(boolean foldHistory, boolean retainSmallToolResults) {
         if (!foldHistory) {
             return "";
         }
-        if (smallReadHistoryRetentionEnabled || smallSearchHistoryRetentionEnabled) {
-            String retainedTools = smallReadHistoryRetentionEnabled
-                    ? (smallSearchHistoryRetentionEnabled ? "read_file and search_code" : "read_file")
-                    : "search_code";
+        if (retainSmallToolResults) {
+            String retainedTools = "read_file and search_code";
             return "Older read_file and search_code results may be folded to a short note; "
                     + "small " + retainedTools + " results may remain within a bounded history budget. Before "
                     + "apply_patch, read_file the exact lines you will replace so oldText is "
                     + "copied from a fresh read, never from memory. ";
         }
-        return "Results from your last " + toolHistoryKeep + " reading answers stay in the conversation, "
-                + "up to " + MAX_KEPT_TOOL_RESULTS + " read_file/search_code bodies; older results are folded to a short note. Before "
+        return "Only your last " + toolHistoryKeep + " read_file and search_code results "
+                + "stay in the conversation; older ones are folded to a short note. Before "
                 + "apply_patch, read_file the exact lines you will replace so oldText is "
                 + "copied from a fresh read, never from memory. ";
     }
@@ -2856,8 +2865,7 @@ public final class CodingHandlerStageService {
                         + result.executionId() + "/result")
                 .put("sizeBytes", result.sizeBytes())
                 .put("digest", result.digest());
-        message.put("content", searchResultGroupingEnabled
-                ? SearchCodeModelView.render(handler, tool, result.content()) : result.content());
+        message.put("content", result.content());
         return message;
     }
 

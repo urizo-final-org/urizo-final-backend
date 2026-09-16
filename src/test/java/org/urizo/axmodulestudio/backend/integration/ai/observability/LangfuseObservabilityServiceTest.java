@@ -28,6 +28,30 @@ class LangfuseObservabilityServiceTest {
             Instant.parse("2026-09-02T01:00:00Z"), ZoneOffset.UTC);
 
     @Test
+    void cacheBucketsRecomposeInclusiveInputAndPreserveMissingVersusReportedZero() {
+        for (String cached : new String[]{",\"input_cached_tokens\":1536", ",\"input_cached_tokens\":0", ""}) {
+            var service = service(configured(), (endpoint, headers, timeout, maximum) ->
+                    new LangfuseHttpTransport.Response(200,
+                            "{\"data\":[{\"id\":\"obs\",\"name\":\"axms.model\",\"type\":\"GENERATION\","
+                            + "\"traceId\":\"trace\",\"environment\":\"local\",\"startTime\":\"2026-09-01T01:00:00Z\","
+                            + "\"metadata\":{\"provider\":\"OPENAI\"},\"usageDetails\":{\"input\":464,\"output\":12"
+                            + cached + "}}]}"));
+            var row = service.observations(FROM, TO).observations().get(0);
+            if (cached.isEmpty()) {
+                assertThat(row.cachedInputTokens()).isNull();
+                assertThat(row.uncachedInputTokens()).isNull();
+                assertThat(row.cacheStatus()).isEqualTo("NOT_REPORTED");
+            } else {
+                long expected = cached.contains("1536") ? 1536 : 0;
+                assertThat(row.cachedInputTokens()).isEqualTo(expected);
+                assertThat(row.uncachedInputTokens()).isEqualTo(464);
+                assertThat(row.inputTokens()).isEqualTo(464 + expected);
+                assertThat(row.cacheStatus()).isEqualTo("REPORTED");
+            }
+        }
+    }
+
+    @Test
     void usesOnlyFixedJapanEndpointsAndCachesTypedResults() {
         AtomicInteger calls = new AtomicInteger();
         LangfuseHttpTransport transport = (endpoint, headers, timeout, maximum) -> {

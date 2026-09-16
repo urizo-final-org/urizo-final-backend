@@ -54,6 +54,29 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegi
 
 class LangfuseModelObservationHandlerTest {
 
+    @Test
+    void exportsDisjointCacheBucketsWithoutDuplicatingTheGeneration() throws Exception {
+        CollectingExporter exporter = new CollectingExporter(false);
+        try (SdkTracerProvider provider = provider(exporter)) {
+            var handler = new LangfuseModelObservationHandler(provider.get("test"));
+            var usage = new org.springframework.ai.openai.api.OpenAiApi.Usage(12, 2000, 2012,
+                    new org.springframework.ai.openai.api.OpenAiApi.Usage.PromptTokensDetails(null, 1536), null);
+            var context = context("gpt-test");
+            context.setResponse(new ChatResponse(List.of(new Generation(new AssistantMessage("not exported"))),
+                    ChatResponseMetadata.builder().usage(new DefaultUsage(2000, 12, null, usage)).build()));
+            handler.onStart(context);
+            handler.onStop(context);
+            assertThat(exporter.spans).hasSize(1);
+            var attributes = exporter.spans.get(0).getAttributes();
+            assertThat(attributes.get(AttributeKey.longKey("gen_ai.usage.input_tokens"))).isEqualTo(2000);
+            JsonNode buckets = new ObjectMapper().readTree(attributes.get(
+                    AttributeKey.stringKey("langfuse.observation.usage_details")));
+            assertThat(buckets.path("input").intValue()).isEqualTo(464);
+            assertThat(buckets.path("input_cached_tokens").intValue()).isEqualTo(1536);
+            assertThat(buckets.path("output").intValue()).isEqualTo(12);
+        }
+    }
+
     private static final UUID JOB_ID =
             UUID.fromString("55555555-5555-4555-8555-555555555555");
     private static final UUID BUSINESS_TRACE_ID =

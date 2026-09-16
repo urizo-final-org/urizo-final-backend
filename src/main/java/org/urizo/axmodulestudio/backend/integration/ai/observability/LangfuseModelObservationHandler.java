@@ -144,7 +144,7 @@ final class LangfuseModelObservationHandler
                     ? requestModel(context) : metadata.getModel().strip();
             putModel(span, model, false);
             if (metadata != null) {
-                putUsage(span, metadata.getUsage());
+                putUsage(span, safeProvider(context.getOperationMetadata().provider()), metadata.getUsage());
             }
             Long startNanos = context.get(START_NANOS_KEY);
             if (startNanos != null) {
@@ -172,12 +172,22 @@ final class LangfuseModelObservationHandler
         return context instanceof ChatModelObservationContext;
     }
 
-    private static void putUsage(Span span, Usage usage) {
+    private static void putUsage(Span span, String provider, Usage usage) {
         if (usage == null || usage instanceof EmptyUsage) {
             return;
         }
-        Integer input = usage.getPromptTokens();
-        Integer output = usage.getCompletionTokens();
+        ProviderTokenUsage tokens = ProviderTokenUsage.from(provider, usage);
+        Integer input = tokens.input();
+        Integer output = tokens.output();
+        if (tokens.cachedInput() != null) {
+            // Flat Langfuse usageDetails are exclusive buckets. Keep inclusive OTel counts
+            // for other consumers; the explicit usageDetails take precedence in Langfuse.
+            var details = new com.fasterxml.jackson.databind.ObjectMapper().createObjectNode();
+            details.put("input", tokens.uncachedInput());
+            details.put("input_cached_tokens", tokens.cachedInput());
+            if (output != null) details.put("output", output);
+            span.setAttribute("langfuse.observation.usage_details", details.toString());
+        }
         if (input != null && input >= 0) {
             span.setAttribute("gen_ai.usage.input_tokens", input.longValue())
                     .setAttribute("langfuse.observation.metadata.inputTokens", input.longValue());

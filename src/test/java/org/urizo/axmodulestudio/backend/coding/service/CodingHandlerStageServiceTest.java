@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import static org.mockito.ArgumentMatchers.anyString;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -56,6 +58,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.CodingInputOptions;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 class CodingHandlerStageServiceTest {
@@ -256,9 +259,13 @@ class CodingHandlerStageServiceTest {
                 DIFF_DIGEST, null, mapper.createObjectNode(), NOW);
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 0, ModelProvider.OPENAI,
                 node.equals("review") ? List.of(code) : List.of());
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "searchResultGroupingEnabled", groupingEnabled);
+        inputOptions(fixture, groupingEnabled, false);
         String rawSearch = SearchCodeModelViewTest.fixture().toString();
+        RtkSearchModelView adapter = mock(RtkSearchModelView.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        String compactFixture = SearchCodeModelView.render(handler, "search_code", rawSearch);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View(compactFixture, "selected",
+                rawSearch.length(), compactFixture.length())).when(adapter).render(rawSearch);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "rtkModelView", adapter);
         UUID searchCall = UUID.fromString("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
         CodingToolContract.ResultContent diffTemplate = fixture.toolService().result("Bearer worker", EXECUTION);
         AtomicReference<CodingToolContract.ResultContent> storedSearch = new AtomicReference<>();
@@ -320,10 +327,17 @@ class CodingHandlerStageServiceTest {
         assertThat(message.path("result").path("digest").asText()).isEqualTo(diffTemplate.digest());
         assertThat(message.path("result").path("sizeBytes").asInt()).isEqualTo(storedSearch.get().sizeBytes());
         assertThat(message.path("result").path("resultRef").asText()).endsWith(EXECUTION + "/result");
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "searchResultGroupingEnabled", false);
+
         JsonNode disabled = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
                 fixture.service(), "toolMessage", handler, "search_code", storedSearch.get());
         assertThat(disabled.path("content").asText()).isEqualTo(rawSearch);
+    }
+
+    private static void inputOptions(StageFixture fixture, boolean rtk, boolean retention) {
+        ProfileModelBindingService bindings = (ProfileModelBindingService)
+                org.springframework.test.util.ReflectionTestUtils.getField(fixture.service(), "profileModelBindings");
+        when(bindings.inputOptions(eq(PROFILE), anyString(), anyString())).thenAnswer(call ->
+                new CodingInputOptions(rtk, "coding.code".equals(call.getArgument(2)) && retention));
     }
 
     private static List<String> toolBodies(ProviderChatRequest request) {
@@ -360,8 +374,7 @@ class CodingHandlerStageServiceTest {
     void smallReadRetentionUsesAnOptInByteBoundary(boolean enabled, int size, boolean folded) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "smallReadHistoryRetentionEnabled", enabled);
+
         List<JsonNode> history = new ArrayList<>();
         // 682 Korean characters = 2046 UTF-8 bytes; a character limit would incorrectly keep 2049.
         String text = "한".repeat(682) + "x".repeat(size - 2046);
@@ -369,14 +382,14 @@ class CodingHandlerStageServiceTest {
         appendRetentionResult(mapper, history, "read_file", "latest");
         JsonNode original = history.get(1).deepCopy();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, "coding.code");
+                fixture.service(), "foldOldToolResults", history, "coding.code", enabled, false);
         assertThat(history.get(1).path("content").asText())
                 .isEqualTo(folded ? CodingHandlerStageService.FOLDED_TOOL_CONTENT : text);
         assertThat(history.get(1).path("toolCallId")).isEqualTo(original.path("toolCallId"));
         assertThat(history.get(1).path("result")).isEqualTo(original.path("result"));
         String snapshot = history.toString();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, "coding.code");
+                fixture.service(), "foldOldToolResults", history, "coding.code", enabled, false);
         assertThat(history.toString()).isEqualTo(snapshot);
     }
 
@@ -384,15 +397,14 @@ class CodingHandlerStageServiceTest {
     void smallReadRetentionCapsAdditionalOldBodiesAndDoesNotPreserveSearchResults() {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "smallReadHistoryRetentionEnabled", true);
+
         List<JsonNode> history = new ArrayList<>();
         appendRetentionResult(mapper, history, "read_diff", "diff preserved");
         for (int i = 0; i < 5; i++) appendRetentionResult(mapper, history, "read_file", "x".repeat(2048));
         appendRetentionResult(mapper, history, "search_code", "small search");
         appendRetentionResult(mapper, history, "read_file", "latest");
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, "coding.code");
+                fixture.service(), "foldOldToolResults", history, "coding.code", true, false);
         assertThat(history.get(1).path("content").asText()).isEqualTo("diff preserved");
         assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
         for (int i = 5; i <= 11; i += 2) assertThat(history.get(i).path("content").asText()).hasSize(2048);
@@ -405,14 +417,13 @@ class CodingHandlerStageServiceTest {
     void smallReadRetentionDoesNotEnableFoldingOutsideExistingScope(String handler, int keep) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), keep, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "smallReadHistoryRetentionEnabled", true);
+
         List<JsonNode> history = new ArrayList<>();
         appendRetentionResult(mapper, history, "read_file", "x".repeat(9000));
         appendRetentionResult(mapper, history, "search_code", "latest");
         String original = history.toString();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, handler);
+                fixture.service(), "foldOldToolResults", history, handler, true, false);
         assertThat(history.toString()).isEqualTo(original);
     }
 
@@ -427,12 +438,39 @@ class CodingHandlerStageServiceTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void combinedOptionsUseTheRawRetentionBudgetBeforeRtk(boolean rtk, boolean retain) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+        String search = RtkSearchModelViewTest.fixture();
+        assertThat(search.getBytes(java.nio.charset.StandardCharsets.UTF_8).length).isBetween(4097, 6144);
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "search_code", search);
+        appendRetentionResult(mapper, history, "search_code", search);
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(),
+                "foldOldToolResults", history, "coding.code", retain, retain);
+        String folded = CodingHandlerStageService.FOLDED_TOOL_CONTENT;
+        assertThat(history.get(1).path("content").asText()).isEqualTo(folded);
+        assertThat(history.get(3).path("content").asText()).isEqualTo(retain ? search : folded);
+        String before = history.toString();
+        RtkSearchModelView adapter = mock(RtkSearchModelView.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View("compact", "selected", 5000, 100))
+                .when(adapter).render(search);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View(folded, "below_threshold", folded.length(), folded.length()))
+                .when(adapter).render(folded);
+        List<JsonNode> model = rtk ? adapter.apply(history, new java.util.LinkedHashMap<>()).messages() : history;
+        assertThat(model.get(1).path("content").asText()).isEqualTo(folded);
+        assertThat(model.get(3).path("content").asText()).isEqualTo(retain ? rtk ? "compact" : search : folded);
+        assertThat(history.toString()).isEqualTo(before);
+    }
+
+    @ParameterizedTest
     @CsvSource({"true,6144,false", "true,6145,true", "false,6144,true"})
     void smallSearchRetentionHasAnIndependentUtf8Boundary(boolean enabled, int size, boolean folded) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "smallSearchHistoryRetentionEnabled", enabled);
+
         List<JsonNode> history = new ArrayList<>();
         String content = "한".repeat(2048) + "x".repeat(size - 6144);
         appendRetentionResult(mapper, history, "search_code", content);
@@ -440,7 +478,7 @@ class CodingHandlerStageServiceTest {
         appendRetentionResult(mapper, history, "read_file", "latest");
         JsonNode original = history.get(1).deepCopy();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, "coding.code");
+                fixture.service(), "foldOldToolResults", history, "coding.code", false, enabled);
         assertThat(history.get(1).path("content").asText())
                 .isEqualTo(folded ? CodingHandlerStageService.FOLDED_TOOL_CONTENT : content);
         assertThat(history.get(1).path("toolCallId")).isEqualTo(original.path("toolCallId"));
@@ -448,7 +486,7 @@ class CodingHandlerStageServiceTest {
         assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
         String snapshot = history.toString();
         org.springframework.test.util.ReflectionTestUtils.invokeMethod(
-                fixture.service(), "foldOldToolResults", history, "coding.code");
+                fixture.service(), "foldOldToolResults", history, "coding.code", false, enabled);
         assertThat(history.toString()).isEqualTo(snapshot);
     }
 
@@ -457,8 +495,8 @@ class CodingHandlerStageServiceTest {
     void batchedResultsUseCallIdsAndShareTheAdditionalRetentionBudget(boolean reads, boolean searches) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallReadHistoryRetentionEnabled", reads);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallSearchHistoryRetentionEnabled", searches);
+
+
         List<JsonNode> history = new ArrayList<>();
         List<String> names = List.of("read_file", "search_code", "read_file", "read_file", "search_code");
         List<String> bodies = List.of("a".repeat(2048), "b".repeat(6144), "c".repeat(2048),
@@ -481,7 +519,7 @@ class CodingHandlerStageServiceTest {
             }
         }
         List<JsonNode> original = results.stream().map(value -> (JsonNode) value.deepCopy()).toList();
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", reads, searches);
         assertThat(results.get(0).path("content").asText())
                 .isEqualTo(reads && !searches ? bodies.get(0) : CodingHandlerStageService.FOLDED_TOOL_CONTENT);
         assertThat(results.get(1).path("content").asText())
@@ -494,7 +532,7 @@ class CodingHandlerStageServiceTest {
             assertThat(results.get(i).path("result")).isEqualTo(original.get(i).path("result"));
         }
         String once = history.toString();
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", reads, searches);
         assertThat(history.toString()).isEqualTo(once);
     }
 
@@ -502,8 +540,8 @@ class CodingHandlerStageServiceTest {
     void searchAndReadShareTheExistingBudgetWithoutRestoringFoldedResults() {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallReadHistoryRetentionEnabled", true);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallSearchHistoryRetentionEnabled", true);
+
+
         List<JsonNode> history = new ArrayList<>();
         appendRetentionResult(mapper, history, "read_diff", "diff preserved");
         appendRetentionResult(mapper, history, "search_code", CodingHandlerStageService.FOLDED_TOOL_CONTENT);
@@ -511,7 +549,7 @@ class CodingHandlerStageServiceTest {
         appendRetentionResult(mapper, history, "read_file", "x".repeat(2048));
         appendRetentionResult(mapper, history, "search_code", "x".repeat(6144));
         appendRetentionResult(mapper, history, "read_file", "latest");
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", true, true);
         assertThat(history.get(1).path("content").asText()).isEqualTo("diff preserved");
         assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
         assertThat(history.get(5).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
@@ -525,13 +563,13 @@ class CodingHandlerStageServiceTest {
     void searchRetentionDoesNotChangeOtherHandlersOrDisabledFolding(String handler, int keep) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), keep, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallReadHistoryRetentionEnabled", true);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallSearchHistoryRetentionEnabled", true);
+
+
         List<JsonNode> history = new ArrayList<>();
         appendRetentionResult(mapper, history, "search_code", "x".repeat(9000));
         appendRetentionResult(mapper, history, "read_file", "latest");
         String original = history.toString();
-        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, handler);
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, handler, true, true);
         assertThat(history.toString()).isEqualTo(original);
     }
 
@@ -540,8 +578,8 @@ class CodingHandlerStageServiceTest {
     void searchBudgetAllowsCodeResultToReachReview(boolean enabled, int searchSize) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture code = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
-        org.springframework.test.util.ReflectionTestUtils.setField(code.service(), "smallReadHistoryRetentionEnabled", enabled);
-        org.springframework.test.util.ReflectionTestUtils.setField(code.service(), "smallSearchHistoryRetentionEnabled", enabled);
+        inputOptions(code, false, enabled);
+        inputOptions(code, false, enabled);
         UUID searchId = UUID.fromString("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
         var diff = code.toolService().result("Bearer worker", EXECUTION);
         when(code.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
@@ -569,8 +607,8 @@ class CodingHandlerStageServiceTest {
                 completed.handlerKey(), CodingHandlerContract.ResultType.CANDIDATE, completed.resultPort(),
                 completed.workspaceId(), completed.candidateSha(), completed.diffDigest(), completed.validationHash(), completed.payload(), NOW);
         StageFixture review = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI, List.of(stored));
-        org.springframework.test.util.ReflectionTestUtils.setField(review.service(), "smallReadHistoryRetentionEnabled", enabled);
-        org.springframework.test.util.ReflectionTestUtils.setField(review.service(), "smallSearchHistoryRetentionEnabled", enabled);
+        inputOptions(review, false, enabled);
+        inputOptions(review, false, enabled);
         when(review.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
                 .thenAnswer(acceptedSubmit(review.submittedToolCall()));
         when(review.gateway().chat(any())).thenReturn(
@@ -596,8 +634,7 @@ class CodingHandlerStageServiceTest {
     void smallReadRetentionPreservesEarlierBodiesAcrossTheModelToolLoop(ModelProvider provider) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, provider);
-        org.springframework.test.util.ReflectionTestUtils.setField(
-                fixture.service(), "smallReadHistoryRetentionEnabled", true);
+        inputOptions(fixture, false, true);
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(
@@ -612,7 +649,7 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth).hasSize(4).allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST));
         assertThat(fifth.subList(0, 3)).isEqualTo(fourth);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("small read_file results may remain", "copied from a fresh read, never from memory");
+                .contains("small read_file and search_code results may remain", "copied from a fresh read, never from memory");
     }
 
     @Test
@@ -649,7 +686,7 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth.get(2)).isEqualTo(fourth.get(1));
         assertThat(fifth.get(3)).contains(DIFF_DIGEST);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("Results from your last 1 reading answers", "up to 6 read_file/search_code bodies");
+                .contains("Only your last 1 read_file and search_code results stay in the conversation; older ones are folded to a short note.");
     }
 
     /**
@@ -1020,8 +1057,8 @@ class CodingHandlerStageServiceTest {
         StageFixture fixture = stageFixture(
                 mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
                 List.of(), "Implement the approved change.", 3);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallReadHistoryRetentionEnabled", retentionEnabled);
-        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "smallSearchHistoryRetentionEnabled", retentionEnabled);
+        inputOptions(fixture, false, retentionEnabled);
+        inputOptions(fixture, false, retentionEnabled);
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(
@@ -1697,7 +1734,7 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth.get(2)).contains("folded").doesNotContain(DIFF_DIGEST);
         assertThat(fifth.get(3)).contains(DIFF_DIGEST);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("Results from your last 1 reading answers", "up to 6 read_file/search_code bodies");
+                .contains("Only your last 1 read_file and search_code results stay in the conversation; older ones are folded to a short note.");
     }
 
     @Test

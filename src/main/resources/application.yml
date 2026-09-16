@@ -72,11 +72,9 @@ ax:
     model-turn-bridge:
       enabled: false
       # Recent reading answers retained (at most six read_file/search_code bodies).
-      # Older results fold to a note unless bounded retention is enabled. 0 disables folding.
+      # Older results fold to a note unless the frozen node enables bounded retention. 0 disables folding.
+      rtk-executable: ${AX_CODING_RTK_EXECUTABLE:/opt/axms/tools/rtk}
       tool-history-keep: 3
-      search-result-grouping-enabled: ${AX_CODING_SEARCH_RESULT_GROUPING_ENABLED:false}
-      small-read-history-retention-enabled: ${AX_CODING_SMALL_READ_HISTORY_RETENTION_ENABLED:false}
-      small-search-history-retention-enabled: ${AX_CODING_SMALL_SEARCH_HISTORY_RETENTION_ENABLED:false}
       # Answers the code stage may spend reading before its first edit; the stage ends with
       # MODEL_RESPONSE_INVALID when it reaches this many without one. 0 disables the brake.
       read-only-answer-limit: 12

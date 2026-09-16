@@ -503,6 +503,16 @@ final class ProfileSnapshotValidator {
         if ("common.approval".equals(handlerKey)) {
             invalid("common.approval is unavailable without a Backend approval authority");
         }
+        if (Set.of("coding.code", "coding.review").contains(handlerKey)) {
+            try { CodingInputOptions.parse(handlerKey, config); }
+            catch (IllegalArgumentException failure) { invalid("Invalid input optimization config"); }
+            return;
+        }
+        if (Set.of("coding.code", "coding.review").contains(handlerKey)) {
+            try { CodingInputOptions.parse(handlerKey, config); }
+            catch (IllegalArgumentException failure) { invalid("Invalid input optimization config"); }
+            return;
+        }
         if (EMPTY_CONFIG_HANDLERS.contains(handlerKey) && !config.isEmpty()) {
             invalid(handlerKey + " config must be empty");
         }

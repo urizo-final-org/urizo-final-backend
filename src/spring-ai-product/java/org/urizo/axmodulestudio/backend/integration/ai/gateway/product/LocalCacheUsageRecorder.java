@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.metadata.EmptyUsage;
 import org.springframework.ai.chat.model.ChatResponse;
-import org.springframework.ai.openai.api.OpenAiApi;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
@@ -32,16 +32,14 @@ final class LocalCacheUsageRecorder {
     private static final ObjectMapper JSON = new ObjectMapper();
     private final boolean enabled;
     private final String path;
-    private final boolean searchGroupingEnabled;
     private final AtomicBoolean warned = new AtomicBoolean();
 
     LocalCacheUsageRecorder(
             @Value("${ax.ai.local-cache-usage.enabled:false}") boolean enabled,
             @Value("${ax.ai.local-cache-usage.path:.local/diagnostics/cache-usage.jsonl}") String path,
-            @Value("${ax.coding.model-turn-bridge.search-result-grouping-enabled:false}") boolean searchGroupingEnabled) {
+            @Value("${ax.coding.model-turn-bridge.search-result-grouping-enabled:false}") boolean ignoredLegacyGrouping) {
         this.enabled = enabled;
         this.path = path;
-        this.searchGroupingEnabled = searchGroupingEnabled;
     }
 
     static LocalCacheUsageRecorder disabled() {
@@ -56,19 +54,8 @@ final class LocalCacheUsageRecorder {
             Usage usage = response == null || response.getMetadata() == null
                     ? null : response.getMetadata().getUsage();
             if (usage instanceof EmptyUsage) usage = null;
-            Integer input = usage == null ? null : nonNegative(usage.getPromptTokens());
-            Integer output = usage == null ? null : nonNegative(usage.getCompletionTokens());
-            Integer cached = null;
-            if (provider == ModelProvider.OPENAI && usage != null
-                    && usage.getNativeUsage() instanceof OpenAiApi.Usage nativeUsage) {
-                // DefaultUsage replaces missing provider counts with zero. Read the native
-                // counters when available so missing evidence remains unknown.
-                input = nonNegative(nativeUsage.promptTokens());
-                output = nonNegative(nativeUsage.completionTokens());
-                cached = nativeUsage.promptTokensDetails() == null
-                        ? null : nonNegative(nativeUsage.promptTokensDetails().cachedTokens());
-                if (input == null || (cached != null && cached > input)) cached = null;
-            }
+            ProviderTokenUsage tokens = ProviderTokenUsage.from(provider.name(), usage);
+            Integer input = tokens.input(), output = tokens.output(), cached = tokens.cachedInput();
             Map<String, Object> row = new LinkedHashMap<>();
             row.put("schemaVersion", 1);
             row.put("recordId", UUID.randomUUID().toString());
@@ -86,7 +73,7 @@ final class LocalCacheUsageRecorder {
             row.put("uncachedInputTokens", cached == null ? null : input - cached);
             row.put("cacheWriteTokens", null);
             row.put("latencyMs", Math.max(0, Duration.between(startedAt, finishedAt).toMillis()));
-            row.put("searchGroupingEnabled", searchGroupingEnabled);
+            row.put("searchGroupingEnabled", false); // Legacy formatter is no longer a product path.
             ModelObservationScope.Metadata scope = ModelObservationScope.current();
             row.put("jobId", scope == null ? null : scope.jobId());
             row.put("traceId", scope == null ? null : scope.traceId());
@@ -105,7 +92,4 @@ final class LocalCacheUsageRecorder {
         }
     }
 
-    private static Integer nonNegative(Integer value) {
-        return value == null || value < 0 ? null : value;
-    }
 }

@@ -53,7 +53,7 @@ class LocalCacheUsageRecorderTest {
         assertThat(row.get("turnId").textValue()).isEqualTo(turn.toString());
         assertThat(row.get("executionAttempt").intValue()).isEqualTo(2);
         assertThat(row.get("latencyMs").intValue()).isEqualTo(42);
-        assertThat(row.get("searchGroupingEnabled").booleanValue()).isTrue();
+        assertThat(row.get("searchGroupingEnabled").booleanValue()).isFalse();
     }
 
     @Test

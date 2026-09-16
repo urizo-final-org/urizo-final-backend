@@ -599,6 +599,22 @@ public final class LangfuseObservabilityService {
                 nullableDecimal(row, "p95_latency"));
     }
 
+    // Langfuse flat usage buckets do not overlap: input excludes input_* buckets.
+    private static Long inclusiveUsage(JsonNode usage, String prefix) {
+        Long base = nullableLong(usage, prefix);
+        if (base == null || base < 0) return null;
+        long total = base;
+        var fields = usage.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            if (!field.getKey().startsWith(prefix + "_")) continue;
+            Long value = nullableLong(usage, field.getKey());
+            if (value == null || value < 0 || Long.MAX_VALUE - total < value) return null;
+            total += value;
+        }
+        return total;
+    }
+
     private ObservationRow observationRow(JsonNode row) {
         requireObject(row);
         String environment = requiredText(row, "environment");
@@ -607,6 +623,12 @@ public final class LangfuseObservabilityService {
         }
         JsonNode usageDetails = optionalObject(row, "usageDetails");
         BigDecimal latencySeconds = nullableDecimal(row, "latency");
+        Long input = inclusiveUsage(usageDetails, "input");
+        Long cached = nullableLong(usageDetails, "input_cached_tokens");
+        if (input == null || cached != null && (cached < 0 || cached > input)) cached = null;
+        String provider = nullableText(row.path("metadata"), "provider");
+        String cacheStatus = cached != null ? "REPORTED"
+                : "openai".equalsIgnoreCase(provider) ? "NOT_REPORTED" : "UNSUPPORTED_OR_UNKNOWN";
         return new ObservationRow(
                 requiredText(row, "id"),
                 requiredText(row, "traceId"),
@@ -618,10 +640,10 @@ public final class LangfuseObservabilityService {
                 requiredInstant(row, "startTime"),
                 nullableInstant(row, "endTime"),
                 nullableText(row, "model"),
-                nullableLong(usageDetails, "input"),
-                nullableLong(usageDetails, "output"),
+                input,
+                inclusiveUsage(usageDetails, "output"),
                 latencySeconds == null ? null : latencySeconds.movePointRight(3),
-                metadata(row.path("metadata")));
+                metadata(row.path("metadata")), cached, cached == null ? null : input - cached, cacheStatus);
     }
 
     private ScoreRow scoreRow(JsonNode row) {
@@ -976,7 +998,17 @@ public final class LangfuseObservabilityService {
             Long inputTokens,
             Long outputTokens,
             BigDecimal latencyMs,
-            ObservationMetadata metadata) { }
+            ObservationMetadata metadata,
+            Long cachedInputTokens,
+            Long uncachedInputTokens,
+            String cacheStatus) {
+        public ObservationRow(String id, String traceId, String parentObservationId, String type,
+                String name, String level, String environment, Instant startTime, Instant endTime,
+                String model, Long inputTokens, Long outputTokens, BigDecimal latencyMs, ObservationMetadata metadata) {
+            this(id, traceId, parentObservationId, type, name, level, environment, startTime, endTime,
+                    model, inputTokens, outputTokens, latencyMs, metadata, null, null, "NOT_REPORTED");
+        }
+    }
 
     public record ObservationMetadata(
             String jobId,

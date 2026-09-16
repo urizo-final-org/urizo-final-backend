@@ -46,6 +46,19 @@ USER 10001:10001
 WORKDIR /workspace
 
 
+# RTK is pinned independently of the application. No remote installer runs at startup.
+FROM eclipse-temurin:21.0.11_10-jre-jammy AS rtk-amd64
+ADD --checksum=sha256:7278231dfd7e6a730a4ab7f847b195bcf02289c2d57622b0dab75a6411100c8f \
+    https://github.com/rtk-ai/rtk/releases/download/v0.49.0/rtk-x86_64-unknown-linux-musl.tar.gz /tmp/rtk.tar.gz
+RUN mkdir /rtk && tar -xzf /tmp/rtk.tar.gz -C /rtk && /rtk/rtk --version
+
+FROM eclipse-temurin:21.0.11_10-jre-jammy AS rtk-arm64
+# Upstream ARM64 0.49.0 requires GLIBC_2.39, unavailable in Jammy.
+# Keep the optional formatter absent so the adapter returns raw results on ARM64.
+RUN mkdir /rtk
+
+FROM rtk-${TARGETARCH} AS rtk-binary
+
 FROM eclipse-temurin:21.0.11_10-jre-jammy AS runtime
 
 COPY --from=build --chmod=0555 \
@@ -76,6 +89,8 @@ RUN groupadd --gid 10001 axms \
 COPY --from=build --chown=10001:10001 \
     /workspace/target/ax-module-studio-backend-0.1.0-SNAPSHOT.jar \
     /opt/axms/app.jar
+
+COPY --from=rtk-binary --chmod=0555 /rtk/ /opt/axms/tools/
 
 USER 10001:10001
 WORKDIR /opt/axms

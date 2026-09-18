@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.orchestration.controller;
 
+import org.urizo.axmodulestudio.backend.orchestration.monitoring.InputOptimizationHistory;
+
 import java.util.UUID;
 
 import jakarta.servlet.http.HttpServletRequest;
@@ -35,12 +37,26 @@ public class AdminAiJobMonitoringController {
 
     private final AiJobMonitoringService monitoring;
     private final LangfuseObservabilityService observability;
+    private final InputOptimizationHistory inputHistory;
 
-    public AdminAiJobMonitoringController(
-            AiJobMonitoringService monitoring,
-            LangfuseObservabilityService observability) {
+    @org.springframework.beans.factory.annotation.Autowired
+    public AdminAiJobMonitoringController(AiJobMonitoringService monitoring, LangfuseObservabilityService observability,
+            InputOptimizationHistory inputHistory) {
         this.monitoring = monitoring;
         this.observability = observability;
+        this.inputHistory = inputHistory;
+    }
+
+    @GetMapping("/input-optimization/jobs")
+    InputOptimizationHistory.History inputHistory(
+            @RequestParam java.time.Instant from, @RequestParam java.time.Instant to,
+            @RequestParam(required = false) UUID jobId) {
+        return inputHistory.list(from, to, jobId);
+    }
+
+    @GetMapping("/input-optimization/jobs/{jobId}")
+    InputOptimizationHistory.Detail inputDetail(@PathVariable UUID jobId) {
+        return inputHistory.detail(jobId);
     }
 
     @GetMapping("/jobs")

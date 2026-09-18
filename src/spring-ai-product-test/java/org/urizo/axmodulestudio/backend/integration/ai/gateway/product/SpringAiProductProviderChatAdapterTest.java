@@ -76,6 +76,58 @@ class SpringAiProductProviderChatAdapterTest {
     private static final int OUTPUT_BUDGET = 12_345;
 
     @Test
+    void recordsLocalCacheUsageWithoutExporterAndPreservesOutcomesOnWriteFailure(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path temp) throws Exception {
+        ProviderCredentialResolver resolver = mock(ProviderCredentialResolver.class);
+        ProductChatModelFactory factory = mock(ProductChatModelFactory.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        ChatModel model = mock(ChatModel.class);
+        when(resolver.resolve(ModelProvider.OPENAI)).thenAnswer(ignored -> ProviderCredentialLease.fromBytes(
+                ModelProvider.OPENAI, FIXTURE_CREDENTIAL.getBytes(StandardCharsets.US_ASCII)));
+        when(factory.provider()).thenReturn(ModelProvider.OPENAI);
+        when(factory.open(FIXTURE_CREDENTIAL, "test-model", ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                .thenAnswer(ignored -> new ProductChatModelSession(model, () -> { }));
+        ChatResponse raw = new ChatResponse(List.of(new Generation(new AssistantMessage("PRIVATE_MODEL_BODY"))),
+                LocalCacheUsageRecorderTest.response(2000, 1024).getMetadata());
+        when(model.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenReturn(raw);
+        var registration = new ProviderModelRegistration(ModelProvider.OPENAI, "test-model",
+                Set.of(ModelCapability.CHAT), Duration.ofSeconds(30), 1);
+        var request = new ProviderChatRequest(ModelProvider.OPENAI, "test-model", List.of(
+                ProviderChatMessage.plain(ProviderChatMessage.Role.SYSTEM, "PRIVATE_SYSTEM"),
+                ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "PRIVATE_USER")), NOW.plusSeconds(30));
+        var file = temp.resolve("usage.jsonl");
+        var adapter = new SpringAiProductProviderChatAdapter(resolver, List.of(factory), Clock.fixed(NOW, ZoneOffset.UTC),
+                new LocalCacheUsageRecorder(true, file.toString(), false));
+        assertThat(adapter.chat(registration, request).content()).isEqualTo("PRIVATE_MODEL_BODY");
+        String recorded = java.nio.file.Files.readString(file);
+        assertThat(recorded).doesNotContain("PRIVATE_MODEL_BODY", "PRIVATE_SYSTEM", "PRIVATE_USER", FIXTURE_CREDENTIAL);
+        assertThat(new ObjectMapper().readTree(recorded).path("cachedInputTokens").intValue()).isEqualTo(1024);
+        ArgumentCaptor<Prompt> prompt = ArgumentCaptor.forClass(Prompt.class);
+        verify(model).call(prompt.capture());
+        assertThat(prompt.getValue().getInstructions()).extracting(message -> message.getText())
+                .containsExactly("PRIVATE_SYSTEM", "PRIVATE_USER");
+
+        var brokenRecorderAdapter = new SpringAiProductProviderChatAdapter(resolver, List.of(factory),
+                Clock.fixed(NOW, ZoneOffset.UTC), new LocalCacheUsageRecorder(true, temp.toString(), false));
+        assertThat(brokenRecorderAdapter.chat(registration, request).content()).isEqualTo("PRIVATE_MODEL_BODY");
+        var failure = new IllegalStateException("PRIVATE_FAILURE");
+        when(model.call(org.mockito.ArgumentMatchers.any(Prompt.class))).thenThrow(failure);
+        assertThatThrownBy(() -> brokenRecorderAdapter.chat(registration, request)).isSameAs(failure);
+        assertThatThrownBy(() -> adapter.chat(registration, request)).isSameAs(failure);
+        var lines = java.nio.file.Files.readAllLines(file);
+        assertThat(lines).hasSize(2);
+        assertThat(lines.get(1)).doesNotContain("PRIVATE_FAILURE");
+        assertThat(new ObjectMapper().readTree(lines.get(1)).path("outcome").textValue()).isEqualTo("FAILED");
+
+        org.mockito.Mockito.doReturn(raw).when(model).call(org.mockito.ArgumentMatchers.any(Prompt.class));
+        when(factory.open(FIXTURE_CREDENTIAL, "test-model", ProviderModelRegistration.DEFAULT_MAX_OUTPUT_TOKENS))
+                .thenAnswer(ignored -> new ProductChatModelSession(model, () -> { throw failure; }));
+        assertThatThrownBy(() -> adapter.chat(registration, request)).isSameAs(failure);
+        JsonNode closeFailure = new ObjectMapper().readTree(java.nio.file.Files.readAllLines(file).get(2));
+        assertThat(closeFailure.path("outcome").textValue()).isEqualTo("FAILED");
+        assertThat(closeFailure.path("cachedInputTokens").intValue()).isEqualTo(1024);
+    }
+
+    @Test
     void bindsOpenAiThroughTheCmsResolverAndSpringAiChatModelContract() {
         verifiesMockContract(ModelProvider.OPENAI, Stage2ProviderModels.OPENAI_CHAT);
     }
@@ -281,6 +333,69 @@ class SpringAiProductProviderChatAdapterTest {
                 .thoughtSignature().orElseThrow()).containsExactly(1, 2, 3, 4);
         assertThat(first.toString()).doesNotContain("thoughtSignatures");
         assertThat(second.content()).isEqualTo("OK");
+    }
+
+    @Test
+    void preservesFirstOnlyGeminiSignatureAcrossParallelToolResults() throws Exception {
+        ChatModel chatModel = mock(ChatModel.class);
+        AssistantMessage parallel = geminiParallelReadFileCalls().getResult().getOutput();
+        AssistantMessage signedFirstOnly = AssistantMessage.builder()
+                .content("").toolCalls(parallel.getToolCalls())
+                .properties(Map.of("thoughtSignatures", List.of(new byte[] { 7 }))).build();
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(signedFirstOnly))))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String model = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, model);
+        ProviderChatMessage user = ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "Read files.");
+
+        List<ProviderChatMessage.ToolCall> calls = adapter.chat(
+                registration, geminiFollowUp(model, user)).toolCalls();
+        assertThat(calls).hasSize(2);
+        adapter.chat(registration, geminiFollowUp(model, user,
+                ProviderChatMessage.assistant("", calls),
+                ProviderChatMessage.tool(calls.get(0).id(), "read_file", "{\"content\":\"[folded]\"}"),
+                ProviderChatMessage.tool(calls.get(1).id(), "read_file", "{\"content\":\"guide\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(2)).call(prompts.capture());
+        List<com.google.genai.types.Part> parts = createGeminiProviderRequest(
+                prompts.getAllValues().get(1)).contents().stream()
+                .flatMap(content -> content.parts().orElse(List.of()).stream())
+                .filter(part -> part.functionCall().isPresent()).toList();
+        assertThat(parts).hasSize(2);
+        assertThat(parts.get(0).thoughtSignature())
+                .hasValueSatisfying(value -> assertThat(value).containsExactly(7));
+        assertThat(parts.get(1).thoughtSignature()).isEmpty();
+    }
+
+    @Test
+    void doesNotRestoreFirstOnlySignatureWhenUnsignedCompanionChanges() {
+        ChatModel chatModel = mock(ChatModel.class);
+        AssistantMessage parallel = geminiParallelReadFileCalls().getResult().getOutput();
+        AssistantMessage signedFirstOnly = AssistantMessage.builder()
+                .content("").toolCalls(parallel.getToolCalls())
+                .properties(Map.of("thoughtSignatures", List.of(new byte[] { 7 }))).build();
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(signedFirstOnly))))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String model = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, model);
+        ProviderChatMessage user = ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "Read files.");
+        List<ProviderChatMessage.ToolCall> calls = adapter.chat(
+                registration, geminiFollowUp(model, user)).toolCalls();
+        ProviderChatMessage.ToolCall changed = new ProviderChatMessage.ToolCall(
+                calls.get(1).id(), "read_file", "{\"path\":\"other.md\"}");
+        adapter.chat(registration, geminiFollowUp(model, user,
+                ProviderChatMessage.assistant("", List.of(calls.get(0), changed)),
+                ProviderChatMessage.tool(calls.get(0).id(), "read_file", "first"),
+                ProviderChatMessage.tool(changed.id(), "read_file", "second")));
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(2)).call(prompts.capture());
+        assertThat(assistantMetadata(prompts.getAllValues().get(1)))
+                .doesNotContainKey("thoughtSignatures");
     }
 
     @Test

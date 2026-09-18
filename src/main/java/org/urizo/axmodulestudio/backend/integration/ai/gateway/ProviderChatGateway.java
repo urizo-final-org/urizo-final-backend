@@ -84,6 +84,10 @@ public final class ProviderChatGateway implements ProviderChatGatewayPort {
             UUID callId = observeStart(registration, completedAttempts);
             try {
                 ProviderChatResponse response = adapter.chat(registration, boundedRequest);
+                if (callId != null && response.observedUsage() != null) {
+                    try { observer.usage(callId, response.observedUsage()); }
+                    catch (RuntimeException ignored) { /* Usage persistence is fail-open. */ }
+                }
                 if (!clock.instant().isBefore(deadline)) {
                     throw new ProviderGatewayException(ModelGatewayErrorCode.MODEL_TIMEOUT,
                             "Model provider deadline exceeded.");

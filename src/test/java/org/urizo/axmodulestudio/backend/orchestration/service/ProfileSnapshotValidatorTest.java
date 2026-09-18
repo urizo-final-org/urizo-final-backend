@@ -20,6 +20,33 @@ class ProfileSnapshotValidatorTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Test
+    void validatesInputOptionsAtTheAuthoringAndFrozenSnapshotBoundaries() throws Exception {
+        for (boolean rtk : new boolean[]{false, true}) {
+            for (boolean retain : new boolean[]{false, true}) {
+                ObjectNode snapshot = fullSnapshot();
+                node(snapshot, "code").withObject("config")
+                        .put("rtkSearchEnabled", rtk).put("retainSmallToolResults", retain);
+                node(snapshot, "review").withObject("config").put("rtkSearchEnabled", rtk);
+                ProfileSnapshotValidator.validateStored(
+                        UUID.fromString(snapshot.path("profileVersionId").asText()), "LLM_OPS", 4, snapshot);
+                removeStoredIdentity(snapshot);
+                ProfileSnapshotValidator.validateAuthoring("LLM_OPS", snapshot);
+            }
+        }
+        for (String invalid : List.of("{\"rtkSearchEnabled\":\"true\"}",
+                "{\"rtkSearchEnabled\":null}", "{\"unknown\":false}")) {
+            ObjectNode snapshot = (ObjectNode) authoringSnapshot();
+            node(snapshot, "code").set("config", OBJECT_MAPPER.readTree(invalid));
+            assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", snapshot));
+        }
+        for (String id : List.of("review", "analyze")) {
+            ObjectNode snapshot = (ObjectNode) authoringSnapshot();
+            node(snapshot, id).withObject("config").put("retainSmallToolResults", true);
+            assertValidationFailure(() -> ProfileSnapshotValidator.validateAuthoring("LLM_OPS", snapshot));
+        }
+    }
+
+    @Test
     void acceptsPrCompletionExitAndRejectsMiswiredOrPartialContracts() throws Exception {
         ObjectNode upgraded = (ObjectNode) authoringSnapshot();
         node(upgraded, "pr_complete").withArray("resultPorts").add("closed");

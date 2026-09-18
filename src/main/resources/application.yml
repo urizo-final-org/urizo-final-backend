@@ -48,6 +48,9 @@ management:
 ax:
   ai:
     provider-lane: ${AX_AI_PROVIDER_LANE:PRODUCT}
+    local-cache-usage:
+      enabled: ${AX_AI_LOCAL_CACHE_USAGE_ENABLED:false}
+      path: ${AX_AI_LOCAL_CACHE_USAGE_PATH:.local/diagnostics/cache-usage.jsonl}
     mcp-platform:
       enabled: ${AXMS_MCP_PLATFORM_ENABLED:false}
       endpoint: ${AXMS_MCP_PLATFORM_ENDPOINT:http://127.0.0.1:8091/mcp}
@@ -68,8 +71,9 @@ ax:
       enabled: false
     model-turn-bridge:
       enabled: false
-      # Recent read_file/search_code results the code stage keeps verbatim; older ones
-      # fold to a note. 0 disables folding.
+      # Recent reading answers retained (at most six read_file/search_code bodies).
+      # Older results fold to a note unless the frozen node enables bounded retention. 0 disables folding.
+      rtk-executable: ${AX_CODING_RTK_EXECUTABLE:/opt/axms/tools/rtk}
       tool-history-keep: 3
       # Answers the code stage may spend reading before its first edit; the stage ends with
       # MODEL_RESPONSE_INVALID when it reaches this many without one. 0 disables the brake.

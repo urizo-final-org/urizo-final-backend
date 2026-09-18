@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import static org.mockito.ArgumentMatchers.anyString;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -30,6 +32,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.springframework.http.HttpStatus;
@@ -54,6 +58,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderGatewayEx
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderLane;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderModelRegistration;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.CodingInputOptions;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileToolBindingPolicy;
 
 class CodingHandlerStageServiceTest {
@@ -241,6 +246,100 @@ class CodingHandlerStageServiceTest {
                 12, 6, Duration.ofMillis(10));
     }
 
+    @ParameterizedTest
+    @CsvSource({"code,completed,true,false", "review,passed,true,false", "code,completed,false,false",
+            "review,passed,false,false", "code,completed,true,true", "code,completed,false,true"})
+    void groupsSearchOnlyForModelInputAndReusesItWithoutChangingStoredResult(
+            String node, String port, boolean groupingEnabled, boolean batched) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        String handler = "coding." + node;
+        var code = new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.code",
+                CodingHandlerContract.ResultType.CANDIDATE, "completed", WORKSPACE, BASE_SHA,
+                DIFF_DIGEST, null, mapper.createObjectNode(), NOW);
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 0, ModelProvider.OPENAI,
+                node.equals("review") ? List.of(code) : List.of());
+        inputOptions(fixture, groupingEnabled, false);
+        String rawSearch = SearchCodeModelViewTest.fixture().toString();
+        RtkSearchModelView adapter = mock(RtkSearchModelView.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        String compactFixture = SearchCodeModelView.render(handler, "search_code", rawSearch);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View(compactFixture, "selected",
+                rawSearch.length(), compactFixture.length())).when(adapter).render(rawSearch);
+        org.springframework.test.util.ReflectionTestUtils.setField(fixture.service(), "rtkModelView", adapter);
+        UUID searchCall = UUID.fromString("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+        CodingToolContract.ResultContent diffTemplate = fixture.toolService().result("Bearer worker", EXECUTION);
+        AtomicReference<CodingToolContract.ResultContent> storedSearch = new AtomicReference<>();
+        when(fixture.toolService().result("Bearer worker", EXECUTION)).thenAnswer(ignored -> {
+            String raw = searchCall.equals(fixture.submittedToolCall().get()) ? rawSearch : diffTemplate.content();
+            var result = new CodingToolContract.ResultContent("1.0", UUID.randomUUID(),
+                    fixture.submittedToolCall().get(), JOB, TRACE, "stage-tool.result", EXECUTION,
+                    "application/json", raw.getBytes(java.nio.charset.StandardCharsets.UTF_8).length,
+                    diffTemplate.digest(), raw);
+            if (searchCall.equals(result.toolCallId())) storedSearch.set(result);
+            return result;
+        });
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq(node)))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        ProviderChatResponse terminal = node.equals("code") ? terminalReply(ModelProvider.OPENAI)
+                : new ProviderChatResponse(ModelProvider.OPENAI, "coding-test-model",
+                        "{\"port\":\"passed\",\"payload\":{\"reportSummary\":\"done\",\"criteriaResults\":[]}}",
+                        12, 6, Duration.ofMillis(10));
+        ProviderChatResponse searchReply = batched
+                ? new ProviderChatResponse(ModelProvider.OPENAI, "coding-test-model", "", List.of(
+                        new ProviderChatMessage.ToolCall(READ_B, "read_file", "{\"path\":\"src/App.java\"}"),
+                        new ProviderChatMessage.ToolCall(searchCall.toString(), "search_code", "{\"query\":\"App\",\"scope\":\"src\"}")),
+                        10, 5, Duration.ofMillis(10))
+                : toolCallReply(ModelProvider.OPENAI, "search_code", searchCall.toString(), "{\"query\":\"App\",\"scope\":\"src\"}");
+        when(fixture.gateway().chat(any())).thenReturn(
+                searchReply,
+                toolCallReply(ModelProvider.OPENAI, "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                terminal);
+
+        var request = new CodingHandlerContract.StageExecutionRequest("1.0", TRACE, 4, 1, handler, RESULT);
+        var result = fixture.service().execute("Bearer worker", JOB, 1, RESULT, request);
+        assertThat(result.resultPort()).isEqualTo(port);
+        ArgumentCaptor<ProviderChatRequest> routed = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        String compact = toolBodies(routed.getAllValues().get(1)).get(batched ? 1 : 0);
+        if (groupingEnabled) {
+            assertThat(compact).contains("groups[path] contains rows", "across ALL paths",
+                    "not group order", "including whitespace").isNotEqualTo(rawSearch);
+        } else {
+            assertThat(compact).isEqualTo(rawSearch);
+        }
+        var initialMessages = routed.getAllValues().get(0).messages();
+        for (ProviderChatRequest turn : routed.getAllValues()) {
+            assertThat(turn.messages().subList(0, initialMessages.size())).isEqualTo(initialMessages);
+            assertThat(turn.responseFormat().structured()).isFalse();
+        }
+        assertThat(toolBodies(routed.getAllValues().get(2)))
+                .containsExactlyElementsOf(batched ? List.of(diffTemplate.content(), compact, diffTemplate.content())
+                        : List.of(compact, diffTemplate.content()));
+        assertThat(storedSearch.get().content()).isEqualTo(rawSearch);
+        assertThat(storedSearch.get().digest()).isEqualTo(diffTemplate.digest());
+        var providerTool = routed.getAllValues().get(1).messages().stream()
+                .filter(message -> message.role() == ProviderChatMessage.Role.TOOL
+                        && searchCall.toString().equals(message.toolCallId())).findFirst().orElseThrow();
+        assertThat(providerTool.toolCallId()).isEqualTo(searchCall.toString());
+        assertThat(providerTool.toolName()).isEqualTo("search_code");
+        JsonNode message = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "toolMessage", handler, "search_code", storedSearch.get());
+        assertThat(message.path("result").path("digest").asText()).isEqualTo(diffTemplate.digest());
+        assertThat(message.path("result").path("sizeBytes").asInt()).isEqualTo(storedSearch.get().sizeBytes());
+        assertThat(message.path("result").path("resultRef").asText()).endsWith(EXECUTION + "/result");
+
+        JsonNode disabled = org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "toolMessage", handler, "search_code", storedSearch.get());
+        assertThat(disabled.path("content").asText()).isEqualTo(rawSearch);
+    }
+
+    private static void inputOptions(StageFixture fixture, boolean rtk, boolean retention) {
+        ProfileModelBindingService bindings = (ProfileModelBindingService)
+                org.springframework.test.util.ReflectionTestUtils.getField(fixture.service(), "profileModelBindings");
+        when(bindings.inputOptions(eq(PROFILE), anyString(), anyString())).thenAnswer(call ->
+                new CodingInputOptions(rtk, "coding.code".equals(call.getArgument(2)) && retention));
+    }
+
     private static List<String> toolBodies(ProviderChatRequest request) {
         return request.messages().stream()
                 .filter(message -> message.role() == ProviderChatMessage.Role.TOOL)
@@ -270,6 +369,291 @@ class CodingHandlerStageServiceTest {
      * or search folds the one before it, and the request that follows carries the note
      * instead of the body. read_diff is never folded.
      */
+    @ParameterizedTest
+    @CsvSource({"true,2048,false", "true,2049,true", "false,2048,true"})
+    void smallReadRetentionUsesAnOptInByteBoundary(boolean enabled, int size, boolean folded) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+
+        List<JsonNode> history = new ArrayList<>();
+        // 682 Korean characters = 2046 UTF-8 bytes; a character limit would incorrectly keep 2049.
+        String text = "한".repeat(682) + "x".repeat(size - 2046);
+        appendRetentionResult(mapper, history, "read_file", text);
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        JsonNode original = history.get(1).deepCopy();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, "coding.code", enabled, false);
+        assertThat(history.get(1).path("content").asText())
+                .isEqualTo(folded ? CodingHandlerStageService.FOLDED_TOOL_CONTENT : text);
+        assertThat(history.get(1).path("toolCallId")).isEqualTo(original.path("toolCallId"));
+        assertThat(history.get(1).path("result")).isEqualTo(original.path("result"));
+        String snapshot = history.toString();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, "coding.code", enabled, false);
+        assertThat(history.toString()).isEqualTo(snapshot);
+    }
+
+    @Test
+    void smallReadRetentionCapsAdditionalOldBodiesAndDoesNotPreserveSearchResults() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "read_diff", "diff preserved");
+        for (int i = 0; i < 5; i++) appendRetentionResult(mapper, history, "read_file", "x".repeat(2048));
+        appendRetentionResult(mapper, history, "search_code", "small search");
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, "coding.code", true, false);
+        assertThat(history.get(1).path("content").asText()).isEqualTo("diff preserved");
+        assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        for (int i = 5; i <= 11; i += 2) assertThat(history.get(i).path("content").asText()).hasSize(2048);
+        assertThat(history.get(13).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        assertThat(history.get(15).path("content").asText()).isEqualTo("latest");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"coding.review,1", "coding.analyze,1", "coding.code,0"})
+    void smallReadRetentionDoesNotEnableFoldingOutsideExistingScope(String handler, int keep) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), keep, ModelProvider.OPENAI);
+
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "read_file", "x".repeat(9000));
+        appendRetentionResult(mapper, history, "search_code", "latest");
+        String original = history.toString();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, handler, true, false);
+        assertThat(history.toString()).isEqualTo(original);
+    }
+
+    private static void appendRetentionResult(ObjectMapper mapper, List<JsonNode> history, String tool, String text) {
+        String id = UUID.randomUUID().toString();
+        ObjectNode assistant = mapper.createObjectNode().put("role", "assistant");
+        assistant.putArray("toolCalls").addObject().put("name", tool).put("toolCallId", id);
+        history.add(assistant);
+        ObjectNode result = mapper.createObjectNode().put("role", "tool").put("toolCallId", id).put("content", text);
+        result.putObject("result").put("digest", DIFF_DIGEST).put("resultRef", "unchanged");
+        history.add(result);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void combinedOptionsUseTheRawRetentionBudgetBeforeRtk(boolean rtk, boolean retain) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+        String search = RtkSearchModelViewTest.fixture();
+        assertThat(search.getBytes(java.nio.charset.StandardCharsets.UTF_8).length).isBetween(4097, 6144);
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "search_code", search);
+        appendRetentionResult(mapper, history, "search_code", search);
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(),
+                "foldOldToolResults", history, "coding.code", retain, retain);
+        String folded = CodingHandlerStageService.FOLDED_TOOL_CONTENT;
+        assertThat(history.get(1).path("content").asText()).isEqualTo(folded);
+        assertThat(history.get(3).path("content").asText()).isEqualTo(retain ? search : folded);
+        String before = history.toString();
+        RtkSearchModelView adapter = mock(RtkSearchModelView.class, org.mockito.Mockito.CALLS_REAL_METHODS);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View("compact", "selected", 5000, 100))
+                .when(adapter).render(search);
+        org.mockito.Mockito.doReturn(new RtkSearchModelView.View(folded, "below_threshold", folded.length(), folded.length()))
+                .when(adapter).render(folded);
+        List<JsonNode> model = rtk ? adapter.apply(history, new java.util.LinkedHashMap<>()).messages() : history;
+        assertThat(model.get(1).path("content").asText()).isEqualTo(folded);
+        assertThat(model.get(3).path("content").asText()).isEqualTo(retain ? rtk ? "compact" : search : folded);
+        assertThat(history.toString()).isEqualTo(before);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,6144,false", "true,6145,true", "false,6144,true"})
+    void smallSearchRetentionHasAnIndependentUtf8Boundary(boolean enabled, int size, boolean folded) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+
+        List<JsonNode> history = new ArrayList<>();
+        String content = "한".repeat(2048) + "x".repeat(size - 6144);
+        appendRetentionResult(mapper, history, "search_code", content);
+        appendRetentionResult(mapper, history, "read_file", "old read");
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        JsonNode original = history.get(1).deepCopy();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, "coding.code", false, enabled);
+        assertThat(history.get(1).path("content").asText())
+                .isEqualTo(folded ? CodingHandlerStageService.FOLDED_TOOL_CONTENT : content);
+        assertThat(history.get(1).path("toolCallId")).isEqualTo(original.path("toolCallId"));
+        assertThat(history.get(1).path("result")).isEqualTo(original.path("result"));
+        assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        String snapshot = history.toString();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(
+                fixture.service(), "foldOldToolResults", history, "coding.code", false, enabled);
+        assertThat(history.toString()).isEqualTo(snapshot);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void batchedResultsUseCallIdsAndShareTheAdditionalRetentionBudget(boolean reads, boolean searches) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+
+
+        List<JsonNode> history = new ArrayList<>();
+        List<String> names = List.of("read_file", "search_code", "read_file", "read_file", "search_code");
+        List<String> bodies = List.of("a".repeat(2048), "b".repeat(6144), "c".repeat(2048),
+                "d".repeat(9000), "e".repeat(9000));
+        List<ObjectNode> results = new ArrayList<>();
+        // Three older results share one assistant answer; two newer results share the next.
+        for (int start : List.of(0, 3)) {
+            int end = start == 0 ? 3 : 5;
+            ObjectNode assistant = mapper.createObjectNode().put("role", "assistant");
+            ArrayNode calls = assistant.putArray("toolCalls");
+            history.add(assistant);
+            for (int i = start; i < end; i++) {
+                String id = UUID.randomUUID().toString();
+                calls.addObject().put("toolCallId", id).put("name", names.get(i));
+                ObjectNode result = mapper.createObjectNode().put("role", "tool")
+                        .put("toolCallId", id).put("content", bodies.get(i));
+                result.putObject("result").put("digest", DIFF_DIGEST);
+                history.add(result);
+                results.add(result);
+            }
+        }
+        List<JsonNode> original = results.stream().map(value -> (JsonNode) value.deepCopy()).toList();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", reads, searches);
+        assertThat(results.get(0).path("content").asText())
+                .isEqualTo(reads && !searches ? bodies.get(0) : CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        assertThat(results.get(1).path("content").asText())
+                .isEqualTo(searches ? bodies.get(1) : CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        assertThat(results.get(2).path("content").asText())
+                .isEqualTo(reads ? bodies.get(2) : CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        for (int i = 3; i < 5; i++) assertThat(results.get(i).path("content").asText()).isEqualTo(bodies.get(i));
+        for (int i = 0; i < results.size(); i++) {
+            assertThat(results.get(i).path("toolCallId")).isEqualTo(original.get(i).path("toolCallId"));
+            assertThat(results.get(i).path("result")).isEqualTo(original.get(i).path("result"));
+        }
+        String once = history.toString();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", reads, searches);
+        assertThat(history.toString()).isEqualTo(once);
+    }
+
+    @Test
+    void searchAndReadShareTheExistingBudgetWithoutRestoringFoldedResults() {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+
+
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "read_diff", "diff preserved");
+        appendRetentionResult(mapper, history, "search_code", CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        appendRetentionResult(mapper, history, "read_file", "old read");
+        appendRetentionResult(mapper, history, "read_file", "x".repeat(2048));
+        appendRetentionResult(mapper, history, "search_code", "x".repeat(6144));
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, "coding.code", true, true);
+        assertThat(history.get(1).path("content").asText()).isEqualTo("diff preserved");
+        assertThat(history.get(3).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        assertThat(history.get(5).path("content").asText()).isEqualTo(CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        assertThat(history.get(7).path("content").asText()).hasSize(2048);
+        assertThat(history.get(9).path("content").asText()).hasSize(6144);
+        assertThat(history.get(11).path("content").asText()).isEqualTo("latest");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"coding.review,1", "coding.analyze,1", "coding.code,0"})
+    void searchRetentionDoesNotChangeOtherHandlersOrDisabledFolding(String handler, int keep) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), keep, ModelProvider.OPENAI);
+
+
+        List<JsonNode> history = new ArrayList<>();
+        appendRetentionResult(mapper, history, "search_code", "x".repeat(9000));
+        appendRetentionResult(mapper, history, "read_file", "latest");
+        String original = history.toString();
+        org.springframework.test.util.ReflectionTestUtils.invokeMethod(fixture.service(), "foldOldToolResults", history, handler, true, true);
+        assertThat(history.toString()).isEqualTo(original);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,100", "true,7000", "false,100"})
+    void searchBudgetAllowsCodeResultToReachReview(boolean enabled, int searchSize) throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture code = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI);
+        inputOptions(code, false, enabled);
+        inputOptions(code, false, enabled);
+        UUID searchId = UUID.fromString("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+        var diff = code.toolService().result("Bearer worker", EXECUTION);
+        when(code.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(code.submittedToolCall()));
+        when(code.toolService().result("Bearer worker", EXECUTION)).thenAnswer(ignored -> {
+            boolean search = searchId.equals(code.submittedToolCall().get());
+            return new CodingToolContract.ResultContent("1.0", RESULT, code.submittedToolCall().get(), JOB, TRACE,
+                    "stage-tool.result", EXECUTION, search ? "text/plain" : "application/json", searchSize,
+                    diff.digest(), search ? "x".repeat(searchSize) : diff.content());
+        });
+        when(code.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                toolCallReply(ModelProvider.OPENAI, "search_code", searchId.toString(), "{\"query\":\"App\"}"),
+                toolCallReply(ModelProvider.OPENAI, "read_file", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "{\"path\":\"src/App.java\"}"),
+                terminalReply(ModelProvider.OPENAI));
+        var completed = code.service().execute("Bearer worker", JOB, 1, RESULT, code.request());
+        assertThat(completed.resultPort()).isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> codeRequests = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(code.gateway(), times(4)).chat(codeRequests.capture());
+        assertThat(toolBodies(codeRequests.getAllValues().get(3)).get(1))
+                .contains(enabled && searchSize <= 6144 ? "x".repeat(searchSize) : CodingHandlerStageService.FOLDED_TOOL_CONTENT);
+        // Explicitly pass the actual code stage result through the aggregate boundary;
+        // this checks Backend handoff, not the external Snapshot Runner or persistence.
+        var stored = new CodingHandlerContract.HandlerResultResponse("1.0", completed.resultId(), JOB, TRACE, 1,
+                completed.handlerKey(), CodingHandlerContract.ResultType.CANDIDATE, completed.resultPort(),
+                completed.workspaceId(), completed.candidateSha(), completed.diffDigest(), completed.validationHash(), completed.payload(), NOW);
+        StageFixture review = stageFixture(mapper, bindingPolicy(mapper), 1, ModelProvider.OPENAI, List.of(stored));
+        inputOptions(review, false, enabled);
+        inputOptions(review, false, enabled);
+        when(review.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
+                .thenAnswer(acceptedSubmit(review.submittedToolCall()));
+        when(review.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_diff", "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "{}"),
+                new ProviderChatResponse(ModelProvider.OPENAI, "coding-test-model",
+                        "{\"port\":\"passed\",\"payload\":{\"reportSummary\":\"reviewed\",\"criteriaResults\":[]}}", 12, 6, Duration.ZERO));
+        UUID reviewResultId = UUID.randomUUID();
+        var reviewed = review.service().execute("Bearer worker", JOB, 1, reviewResultId,
+                new CodingHandlerContract.StageExecutionRequest("1.0", TRACE, 4, 1, "coding.review", reviewResultId));
+        assertThat(reviewed.resultPort()).isEqualTo("passed");
+        assertThat(reviewed.candidateSha()).isEqualTo(completed.candidateSha());
+        assertThat(reviewed.diffDigest()).isEqualTo(completed.diffDigest());
+        ArgumentCaptor<ProviderChatRequest> reviewRequests = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(review.gateway(), times(2)).chat(reviewRequests.capture());
+        JsonNode prior = mapper.readTree(reviewRequests.getAllValues().get(0).messages().get(1).content()).path("priorResults").get(0);
+        assertThat(prior.path("candidateSha").asText()).isEqualTo(completed.candidateSha());
+        assertThat(prior.path("diffDigest").asText()).isEqualTo(completed.diffDigest());
+        assertThat(prior.path("payload")).isEqualTo(completed.payload());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"OPENAI", "ANTHROPIC", "GOOGLE_GENAI"})
+    void smallReadRetentionPreservesEarlierBodiesAcrossTheModelToolLoop(ModelProvider provider) {
+        ObjectMapper mapper = new ObjectMapper();
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1, provider);
+        inputOptions(fixture, false, true);
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(provider, "read_diff", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "{}"),
+                threeReadsThenDone(provider));
+        assertThat(fixture.service().execute("Bearer worker", JOB, 1, RESULT, fixture.request()).resultPort())
+                .isEqualTo("completed");
+        ArgumentCaptor<ProviderChatRequest> routed = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(5)).chat(routed.capture());
+        List<String> fourth = toolBodies(routed.getAllValues().get(3));
+        List<String> fifth = toolBodies(routed.getAllValues().get(4));
+        assertThat(fifth).hasSize(4).allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST));
+        assertThat(fifth.subList(0, 3)).isEqualTo(fourth);
+        assertThat(routed.getAllValues().get(0).messages().get(0).content())
+                .contains("small read_file and search_code results may remain",
+                        "Re-read only if that text is missing, folded or changed",
+                        "never reconstruct it from memory");
+    }
+
     @Test
     void foldsReadResultsOlderThanTheKeptOnesInTheCodeStage() {
         ObjectMapper mapper = new ObjectMapper();
@@ -304,7 +688,7 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth.get(2)).isEqualTo(fourth.get(1));
         assertThat(fifth.get(3)).contains(DIFF_DIGEST);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("Only your last 1 read_file and search_code results");
+                .contains("Only your last 1 read_file and search_code results stay in the conversation; older ones are folded to a short note.");
     }
 
     /**
@@ -668,12 +1052,15 @@ class CodingHandlerStageServiceTest {
      * only read for the limit's worth of answers now ends there with the same failure code,
      * after the last reading answer's tool has run.
      */
-    @Test
-    void readingWithoutAnEditEndsTheFirstCodeRoundAtTheBrake() {
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+    void readingWithoutAnEditEndsTheFirstCodeRoundAtTheBrake(boolean retentionEnabled) {
         ObjectMapper mapper = new ObjectMapper();
         StageFixture fixture = stageFixture(
                 mapper, bindingPolicy(mapper), 3, ModelProvider.GOOGLE_GENAI,
                 List.of(), "Implement the approved change.", 3);
+        inputOptions(fixture, false, retentionEnabled);
+        inputOptions(fixture, false, retentionEnabled);
         when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("code")))
                 .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
         when(fixture.gateway().chat(any())).thenReturn(
@@ -690,6 +1077,17 @@ class CodingHandlerStageServiceTest {
                     assertThat(failure.getMessage()).contains("3 answers without an edit");
                 });
         verify(fixture.gateway(), times(3)).chat(any());
+        ArgumentCaptor<ProviderChatRequest> routed = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(0).messages())
+                .noneMatch(message -> message.content().contains("reading answers without attempting"));
+        for (ProviderChatRequest later : routed.getAllValues().subList(1, 3)) {
+            assertThat(later.messages().stream()
+                    .filter(message -> message.content().contains("reading answers without attempting")))
+                    .singleElement().satisfies(message -> assertThat(message.content())
+                            .contains("this stage stops at 3", "specific required definition",
+                                    "If the change cannot be made safely"));
+        }
         // The stage's own read_diff, then the three reading answers' tools.
         verify(fixture.toolService(), times(4))
                 .submitForNode(eq("Bearer worker"), any(), eq("code"));
@@ -1349,7 +1747,7 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth.get(2)).contains("folded").doesNotContain(DIFF_DIGEST);
         assertThat(fifth.get(3)).contains(DIFF_DIGEST);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("Only your last 1 read_file and search_code results");
+                .contains("Only your last 1 read_file and search_code results stay in the conversation; older ones are folded to a short note.");
     }
 
     @Test
@@ -3341,6 +3739,105 @@ class CodingHandlerStageServiceTest {
         verify(runner, never()).enqueue(any(UUID.class), any(), any());
     }
 
+    private static ProviderChatResponse reviewVerdict(String port) {
+        return new ProviderChatResponse(ModelProvider.OPENAI, "coding-test-model",
+                "{\"port\":\"" + port + "\",\"payload\":{\"reportSummary\":\"검토 결과\","
+                        + "\"criteriaResults\":[{\"criterion\":\"네 카드 복원\",\"met\":"
+                        + port.equals("passed") + ",\"reason\":\"검토 근거\"}]}}",
+                12, 6, Duration.ZERO);
+    }
+
+    private static StageFixture reviewEvidenceFixture(ObjectMapper mapper, String content) {
+        ObjectNode analysisPayload = mapper.createObjectNode();
+        analysisPayload.putArray("targetFiles").add("src/App.java");
+        analysisPayload.putArray("acceptanceCriteria").add("네 카드 복원");
+        var analysis = new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.analyze",
+                CodingHandlerContract.ResultType.ANALYSIS, "feasible", WORKSPACE, null,
+                null, null, analysisPayload, NOW);
+        var code = new CodingHandlerContract.HandlerResultResponse(
+                "1.0", UUID.randomUUID(), JOB, TRACE, 1, "coding.code",
+                CodingHandlerContract.ResultType.CANDIDATE, "completed", WORKSPACE, BASE_SHA,
+                DIFF_DIGEST, null, mapper.createObjectNode(), NOW);
+        StageFixture fixture = stageFixture(mapper, bindingPolicy(mapper), 1,
+                ModelProvider.OPENAI, List.of(analysis, code));
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
+                .thenAnswer(acceptedSubmit(fixture.submittedToolCall()));
+        when(fixture.toolService().result("Bearer worker", EXECUTION)).thenAnswer(ignored ->
+                new CodingToolContract.ResultContent("1.0", UUID.randomUUID(),
+                        fixture.submittedToolCall().get(), JOB, TRACE, "read_file.result", EXECUTION,
+                        "application/json", content.length(), DIFF_DIGEST,
+                        mapper.createObjectNode().put("content", content).toString()));
+        return fixture;
+    }
+
+    private static CodingHandlerContract.StageExecutionResponse executeReview(StageFixture fixture) {
+        return fixture.service().execute("Bearer worker", JOB, 1, RESULT,
+                new CodingHandlerContract.StageExecutionRequest(
+                        "1.0", TRACE, 4, 1, "coding.review", RESULT));
+    }
+
+    @Test
+    void unsupportedReviewRejectionGetsOneCorrectionAndCannotStartCodeRework() {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), "four existing cards");
+        when(fixture.gateway().chat(any())).thenReturn(reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        ArgumentCaptor<ProviderChatRequest> sent = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(2)).chat(sent.capture());
+        assertThat(sent.getAllValues().get(1).messages().get(3).content())
+                .contains("including the existing data or helper")
+                .contains("A fact missing from the diff is not evidence of a defect");
+        verify(fixture.toolService(), never()).submitForNode(any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"passed", "changes_requested"})
+    void reviewCanCorrectItsVerdictOrReportARealDefectAfterReadingSource(String verdict) {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(),
+                "const FESTIVALS = [a, b, c, d];\nconst cards = filter ? active : FESTIVALS;");
+        when(fixture.gateway().chat(any())).thenReturn(reviewVerdict("changes_requested"),
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"src/App.java\"}"), reviewVerdict(verdict));
+        var result = executeReview(fixture);
+        assertThat(result.resultPort()).isEqualTo(verdict);
+        assertThat(result.candidateSha()).isEqualTo(BASE_SHA);
+        assertThat(result.diffDigest()).isEqualTo(DIFF_DIGEST);
+        verify(fixture.gateway(), times(3)).chat(any());
+        verify(fixture.toolService()).submitForNode(eq("Bearer worker"), any(), eq("review"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"src/Unrelated.java,unrelated source", "src/App.java,''"})
+    void unrelatedOrEmptyReadDoesNotSatisfyReviewEvidence(String path, String content) {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), content);
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"" + path + "\"}"),
+                reviewVerdict("changes_requested"), reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        verify(fixture.gateway(), times(3)).chat(any());
+    }
+
+    @Test
+    void refusedReadDoesNotCountAsReviewEvidence() {
+        var fixture = reviewEvidenceFixture(new ObjectMapper(), "unused");
+        when(fixture.toolService().submitForNode(eq("Bearer worker"), any(), eq("review")))
+                .thenThrow(new CodingToolException("TOOL_ARGUMENTS_INVALID",
+                        "File too large to read whole; use a range.", HttpStatus.UNPROCESSABLE_ENTITY));
+        when(fixture.gateway().chat(any())).thenReturn(
+                toolCallReply(ModelProvider.OPENAI, "read_file", "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+                        "{\"path\":\"src/App.java\"}"),
+                reviewVerdict("changes_requested"), reviewVerdict("changes_requested"));
+        assertThatThrownBy(() -> executeReview(fixture))
+                .isInstanceOf(ProviderGatewayException.class)
+                .hasMessageContaining("without reading relevant source evidence");
+        verify(fixture.gateway(), times(3)).chat(any());
+    }
+
     @Test
     void reviewIsAskedForAPlainLanguageReportAndIsGivenTheAgreedCriteria() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
@@ -3447,6 +3944,8 @@ class CodingHandlerStageServiceTest {
                 .toList().toString();
         // The order asks for the two fields approval 2 renders.
         assertThat(system).contains("reportSummary").contains("criteriaResults");
+        assertThat(system).contains("Review the existing candidate")
+                .doesNotContain("judge only whether the request itself");
         // And the criteria agreed at approval 1 actually reach the reviewer.
         assertThat(user).contains("acceptanceCriteria");
         // The reviewer's context carries neither of the code stage's pre-read structures.

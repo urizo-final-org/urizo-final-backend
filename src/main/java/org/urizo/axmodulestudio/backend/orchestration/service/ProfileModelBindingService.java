@@ -78,6 +78,32 @@ public class ProfileModelBindingService {
             ModelUseCase useCase) {
         Objects.requireNonNull(profileVersionId, "profileVersionId is required");
         Objects.requireNonNull(useCase, "useCase is required");
+        return resolve(readSnapshot(profileVersionId), profileVersionId, nodeId, handlerKey, useCase);
+    }
+
+    public CodingInputOptions inputOptions(UUID profileVersionId, String nodeId, String handlerKey) {
+        if (!Set.of("coding.code", "coding.review").contains(handlerKey)) return CodingInputOptions.OFF;
+        JsonNode snapshot = readSnapshot(profileVersionId);
+        if (!profileVersionId.toString().equals(snapshot.path("profileVersionId").asText())
+                || !"LLM_OPS".equals(snapshot.path("profileKey").asText())) {
+            throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+        }
+        JsonNode found = null;
+        for (JsonNode node : snapshot.path("nodes")) {
+            if (nodeId.equals(node.path("id").asText())) {
+                if (found != null || !handlerKey.equals(node.path("handlerKey").asText())
+                        || !"agent".equals(node.path("type").asText())) {
+                    throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+                }
+                found = node;
+            }
+        }
+        if (found == null) throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
+        try { return CodingInputOptions.parse(handlerKey, found.path("config")); }
+        catch (IllegalArgumentException invalid) { throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED); }
+    }
+
+    private JsonNode readSnapshot(UUID profileVersionId) {
         try {
             String encoded = jdbcTemplate.queryForObject(
                     """
@@ -91,8 +117,7 @@ public class ProfileModelBindingService {
             if (encoded == null) {
                 throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);
             }
-            return resolve(
-                    objectMapper.readTree(encoded), profileVersionId, nodeId, handlerKey, useCase);
+            return objectMapper.readTree(encoded);
         }
         catch (EmptyResultDataAccessException | JsonProcessingException failure) {
             throw invalidBinding(ModelGatewayErrorCode.MODEL_NOT_CONFIGURED);

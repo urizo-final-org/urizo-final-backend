@@ -61,6 +61,7 @@ class AdminAiJobMonitoringControllerTest {
 
     @Autowired private MockMvc mockMvc;
     @MockitoBean private AiJobMonitoringService monitoring;
+    @MockitoBean private org.urizo.axmodulestudio.backend.orchestration.monitoring.InputOptimizationHistory inputHistory;
     @MockitoBean private LangfuseObservabilityService observability;
     @MockitoBean private AuthService authService;
     @MockitoBean(name = "authJwtSigningKey") private SecretKey authJwtSigningKey;
@@ -69,6 +70,20 @@ class AdminAiJobMonitoringControllerTest {
     @MockitoBean(name = "refreshJwtDecoder") private JwtDecoder refreshJwtDecoder;
     @MockitoBean private JwtTokenProvider jwtTokenProvider;
     @MockitoBean private JwtProperties jwtProperties;
+
+    @Test
+    void inputHistoryIsSuperAdminOnlyAndNeverQueriesLangfuse() throws Exception {
+        String path = "/api/admin/ai/monitoring/input-optimization/jobs?from=2026-09-07T00:00:00Z&to=2026-09-08T00:00:00Z";
+        authenticate(AdminRole.GENERAL_ADMIN);
+        mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN)).andExpect(status().isForbidden());
+        verifyNoInteractions(inputHistory);
+        authenticate(AdminRole.SUPER_ADMIN);
+        when(inputHistory.list(Instant.parse("2026-09-07T00:00:00Z"), Instant.parse("2026-09-08T00:00:00Z"), null))
+                .thenReturn(new org.urizo.axmodulestudio.backend.orchestration.monitoring.InputOptimizationHistory.History(NOW, List.of(), false));
+        mockMvc.perform(get(path).header(HttpHeaders.AUTHORIZATION, "Bearer " + TOKEN))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.jobs").isEmpty());
+        verifyNoInteractions(observability);
+    }
 
     @Test
     void superAdminReadsTheFixedListSnapshotAndSelectedObservationRoutes()

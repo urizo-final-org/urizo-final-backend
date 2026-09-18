@@ -38,6 +38,32 @@ class ProfileModelBindingServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void inputOptionsUseOnlyThePinnedNodeAndRejectCrossNodeOrMalformedConfiguration() throws Exception {
+        JdbcTemplate jdbc = mock(JdbcTemplate.class);
+        var service = new ProfileModelBindingService(jdbc, objectMapper, registry());
+        var snapshot = objectMapper.createObjectNode().put("profileVersionId", PROFILE.toString())
+                .put("profileKey", "LLM_OPS");
+        var node = snapshot.putArray("nodes").addObject().put("id", "code")
+                .put("type", "agent").put("handlerKey", "coding.code");
+        node.putObject("config").put("rtkSearchEnabled", true).put("retainSmallToolResults", false);
+        when(jdbc.queryForObject(anyString(), eq(String.class), eq(PROFILE)))
+                .thenAnswer(ignored -> snapshot.toString());
+        assertThat(service.inputOptions(PROFILE, "code", "coding.code"))
+                .isEqualTo(new CodingInputOptions(true, false));
+        assertThatThrownBy(() -> service.inputOptions(PROFILE, "review", "coding.review"))
+                .isInstanceOf(ProviderGatewayException.class);
+        node.putObject("config");
+        assertThat(service.inputOptions(PROFILE, "code", "coding.code")).isEqualTo(CodingInputOptions.OFF);
+        node.withObject("config").put("rtkSearchEnabled", "true");
+        assertThatThrownBy(() -> service.inputOptions(PROFILE, "code", "coding.code"))
+                .isInstanceOf(ProviderGatewayException.class);
+        snapshot.put("profileVersionId", NEXT_PROFILE.toString());
+        assertThatThrownBy(() -> service.inputOptions(PROFILE, "code", "coding.code"))
+                .isInstanceOf(ProviderGatewayException.class);
+        assertThat(service.inputOptions(PROFILE, "analyze", "coding.analyze")).isEqualTo(CodingInputOptions.OFF);
+    }
+
+    @Test
     void loadsOnlyTheJobFrozenProfileVersionBeforeResolvingTheNode() throws Exception {
         JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
         ProviderCapabilityRegistry registry = registry(

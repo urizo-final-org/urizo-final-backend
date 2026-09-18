@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway.product;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -31,6 +33,7 @@ import org.springframework.ai.chat.metadata.Usage;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.ai.google.genai.GoogleGenAiChatOptions;
 import org.springframework.ai.google.genai.common.GoogleGenAiThinkingLevel;
 import org.springframework.ai.model.tool.ToolCallingChatOptions;
@@ -58,6 +61,9 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings
 @Profile("dev & !coding-model-turn-local-mock")
 final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(SpringAiProductProviderChatAdapter.class);
+
     private static final int MAX_NATIVE_TOOL_CALLS = 50;
     private static final int MAX_THOUGHT_SIGNATURE_BYTES = 65_536;
     private static final int MAX_THOUGHT_SIGNATURES = 1_024;
@@ -66,6 +72,7 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
     private final ProviderCredentialResolver credentialResolver;
     private final Map<ModelProvider, ProductChatModelFactory> factories;
     private final Clock clock;
+    private final LocalCacheUsageRecorder cacheUsageRecorder;
     // Provenance only for calls actually produced by another provider in this adapter.
     // Gemini documents this marker for imported tool history; unknown/mutated Gemini
     // history must never acquire it as a substitute for a missing native signature.
@@ -89,8 +96,18 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             ProviderCredentialResolver credentialResolver,
             List<ProductChatModelFactory> factories,
             Clock clock) {
+        this(credentialResolver, factories, clock, LocalCacheUsageRecorder.disabled());
+    }
+
+    @Autowired
+    SpringAiProductProviderChatAdapter(
+            ProviderCredentialResolver credentialResolver,
+            List<ProductChatModelFactory> factories,
+            Clock clock,
+            LocalCacheUsageRecorder cacheUsageRecorder) {
         this.credentialResolver = credentialResolver;
         this.clock = clock;
+        this.cacheUsageRecorder = cacheUsageRecorder;
         Map<ModelProvider, ProductChatModelFactory> indexed = new EnumMap<>(ModelProvider.class);
         for (ProductChatModelFactory factory : factories) {
             if (indexed.putIfAbsent(factory.provider(), factory) != null) {
@@ -119,6 +136,8 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
 
         Instant startedAt = clock.instant();
+        ChatResponse providerResponse = null;
+        boolean completed = false;
         try (ProviderCredentialLease lease = credentialResolver.resolve(request.provider())) {
             byte[] credentialBytes = lease.copySecret();
             try {
@@ -134,15 +153,35 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                     ChatResponse response;
                     try {
                         response = session.chatModel().call(prompt(registration, request));
+                        providerResponse = response;
                     } catch (RuntimeException failure) {
                         throw ProductProviderErrors.sanitizeGoogle(failure);
                     }
-                    return response(request, response, startedAt);
+                    ProviderChatResponse normalized = response(request, response, startedAt);
+                    completed = true;
+                    return normalized;
                 }
             }
             finally {
                 Arrays.fill(credentialBytes, (byte) 0);
             }
+        }
+        catch (RuntimeException failure) {
+            completed = false;
+            // Only application code location and response presence: never log the
+            // exception message/cause, provider payload, arguments or credentials.
+            StackTraceElement site = Arrays.stream(failure.getStackTrace())
+                    .filter(frame -> frame.getClassName().equals(getClass().getName()))
+                    .findFirst().orElse(null);
+            LOG.warn("Provider adapter rejected call: provider={} responseReceived={} site={} line={}",
+                    request.provider(), providerResponse != null,
+                    site == null ? "upstream" : site.getMethodName(),
+                    site == null ? -1 : site.getLineNumber());
+            throw failure;
+        }
+        finally {
+            cacheUsageRecorder.record(request.provider(), request.modelId(), providerResponse,
+                    startedAt, clock.instant(), completed);
         }
     }
 
@@ -361,7 +400,9 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 inputTokens,
                 outputTokens,
                 latency.isNegative() ? Duration.ZERO : latency,
-                finishReason);
+                finishReason,
+                ProviderTokenUsage.from(
+                        request.provider().name(), usage));
     }
 
     private static List<ProviderChatMessage.ToolCall> nativeToolCalls(
@@ -479,7 +520,10 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             return;
         }
         Object raw = output.getMetadata().get("thoughtSignatures");
-        if (!(raw instanceof List<?> values) || values.size() != normalizedCalls.size()) {
+        // Gemini signs only the first function call in a parallel response. Spring AI
+        // keeps only present signatures, so that valid response has one entry here.
+        if (!(raw instanceof List<?> values)
+                || (values.size() != 1 && values.size() != normalizedCalls.size())) {
             throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         }
         List<byte[]> validated = new ArrayList<>();
@@ -493,13 +537,16 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
         Instant expiresAt = clock.instant().plus(THOUGHT_SIGNATURE_TTL);
         synchronized (thoughtSignatures) {
-            for (int index = 0; index < validated.size(); index++) {
+            for (int index = 0; index < normalizedCalls.size(); index++) {
                 ProviderChatMessage.ToolCall call = normalizedCalls.get(index);
                 thoughtSignatures.put(
                         new ThoughtSignatureKey(
                                 request.provider(), request.modelId(), call.id()),
                         new StoredThoughtSignature(
-                                validated.get(index), expiresAt, call.name(),
+                                // An empty internal value records a known unsigned trailing
+                                // call; it must never be sent to Gemini as a signature.
+                                index < validated.size() ? validated.get(index) : new byte[0],
+                                expiresAt, call.name(),
                                 argumentsDigest(call.arguments()), index));
             }
         }
@@ -545,6 +592,11 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 }
                 restored.add(Arrays.copyOf(stored.value(), stored.value().length));
             }
+        }
+        // Validate the entire group above before dropping its unsigned trailing entries.
+        // Missing, changed or reordered calls still invalidate restoration of the group.
+        while (!restored.isEmpty() && restored.get(restored.size() - 1).length == 0) {
+            restored.remove(restored.size() - 1);
         }
         return List.copyOf(restored);
     }

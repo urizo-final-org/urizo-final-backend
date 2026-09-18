@@ -1,5 +1,9 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope;
+
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope.Decision;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -8,6 +12,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
@@ -39,6 +44,7 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderResponseF
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.StructuredOutputGuard;
 import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
 import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindingService;
+import org.urizo.axmodulestudio.backend.orchestration.service.CodingInputOptions;
 
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
@@ -226,7 +232,7 @@ public final class CodingHandlerStageService {
      */
     private final int maxRunnerPolls;
     private final Duration runnerPollInterval;
-    /** How many recent read_file/search_code results the code stage keeps verbatim; 0 folds none. */
+    /** How many recent reading answers the code stage keeps, subject to the body cap; 0 folds none. */
     private final int toolHistoryKeep;
     /**
      * How many answers the first code round may spend reading before its first edit. Job
@@ -237,6 +243,14 @@ public final class CodingHandlerStageService {
      */
     private final int readOnlyAnswerLimit;
     static final int DEFAULT_READ_ONLY_ANSWER_LIMIT = 12;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    private RtkSearchModelView rtkModelView;
+
+    // Experimental limits on additional old bodies, measured before provider wrapping.
+    static final int SMALL_READ_MAX_BYTES = 2048;
+    static final int SMALL_SEARCH_MAX_BYTES = 6144;
+    static final int SMALL_READ_HISTORY_MAX_BYTES = 8192;
 
     /**
      * Three constructors mean Spring cannot guess, and without the annotation it looks for
@@ -518,6 +532,9 @@ public final class CodingHandlerStageService {
                 modelBindings(authority, request, schemas.isEmpty()
                         ? ModelUseCase.CHAT : ModelUseCase.TOOL_CALL);
         boolean foldHistory = foldsToolHistory(modelBindings);
+        CodingInputOptions inputOptions = Objects.requireNonNullElse(profileModelBindings.inputOptions(
+                authority.profileVersionId(), request.nodeId(), request.handlerKey()), CodingInputOptions.OFF);
+        Map<String, RtkSearchModelView.View> rtkViews = new java.util.LinkedHashMap<>();
         List<TargetFile> targets = "coding.code".equals(request.handlerKey())
                 && allowedTools.contains("read_file")
                 ? targetFiles(authorization, jobId, request, authority, aggregate, resultId)
@@ -533,27 +550,74 @@ public final class CodingHandlerStageService {
                 : null;
         List<JsonNode> messages = new ArrayList<>(initialMessages(
                 request.handlerKey(), aggregate, foldHistory, outlineNodes(targets),
-                targetExcerpts, currentDiffText(latestDiff)));
+                targetExcerpts, currentDiffText(latestDiff), inputOptions.retainSmallToolResults()));
         ModelOutcome terminalOutcome = null;
         // Whether the model ever reached for an edit. An empty diff means one of two very
         // different things - it looked and the change was already there, or it tried and
         // could not land one - and only this tells them apart.
         boolean patchAttempted = false;
+        boolean reviewEvidenceRequested = false;
+        Set<String> reviewedSourcePaths = new LinkedHashSet<>();
+        Set<String> reviewTargetPaths = new LinkedHashSet<>();
+        if ("coding.review".equals(request.handlerKey())) {
+            var analysis = latestResultOrNull(aggregate, "coding.analyze", "feasible");
+            if (analysis != null && analysis.payload() != null) {
+                for (JsonNode path : analysis.payload().path("targetFiles")) {
+                    if (path.isTextual()) reviewTargetPaths.add(normalizedPath(path.asText()));
+                }
+            }
+        }
         CodingModelTurnContract.Response modelResponse = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
+            var decisions = new ArrayList<Decision>();
             if (foldHistory) {
-                foldOldToolResults(messages, request.handlerKey());
+                decisions.addAll(foldOldToolResults(messages, request.handlerKey(),
+                        inputOptions.retainSmallToolResults(), inputOptions.retainSmallToolResults()));
             }
-            CodingModelTurnContract.Response execution = modelTurn(
+            List<JsonNode> modelMessages = messages;
+            if (inputOptions.rtkSearchEnabled()) {
+                var view = rtkModelView.apply(messages, rtkViews);
+                modelMessages = view.messages();
+                decisions.addAll(view.decisions());
+            }
+            CodingModelTurnContract.Response execution;
+            try (var inputScope = new InputOptimizationScope(
+                    inputOptions.rtkSearchEnabled(), inputOptions.retainSmallToolResults(), decisions)) {
+                execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
-                    turn, schemas, messages,
+                    turn, schemas, modelMessages,
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
+            }
             modelResponse = execution;
             if (modelResponse.toolCalls().isEmpty()) {
                 try {
                     terminalOutcome = parseOutcome(
                             request.handlerKey(), modelResponse.assistant().content(), ports);
+                    // A missing hunk is not a defect. Job 27999fef was sent through three
+                    // rework rounds because the reviewer never read the existing four-item
+                    // list. Require a successful source read before accepting a rejection;
+                    // one correction opportunity stays inside this review, not a code retry.
+                    if ("coding.review".equals(request.handlerKey())
+                            && "changes_requested".equals(terminalOutcome.port())
+                            && reviewedSourcePaths.stream().noneMatch(reviewTargetPaths::contains)) {
+                        if (reviewEvidenceRequested || !allowedTools.contains("read_file")
+                                || turn == MAX_MODEL_TURNS) {
+                            throw new ProviderGatewayException(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
+                                    "Coding review rejected the candidate without reading relevant source evidence.");
+                        }
+                        reviewEvidenceRequested = true;
+                        terminalOutcome = null;
+                        messages.add(plainAssistantMessage(modelResponse));
+                        messages.add(userMessage("Your rejection has not been accepted. Before asking "
+                                + "for code rework, use read_file on the relevant target or changed file, "
+                                + "including the existing data or helper the criterion depends on. "
+                                + "Use search_code or ranged reads if needed. A fact missing from the diff "
+                                + "is not evidence of a defect. Re-evaluate against the actual source; "
+                                + "do not add a requirement the user did not request. This is the only "
+                                + "evidence correction opportunity; do not repeat an unsupported rejection."));
+                        continue;
+                    }
                     break;
                 }
                 catch (CodingWorkerException failure) {
@@ -615,11 +679,30 @@ public final class CodingHandlerStageService {
             }
             else {
                 messages.add(assistantToolMessage(modelResponse, executed));
-                toolResults.forEach(result -> messages.add(toolMessage(result)));
+                for (int resultIndex = 0; resultIndex < toolResults.size(); resultIndex++) {
+                    messages.add(toolMessage(request.handlerKey(), executed.get(resultIndex).name(),
+                            toolResults.get(resultIndex)));
+                }
             }
             List<JsonNode> decodedResults = toolResults.stream()
                     .map(this::decodeToolResult)
                     .toList();
+            if ("coding.review".equals(request.handlerKey())) {
+                for (int index = 0; index < executed.size(); index++) {
+                    var executedCall = executed.get(index);
+                    JsonNode decoded = decodedResults.get(index);
+                    if ("read_file".equals(executedCall.name())
+                            && decoded.path("content").isTextual()
+                            && !decoded.path("content").asText().isBlank()) {
+                        reviewedSourcePaths.add(normalizedPath(executedCall.arguments().path("path").asText()));
+                    }
+                    if ("read_diff".equals(executedCall.name())) {
+                        for (JsonNode path : decoded.path("changedPaths")) {
+                            if (path.isTextual()) reviewTargetPaths.add(normalizedPath(path.asText()));
+                        }
+                    }
+                }
+            }
             if (refusal != null) {
                 messages.add(userMessage("Your " + refused.name() + " call was refused: "
                         + refusal.getMessage()
@@ -670,6 +753,16 @@ public final class CodingHandlerStageService {
                             ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
                             "Coding Model read for " + readOnlyAnswerLimit
                                     + " answers without an edit.");
+                }
+                if (readingAnswers == Math.max(1, readOnlyAnswerLimit / 2)) {
+                    messages.add(userMessage("You have used " + readingAnswers
+                            + " reading answers without attempting an edit; this stage stops at "
+                            + readOnlyAnswerLimit + ". Use the source already present to make the "
+                            + "smallest approved change with apply_patch. Read again only if a "
+                            + "specific required definition or exact replacement text is missing "
+                            + "or folded. Do not reread unchanged text that is still visible. "
+                            + "If the change cannot be made safely, explain the concrete blocker "
+                            + "in the declared stage result instead of continuing to explore."));
                 }
             }
             if (turn == MAX_MODEL_TURNS) {
@@ -1621,6 +1714,14 @@ public final class CodingHandlerStageService {
             ArrayNode targetFileOutlines,
             ArrayNode targetFileExcerpts,
             String currentDiff) {
+        return initialMessages(handlerKey, aggregate, foldHistory, targetFileOutlines, targetFileExcerpts,
+                currentDiff, false);
+    }
+
+    private List<JsonNode> initialMessages(String handlerKey,
+            CodingHandlerContract.AttemptAggregateResponse aggregate, boolean foldHistory,
+            ArrayNode targetFileOutlines, ArrayNode targetFileExcerpts, String currentDiff,
+            boolean retainSmallToolResults) {
         ObjectNode context = objectMapper.createObjectNode();
         context.put("request", aggregate.requestText());
         // The analyst is designed to refuse a request that clearly needs work outside the
@@ -1944,10 +2045,17 @@ public final class CodingHandlerStageService {
                         + "newText rather than writing a diff yourself; an edit can be "
                         + "corrected after the next read_diff, but a spent answer cannot be "
                         + "recovered. "
-                        + foldingHint(foldHistory)
+                        + foldingHint(foldHistory, retainSmallToolResults)
                     // Without the second sentence the model reads "no apply_patch here"
                     // as "the request cannot be done" and answers infeasible.
-                    : "Do not request apply_patch in this stage. A later stage performs "
+                    : "coding.review".equals(handlerKey)
+                        ? "Do not request apply_patch. Review the existing candidate against the "
+                            + "agreed criteria, not the feasibility of the request. Before returning "
+                            + "changes_requested, read_file the relevant target or changed source "
+                            + "and inspect existing data and helpers outside the diff as needed. "
+                            + "An absent hunk or an unperformed behavior test does not prove failure. "
+                            + "Explain the concrete contradiction in each unmet criterion's reason. "
+                        : "Do not request apply_patch in this stage. A later stage performs "
                         + "the file changes, so judge only whether the request itself "
                         + "can be carried out. ");
         return List.of(
@@ -2702,15 +2810,20 @@ public final class CodingHandlerStageService {
      * folded a body the model was still working from: on Job 543eb70f all six re-reads of
      * the code stage came right after the fold of the range they re-read (38% of its input).
      * The results of one answer stay or fold together; {@link #MAX_KEPT_TOOL_RESULTS} bounds
-     * what three grouped answers can keep.
+     * what three grouped answers can keep by default. Opt-in small-result retention may
+     * retain additional old bodies within per-result and shared byte limits. It does not
+     * restore folded bodies or change the common request-size guard.
      */
-    private void foldOldToolResults(List<JsonNode> messages, String handlerKey) {
+    private List<Decision> foldOldToolResults(List<JsonNode> messages, String handlerKey,
+            boolean smallReadHistoryRetentionEnabled, boolean smallSearchHistoryRetentionEnabled) {
+        var decisions = new ArrayList<Decision>();
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
-            return;
+            return decisions;
         }
         int keptAnswers = 0;
         int keptResults = 0;
         int keptAnswer = -1;
+        int retainedSmallBytes = 0;
         for (int index = messages.size() - 1; index >= 0; index--) {
             JsonNode message = messages.get(index);
             if (!"tool".equals(message.path("role").textValue())
@@ -2727,8 +2840,31 @@ public final class CodingHandlerStageService {
             if (kept || FOLDED_TOOL_CONTENT.equals(message.path("content").textValue())) {
                 continue;
             }
+            String tool = toolNameBefore(messages, index);
+            int maxBytes = "read_file".equals(tool) && smallReadHistoryRetentionEnabled
+                    ? SMALL_READ_MAX_BYTES
+                    : "search_code".equals(tool) && smallSearchHistoryRetentionEnabled ? SMALL_SEARCH_MAX_BYTES : 0;
+            if (maxBytes > 0 && message.path("content").isTextual()) {
+                String content = message.path("content").textValue();
+                // The char precheck avoids allocating a byte array for large results.
+                if (content.length() <= maxBytes) {
+                    int bytes = content.getBytes(StandardCharsets.UTF_8).length;
+                    if (bytes <= maxBytes
+                            && bytes <= SMALL_READ_HISTORY_MAX_BYTES - retainedSmallBytes) {
+                        retainedSmallBytes += bytes;
+                        decisions.add(new Decision(
+                                message.path("toolCallId").asText(), tool, "RETENTION", "extra_retained", bytes, bytes, false));
+                        continue;
+                    }
+                }
+            }
+            decisions.add(new Decision(
+                    message.path("toolCallId").asText(), tool, "RETENTION", "folded",
+                    message.path("content").asText().getBytes(StandardCharsets.UTF_8).length,
+                    FOLDED_TOOL_CONTENT.getBytes(StandardCharsets.UTF_8).length, true));
             ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
         }
+        return List.copyOf(decisions);
     }
 
     /**
@@ -2736,14 +2872,23 @@ public final class CodingHandlerStageService {
      * where it expects a file would otherwise copy oldText from memory - and apply_patch
      * refuses text that does not match the file exactly.
      */
-    private String foldingHint(boolean foldHistory) {
+    private String foldingHint(boolean foldHistory, boolean retainSmallToolResults) {
         if (!foldHistory) {
             return "";
         }
+        if (retainSmallToolResults) {
+            String retainedTools = "read_file and search_code";
+            return "Older read_file and search_code results may be folded to a short note; "
+                    + "small " + retainedTools + " results may remain within a bounded history budget. "
+                    + "For apply_patch, copy oldText from the exact source still visible in the "
+                    + "conversation. Re-read only if that text is missing, folded or changed "
+                    + "by an intervening edit; never reconstruct it from memory. ";
+        }
         return "Only your last " + toolHistoryKeep + " read_file and search_code results "
-                + "stay in the conversation; older ones are folded to a short note. Before "
-                + "apply_patch, read_file the exact lines you will replace so oldText is "
-                + "copied from a fresh read, never from memory. ";
+                + "stay in the conversation; older ones are folded to a short note. "
+                + "For apply_patch, copy oldText from the exact source still visible in the "
+                + "conversation. Re-read only if that text is missing, folded or changed "
+                + "by an intervening edit; never reconstruct it from memory. ";
     }
 
     /**
@@ -2814,7 +2959,7 @@ public final class CodingHandlerStageService {
         return List.copyOf(calls.subList(0, Math.min(calls.size(), MAX_BATCHED_READS)));
     }
 
-    private ObjectNode toolMessage(CodingToolContract.ResultContent result) {
+    private ObjectNode toolMessage(String handler, String tool, CodingToolContract.ResultContent result) {
         ObjectNode message = objectMapper.createObjectNode();
         message.put("role", "tool");
         message.put("toolCallId", result.toolCallId().toString());

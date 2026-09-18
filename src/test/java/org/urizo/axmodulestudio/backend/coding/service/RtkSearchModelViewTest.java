@@ -81,6 +81,13 @@ class RtkSearchModelViewTest {
         var second = adapter.apply(history, cache);
         assertThat(first.messages()).isEqualTo(second.messages());
         assertThat(first.selected()).isEqualTo(1);
+        assertThat(first.decisions()).singleElement().satisfies(d -> {
+            assertThat(d.firstProcessing()).isTrue();
+            assertThat(d.toolCallId()).isEqualTo("call");
+            assertThat(d.reason()).isEqualTo("selected");
+            assertThat(d.toString()).doesNotContain(raw);
+        });
+        assertThat(second.decisions()).singleElement().satisfies(d -> assertThat(d.firstProcessing()).isFalse());
         assertThat(first.modelBytes()).isLessThan(first.originalBytes());
         assertThat(count.get()).isEqualTo(1);
         assertThat(tool.path("content").asText()).isEqualTo(raw);
@@ -102,6 +109,7 @@ class RtkSearchModelViewTest {
         for (String input : List.of("{}", raw.replace("\"query\":", "\"query\":\"other\",\"query\":"),
                 unknown.toString(), invalid.toString(), raw + " trailing")) {
             assertThat(adapter.render(input).content()).isEqualTo(input);
+            if (input.length() > 4096) assertThat(adapter.render(input).reason()).isEqualTo("unsupported_shape");
         }
         assertThat(calls.get()).isZero();
     }

@@ -693,22 +693,41 @@ class LangfuseObservabilityServiceTest {
 
     @Test
     void tokenTrendUsesDailyBucketsForLongWindowsAndIncludesPartialUtcBoundary() {
-        var service = service(configured(), (endpoint, headers, timeout, maximum) -> {
-            assertThat(URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8))
-                    .contains("\"granularity\":\"day\"");
-            return new LangfuseHttpTransport.Response(200,
-                    "{\"data\":[{\"time_dimension\":\"2026-09-01T00:00:00Z\",\"sum_totalTokens\":10}]}");
-        });
-        var result = service.tokenUsage("2026-09-01T12:30:00Z", "2026-10-02T12:30:00Z", null);
-        assertThat(result.granularity()).isEqualTo("day");
-        assertThat(result.points()).hasSize(32);
-        assertThat(result.points().get(0).bucketStart()).isEqualTo(Instant.parse(FROM));
+        for (String bucket : new String[]{"2026-09-01", "2026-09-01T00:00:00Z"}) {
+            var service = service(configured(), (endpoint, headers, timeout, maximum) -> {
+                assertThat(URLDecoder.decode(endpoint.getRawQuery(), StandardCharsets.UTF_8))
+                        .contains("\"granularity\":\"day\"");
+                return new LangfuseHttpTransport.Response(200,
+                        "{\"data\":[{\"time_dimension\":\"" + bucket + "\",\"sum_totalTokens\":10}]}");
+            });
+            var result = service.tokenUsage("2026-09-01T12:30:00Z", "2026-10-02T12:30:00Z", null);
+            assertThat(result.granularity()).isEqualTo("day");
+            assertThat(result.status()).isEqualTo(LangfuseObservabilityService.Availability.AVAILABLE);
+            assertThat(result.points()).hasSize(32);
+            assertThat(result.points().get(0).bucketStart()).isEqualTo(Instant.parse(FROM));
+            assertThat(result.points().get(0).totalTokens()).isEqualTo(10L);
+        }
+    }
+
+    @Test
+    void tokenTrendRejectsInvalidDailyDatesAndEquivalentDuplicateBuckets() {
+        for (String rows : new String[]{
+                "{\"time_dimension\":\"2026-09-31\"}",
+                "{\"time_dimension\":\"2026-08-31\"}",
+                "{\"time_dimension\":\"2026-10-03\"}",
+                "{\"time_dimension\":\"2026-09-01\"},{\"time_dimension\":\"2026-09-01T00:00:00Z\"}"}) {
+            var service = service(configured(), (endpoint, headers, timeout, maximum) ->
+                    new LangfuseHttpTransport.Response(200, "{\"data\":[" + rows + "]}"));
+            assertThat(service.tokenUsage("2026-09-01T12:30:00Z", "2026-10-02T12:30:00Z", null).status())
+                    .isEqualTo(LangfuseObservabilityService.Availability.UNAVAILABLE);
+        }
     }
 
     @Test
     void tokenTrendRejectsMalformedDuplicateAndOutsideBucketsWithoutCachingFailure() {
         for (String rows : new String[]{
                 "{\"time_dimension\":\"bad\"}",
+                "{\"time_dimension\":\"2026-09-01\"}",
                 "{\"time_dimension\":\"2026-08-31T23:00:00Z\"}",
                 "{\"time_dimension\":\"2026-09-02T00:00:00Z\"}",
                 "{\"time_dimension\":\"2026-09-01T00:01:00Z\"}",

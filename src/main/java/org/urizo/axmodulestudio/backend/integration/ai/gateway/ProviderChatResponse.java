@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage;
+
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
@@ -14,9 +16,16 @@ public record ProviderChatResponse(
         int inputTokens,
         int outputTokens,
         Duration latency,
-        ProviderFinishReason finishReason) {
+        ProviderFinishReason finishReason,
+        ProviderTokenUsage observedUsage) {
 
     private static final int MAX_TOOL_CALLS = 50;
+
+    public ProviderChatResponse(ModelProvider provider, String modelId, String content,
+            List<ProviderChatMessage.ToolCall> toolCalls, int inputTokens, int outputTokens,
+            Duration latency, ProviderFinishReason finishReason) {
+        this(provider, modelId, content, toolCalls, inputTokens, outputTokens, latency, finishReason, null);
+    }
 
     public ProviderChatResponse {
         provider = Objects.requireNonNull(provider, "provider is required");

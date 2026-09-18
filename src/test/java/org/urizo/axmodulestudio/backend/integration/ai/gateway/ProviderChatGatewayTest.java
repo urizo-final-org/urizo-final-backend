@@ -50,6 +50,28 @@ class ProviderChatGatewayTest {
     }
 
     @Test
+    void persistsReportedUsageBeforeRejectingIncompleteResponsesAndIgnoresObserverFailure() {
+        var observer = mock(ProviderCallObserver.class);
+        var id = java.util.UUID.randomUUID();
+        when(observer.started(ModelProvider.OPENAI, registration.modelId(), 1)).thenReturn(id);
+        var observed = new org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage(100, 8, 40);
+        var request = request("fixture");
+        gateway = new ProviderChatGateway(new ProviderCapabilityRegistry(ProviderLane.PRODUCT,
+                ProviderCapabilityPolicy.stage2Baseline(), List.of(registration)),
+                new ProviderChatAdapterRegistry(List.of(adapter)), new ProviderErrorNormalizer(),
+                new ProviderRetryPolicy(), Clock.fixed(NOW, ZoneOffset.UTC), retryDelays::add, observer);
+        when(adapter.chat(registration, request)).thenReturn(new ProviderChatResponse(ModelProvider.OPENAI,
+                registration.modelId(), "partial", List.of(), 100, 8, Duration.ofMillis(25), ProviderFinishReason.LENGTH_LIMIT, observed));
+        org.mockito.Mockito.doThrow(new RuntimeException("store unavailable")).when(observer).usage(id, observed);
+        assertThatThrownBy(() -> gateway.chat(request)).isInstanceOfSatisfying(ProviderGatewayException.class,
+                e -> assertThat(e.code()).isEqualTo(ModelGatewayErrorCode.MODEL_RESPONSE_INVALID));
+        var order = org.mockito.Mockito.inOrder(observer);
+        order.verify(observer).started(ModelProvider.OPENAI, registration.modelId(), 1);
+        order.verify(observer).usage(id, observed);
+        order.verify(observer).finished(id, ModelGatewayErrorCode.MODEL_RESPONSE_INVALID);
+    }
+
+    @Test
     void routesAnAllowlistedChatRequestAndRedactsContentFromDiagnostics() {
         ProviderChatRequest request = request("local prompt fixture");
         ProviderChatResponse response = response("local response fixture");

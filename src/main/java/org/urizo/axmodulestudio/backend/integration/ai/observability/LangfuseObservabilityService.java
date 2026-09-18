@@ -7,6 +7,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
@@ -130,7 +132,7 @@ public final class LangfuseObservabilityService {
             Instant firstBucket = range.from().truncatedTo(unit);
             for (JsonNode row : data(root)) {
                 requireObject(row);
-                Instant bucket = requiredInstant(row, "time_dimension");
+                Instant bucket = tokenBucketStart(row, unit);
                 if (bucket.isBefore(firstBucket) || !bucket.isBefore(range.to())
                         || !bucket.equals(bucket.truncatedTo(unit)) || buckets.containsKey(bucket)) {
                     throw new UpstreamFailure();
@@ -873,6 +875,20 @@ public final class LangfuseObservabilityService {
             throw new UpstreamFailure();
         }
         return node.decimalValue();
+    }
+
+    private static Instant tokenBucketStart(JsonNode row, ChronoUnit unit) {
+        String value = requiredText(row, "time_dimension");
+        // Langfuse daily aggregates use an ISO date; observation timestamps remain instants.
+        if (unit == ChronoUnit.DAYS && value.matches("\\d{4}-\\d{2}-\\d{2}")) {
+            try {
+                return LocalDate.parse(value).atStartOfDay(ZoneOffset.UTC).toInstant();
+            }
+            catch (DateTimeParseException failure) {
+                throw new UpstreamFailure();
+            }
+        }
+        return requiredInstant(row, "time_dimension");
     }
 
     private static Instant requiredInstant(JsonNode value, String field) {

@@ -17,8 +17,20 @@ public record ProviderTokenUsage(Integer input, Integer output, Integer cachedIn
             output = nonNegative(nativeUsage.completionTokens());
             cached = nativeUsage.promptTokensDetails() == null ? null
                     : nonNegative(nativeUsage.promptTokensDetails().cachedTokens());
-            if (input == null || (cached != null && cached > input)) cached = null;
         }
+        if ("google_genai".equalsIgnoreCase(provider)
+                && "org.springframework.ai.google.genai.metadata.GoogleGenAiUsage".equals(usage.getClass().getName())) {
+            // Product-only provider: keep the shared mapper compatible with the control lane.
+            // Spring AI preserves an absent native cached count as null, distinct from explicit zero.
+            try {
+                Object value = org.springframework.beans.PropertyAccessorFactory.forBeanPropertyAccess(usage)
+                        .getPropertyValue("cachedContentTokenCount");
+                if (value instanceof Integer count) cached = nonNegative(count);
+            } catch (org.springframework.beans.BeansException ignored) {
+                // Optional telemetry must never affect the provider result.
+            }
+        }
+        if (input == null || (cached != null && cached > input)) cached = null;
         return new ProviderTokenUsage(input, output, cached);
     }
 

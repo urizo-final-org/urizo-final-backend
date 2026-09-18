@@ -1,5 +1,9 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope;
+
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope.Decision;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -565,17 +569,26 @@ public final class CodingHandlerStageService {
         }
         CodingModelTurnContract.Response modelResponse = null;
         for (int turn = 1; turn <= MAX_MODEL_TURNS; turn++) {
+            var decisions = new ArrayList<Decision>();
             if (foldHistory) {
-                foldOldToolResults(messages, request.handlerKey(),
-                        inputOptions.retainSmallToolResults(), inputOptions.retainSmallToolResults());
+                decisions.addAll(foldOldToolResults(messages, request.handlerKey(),
+                        inputOptions.retainSmallToolResults(), inputOptions.retainSmallToolResults()));
             }
-            List<JsonNode> modelMessages = inputOptions.rtkSearchEnabled()
-                    ? rtkModelView.apply(messages, rtkViews).messages() : messages;
-            CodingModelTurnContract.Response execution = modelTurn(
+            List<JsonNode> modelMessages = messages;
+            if (inputOptions.rtkSearchEnabled()) {
+                var view = rtkModelView.apply(messages, rtkViews);
+                modelMessages = view.messages();
+                decisions.addAll(view.decisions());
+            }
+            CodingModelTurnContract.Response execution;
+            try (var inputScope = new InputOptimizationScope(
+                    inputOptions.rtkSearchEnabled(), inputOptions.retainSmallToolResults(), decisions)) {
+                execution = modelTurn(
                     authorization, jobId, resultId, request, authority, aggregate,
                     turn, schemas, modelMessages,
                     objectMapper.createObjectNode().put("type", "TEXT"),
                     modelBindings);
+            }
             modelResponse = execution;
             if (modelResponse.toolCalls().isEmpty()) {
                 try {
@@ -740,6 +753,16 @@ public final class CodingHandlerStageService {
                             ModelGatewayErrorCode.MODEL_RESPONSE_INVALID,
                             "Coding Model read for " + readOnlyAnswerLimit
                                     + " answers without an edit.");
+                }
+                if (readingAnswers == Math.max(1, readOnlyAnswerLimit / 2)) {
+                    messages.add(userMessage("You have used " + readingAnswers
+                            + " reading answers without attempting an edit; this stage stops at "
+                            + readOnlyAnswerLimit + ". Use the source already present to make the "
+                            + "smallest approved change with apply_patch. Read again only if a "
+                            + "specific required definition or exact replacement text is missing "
+                            + "or folded. Do not reread unchanged text that is still visible. "
+                            + "If the change cannot be made safely, explain the concrete blocker "
+                            + "in the declared stage result instead of continuing to explore."));
                 }
             }
             if (turn == MAX_MODEL_TURNS) {
@@ -2791,10 +2814,11 @@ public final class CodingHandlerStageService {
      * retain additional old bodies within per-result and shared byte limits. It does not
      * restore folded bodies or change the common request-size guard.
      */
-    private void foldOldToolResults(List<JsonNode> messages, String handlerKey,
+    private List<Decision> foldOldToolResults(List<JsonNode> messages, String handlerKey,
             boolean smallReadHistoryRetentionEnabled, boolean smallSearchHistoryRetentionEnabled) {
+        var decisions = new ArrayList<Decision>();
         if (toolHistoryKeep <= 0 || !"coding.code".equals(handlerKey)) {
-            return;
+            return decisions;
         }
         int keptAnswers = 0;
         int keptResults = 0;
@@ -2828,12 +2852,19 @@ public final class CodingHandlerStageService {
                     if (bytes <= maxBytes
                             && bytes <= SMALL_READ_HISTORY_MAX_BYTES - retainedSmallBytes) {
                         retainedSmallBytes += bytes;
+                        decisions.add(new Decision(
+                                message.path("toolCallId").asText(), tool, "RETENTION", "extra_retained", bytes, bytes, false));
                         continue;
                     }
                 }
             }
+            decisions.add(new Decision(
+                    message.path("toolCallId").asText(), tool, "RETENTION", "folded",
+                    message.path("content").asText().getBytes(StandardCharsets.UTF_8).length,
+                    FOLDED_TOOL_CONTENT.getBytes(StandardCharsets.UTF_8).length, true));
             ((ObjectNode) message).put("content", FOLDED_TOOL_CONTENT);
         }
+        return List.copyOf(decisions);
     }
 
     /**
@@ -2848,14 +2879,16 @@ public final class CodingHandlerStageService {
         if (retainSmallToolResults) {
             String retainedTools = "read_file and search_code";
             return "Older read_file and search_code results may be folded to a short note; "
-                    + "small " + retainedTools + " results may remain within a bounded history budget. Before "
-                    + "apply_patch, read_file the exact lines you will replace so oldText is "
-                    + "copied from a fresh read, never from memory. ";
+                    + "small " + retainedTools + " results may remain within a bounded history budget. "
+                    + "For apply_patch, copy oldText from the exact source still visible in the "
+                    + "conversation. Re-read only if that text is missing, folded or changed "
+                    + "by an intervening edit; never reconstruct it from memory. ";
         }
         return "Only your last " + toolHistoryKeep + " read_file and search_code results "
-                + "stay in the conversation; older ones are folded to a short note. Before "
-                + "apply_patch, read_file the exact lines you will replace so oldText is "
-                + "copied from a fresh read, never from memory. ";
+                + "stay in the conversation; older ones are folded to a short note. "
+                + "For apply_patch, copy oldText from the exact source still visible in the "
+                + "conversation. Re-read only if that text is missing, folded or changed "
+                + "by an intervening edit; never reconstruct it from memory. ";
     }
 
     /**

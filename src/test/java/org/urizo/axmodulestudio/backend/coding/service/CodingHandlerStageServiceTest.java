@@ -649,7 +649,9 @@ class CodingHandlerStageServiceTest {
         assertThat(fifth).hasSize(4).allSatisfy(body -> assertThat(body).contains(DIFF_DIGEST));
         assertThat(fifth.subList(0, 3)).isEqualTo(fourth);
         assertThat(routed.getAllValues().get(0).messages().get(0).content())
-                .contains("small read_file and search_code results may remain", "copied from a fresh read, never from memory");
+                .contains("small read_file and search_code results may remain",
+                        "Re-read only if that text is missing, folded or changed",
+                        "never reconstruct it from memory");
     }
 
     @Test
@@ -1075,6 +1077,17 @@ class CodingHandlerStageServiceTest {
                     assertThat(failure.getMessage()).contains("3 answers without an edit");
                 });
         verify(fixture.gateway(), times(3)).chat(any());
+        ArgumentCaptor<ProviderChatRequest> routed = ArgumentCaptor.forClass(ProviderChatRequest.class);
+        verify(fixture.gateway(), times(3)).chat(routed.capture());
+        assertThat(routed.getAllValues().get(0).messages())
+                .noneMatch(message -> message.content().contains("reading answers without attempting"));
+        for (ProviderChatRequest later : routed.getAllValues().subList(1, 3)) {
+            assertThat(later.messages().stream()
+                    .filter(message -> message.content().contains("reading answers without attempting")))
+                    .singleElement().satisfies(message -> assertThat(message.content())
+                            .contains("this stage stops at 3", "specific required definition",
+                                    "If the change cannot be made safely"));
+        }
         // The stage's own read_diff, then the three reading answers' tools.
         verify(fixture.toolService(), times(4))
                 .submitForNode(eq("Bearer worker"), any(), eq("code"));

@@ -18,12 +18,16 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelGatewayError
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ModelProvider;
 import org.urizo.axmodulestudio.backend.integration.ai.gateway.ProviderCallObserver;
 import org.urizo.axmodulestudio.backend.integration.ai.observability.ModelObservationScope;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 /** Actual gateway attempts, independent of remote telemetry and domain state transitions. */
 @Service
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class AiModelCallMonitoring implements ProviderCallObserver {
     private static final int MAX_CALLS = 500;
+    private static final ObjectMapper JSON = new ObjectMapper();
     private final JdbcTemplate jdbc;
     private final Clock clock;
 
@@ -49,9 +53,9 @@ public final class AiModelCallMonitoring implements ProviderCallObserver {
         int inserted = jdbc.update("""
                 INSERT INTO app.ai_job_model_call
                     (call_id, job_id, profile_version_id, pipeline_attempt, execution_attempt,
-                     node_id, node_sequence, turn_id, provider, model, provider_attempt, status, started_at)
+                     node_id, node_sequence, turn_id, provider, model, provider_attempt, status, started_at, input_processing)
                 SELECT ?, n.job_id, n.profile_version_id, n.pipeline_attempt, n.execution_attempt,
-                       n.node_id, n.node_sequence, ?, ?, ?, ?, 'RUNNING', ?
+                       n.node_id, n.node_sequence, ?, ?, ?, ?, 'RUNNING', ?, CAST(? AS jsonb)
                 FROM app.ai_job_monitoring_state s
                 JOIN app.ai_job_node_occurrence n
                   ON n.job_id = s.job_id AND n.profile_version_id = s.profile_version_id
@@ -61,9 +65,21 @@ public final class AiModelCallMonitoring implements ProviderCallObserver {
                   AND n.trace_id = ? AND n.execution_attempt = ?
                   AND n.status = 'RUNNING' AND s.current_node_status = 'RUNNING'
                 """, id, context.turnId(), provider.name(), model, attempt, Timestamp.from(clock.instant()),
-                context.jobId(), context.profileVersionId(), context.nodeId(), context.traceId(),
+                processingJson(), context.jobId(), context.profileVersionId(), context.nodeId(), context.traceId(),
                 context.executionAttempt());
         return inserted == 1 ? id : null;
+    }
+
+    private static String processingJson() {
+        var snapshot = InputOptimizationScope.current();
+        return snapshot == null ? null : JSON.valueToTree(snapshot).toString();
+    }
+
+    @Override public void usage(UUID callId, ProviderTokenUsage usage) {
+        jdbc.update("""
+                UPDATE app.ai_job_model_call SET input_tokens = ?, output_tokens = ?, cached_input_tokens = ?
+                WHERE call_id = ? AND status = 'RUNNING'
+                """, usage.input(), usage.output(), usage.cachedInput(), callId);
     }
 
     @Override

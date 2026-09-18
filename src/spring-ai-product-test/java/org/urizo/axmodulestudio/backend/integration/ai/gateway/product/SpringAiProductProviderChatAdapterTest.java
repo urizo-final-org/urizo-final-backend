@@ -336,6 +336,69 @@ class SpringAiProductProviderChatAdapterTest {
     }
 
     @Test
+    void preservesFirstOnlyGeminiSignatureAcrossParallelToolResults() throws Exception {
+        ChatModel chatModel = mock(ChatModel.class);
+        AssistantMessage parallel = geminiParallelReadFileCalls().getResult().getOutput();
+        AssistantMessage signedFirstOnly = AssistantMessage.builder()
+                .content("").toolCalls(parallel.getToolCalls())
+                .properties(Map.of("thoughtSignatures", List.of(new byte[] { 7 }))).build();
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(signedFirstOnly))))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String model = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, model);
+        ProviderChatMessage user = ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "Read files.");
+
+        List<ProviderChatMessage.ToolCall> calls = adapter.chat(
+                registration, geminiFollowUp(model, user)).toolCalls();
+        assertThat(calls).hasSize(2);
+        adapter.chat(registration, geminiFollowUp(model, user,
+                ProviderChatMessage.assistant("", calls),
+                ProviderChatMessage.tool(calls.get(0).id(), "read_file", "{\"content\":\"[folded]\"}"),
+                ProviderChatMessage.tool(calls.get(1).id(), "read_file", "{\"content\":\"guide\"}")));
+
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(2)).call(prompts.capture());
+        List<com.google.genai.types.Part> parts = createGeminiProviderRequest(
+                prompts.getAllValues().get(1)).contents().stream()
+                .flatMap(content -> content.parts().orElse(List.of()).stream())
+                .filter(part -> part.functionCall().isPresent()).toList();
+        assertThat(parts).hasSize(2);
+        assertThat(parts.get(0).thoughtSignature())
+                .hasValueSatisfying(value -> assertThat(value).containsExactly(7));
+        assertThat(parts.get(1).thoughtSignature()).isEmpty();
+    }
+
+    @Test
+    void doesNotRestoreFirstOnlySignatureWhenUnsignedCompanionChanges() {
+        ChatModel chatModel = mock(ChatModel.class);
+        AssistantMessage parallel = geminiParallelReadFileCalls().getResult().getOutput();
+        AssistantMessage signedFirstOnly = AssistantMessage.builder()
+                .content("").toolCalls(parallel.getToolCalls())
+                .properties(Map.of("thoughtSignatures", List.of(new byte[] { 7 }))).build();
+        when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))
+                .thenReturn(new ChatResponse(List.of(new Generation(signedFirstOnly))))
+                .thenReturn(response());
+        SpringAiProductProviderChatAdapter adapter = geminiAdapter(chatModel);
+        String model = Stage2ProviderModels.GOOGLE_GENAI_CHAT;
+        ProviderModelRegistration registration = toolRegistration(ModelProvider.GOOGLE_GENAI, model);
+        ProviderChatMessage user = ProviderChatMessage.plain(ProviderChatMessage.Role.USER, "Read files.");
+        List<ProviderChatMessage.ToolCall> calls = adapter.chat(
+                registration, geminiFollowUp(model, user)).toolCalls();
+        ProviderChatMessage.ToolCall changed = new ProviderChatMessage.ToolCall(
+                calls.get(1).id(), "read_file", "{\"path\":\"other.md\"}");
+        adapter.chat(registration, geminiFollowUp(model, user,
+                ProviderChatMessage.assistant("", List.of(calls.get(0), changed)),
+                ProviderChatMessage.tool(calls.get(0).id(), "read_file", "first"),
+                ProviderChatMessage.tool(changed.id(), "read_file", "second")));
+        ArgumentCaptor<Prompt> prompts = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel, org.mockito.Mockito.times(2)).call(prompts.capture());
+        assertThat(assistantMetadata(prompts.getAllValues().get(1)))
+                .doesNotContainKey("thoughtSignatures");
+    }
+
+    @Test
     void restoresEveryGeminiSignatureAfterAnEarlierToolResultIsFolded() throws Exception {
         ChatModel chatModel = mock(ChatModel.class);
         when(chatModel.call(org.mockito.ArgumentMatchers.any(Prompt.class)))

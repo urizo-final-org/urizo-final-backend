@@ -1,5 +1,9 @@
 package org.urizo.axmodulestudio.backend.coding.service;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope;
+
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope.Decision;
+
 import org.urizo.axmodulestudio.backend.coding.dto.CodingModelTurnContract;
 import org.urizo.axmodulestudio.backend.cms.assistant.NaturalCmsToolContract;
 import java.nio.charset.StandardCharsets;
@@ -435,6 +439,7 @@ public class CodingModelTurnService {
             List<ProviderChatMessage> messages, long requestOverhead) {
         long messageBudget = MAX_REQUEST_CHARACTERS - requestOverhead;
         List<ProviderChatMessage> bounded = new ArrayList<>(messages);
+        var decisions = new ArrayList<Decision>();
         long characters = characters(bounded);
         for (int index = 0; index < bounded.size() && characters > messageBudget; index++) {
             ProviderChatMessage message = bounded.get(index);
@@ -443,6 +448,10 @@ public class CodingModelTurnService {
                 continue;
             }
             characters -= message.content().length() - ELIDED_TOOL_CONTENT.length();
+            decisions.add(new Decision(
+                    message.toolCallId(), message.toolName(), "REQUEST_BUDGET", "elided",
+                    message.content().getBytes(StandardCharsets.UTF_8).length,
+                    ELIDED_TOOL_CONTENT.getBytes(StandardCharsets.UTF_8).length, true));
             bounded.set(index, ProviderChatMessage.tool(
                     message.toolCallId(), message.toolName(), ELIDED_TOOL_CONTENT));
         }
@@ -451,6 +460,7 @@ public class CodingModelTurnService {
                     ModelGatewayErrorCode.MODEL_CAPABILITY_UNSUPPORTED,
                     "The Coding stage context exceeds the model request budget.");
         }
+        InputOptimizationScope.finalBudget(decisions);
         return List.copyOf(bounded);
     }
 

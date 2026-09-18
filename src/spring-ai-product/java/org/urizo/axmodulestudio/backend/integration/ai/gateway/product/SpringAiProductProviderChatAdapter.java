@@ -1,5 +1,7 @@
 package org.urizo.axmodulestudio.backend.integration.ai.gateway.product;
 
+import org.urizo.axmodulestudio.backend.integration.ai.observability.ProviderTokenUsage;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -58,6 +60,9 @@ import org.urizo.axmodulestudio.backend.integration.ai.gateway.InferenceSettings
 @Component
 @Profile("dev & !coding-model-turn-local-mock")
 final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
+
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(SpringAiProductProviderChatAdapter.class);
 
     private static final int MAX_NATIVE_TOOL_CALLS = 50;
     private static final int MAX_THOUGHT_SIGNATURE_BYTES = 65_536;
@@ -163,6 +168,15 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
         catch (RuntimeException failure) {
             completed = false;
+            // Only application code location and response presence: never log the
+            // exception message/cause, provider payload, arguments or credentials.
+            StackTraceElement site = Arrays.stream(failure.getStackTrace())
+                    .filter(frame -> frame.getClassName().equals(getClass().getName()))
+                    .findFirst().orElse(null);
+            LOG.warn("Provider adapter rejected call: provider={} responseReceived={} site={} line={}",
+                    request.provider(), providerResponse != null,
+                    site == null ? "upstream" : site.getMethodName(),
+                    site == null ? -1 : site.getLineNumber());
             throw failure;
         }
         finally {
@@ -386,7 +400,9 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 inputTokens,
                 outputTokens,
                 latency.isNegative() ? Duration.ZERO : latency,
-                finishReason);
+                finishReason,
+                ProviderTokenUsage.from(
+                        request.provider().name(), usage));
     }
 
     private static List<ProviderChatMessage.ToolCall> nativeToolCalls(
@@ -504,7 +520,10 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
             return;
         }
         Object raw = output.getMetadata().get("thoughtSignatures");
-        if (!(raw instanceof List<?> values) || values.size() != normalizedCalls.size()) {
+        // Gemini signs only the first function call in a parallel response. Spring AI
+        // keeps only present signatures, so that valid response has one entry here.
+        if (!(raw instanceof List<?> values)
+                || (values.size() != 1 && values.size() != normalizedCalls.size())) {
             throw new ProviderFailure(ProviderFailureKind.INVALID_RESPONSE, null);
         }
         List<byte[]> validated = new ArrayList<>();
@@ -518,13 +537,16 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
         }
         Instant expiresAt = clock.instant().plus(THOUGHT_SIGNATURE_TTL);
         synchronized (thoughtSignatures) {
-            for (int index = 0; index < validated.size(); index++) {
+            for (int index = 0; index < normalizedCalls.size(); index++) {
                 ProviderChatMessage.ToolCall call = normalizedCalls.get(index);
                 thoughtSignatures.put(
                         new ThoughtSignatureKey(
                                 request.provider(), request.modelId(), call.id()),
                         new StoredThoughtSignature(
-                                validated.get(index), expiresAt, call.name(),
+                                // An empty internal value records a known unsigned trailing
+                                // call; it must never be sent to Gemini as a signature.
+                                index < validated.size() ? validated.get(index) : new byte[0],
+                                expiresAt, call.name(),
                                 argumentsDigest(call.arguments()), index));
             }
         }
@@ -570,6 +592,11 @@ final class SpringAiProductProviderChatAdapter implements ProviderChatAdapter {
                 }
                 restored.add(Arrays.copyOf(stored.value(), stored.value().length));
             }
+        }
+        // Validate the entire group above before dropping its unsigned trailing entries.
+        // Missing, changed or reordered calls still invalidate restoration of the group.
+        while (!restored.isEmpty() && restored.get(restored.size() - 1).length == 0) {
+            restored.remove(restored.size() - 1);
         }
         return List.copyOf(restored);
     }

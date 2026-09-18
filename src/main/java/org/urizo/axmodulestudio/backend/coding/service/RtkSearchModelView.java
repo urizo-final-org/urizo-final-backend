@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import org.urizo.axmodulestudio.backend.integration.ai.observability.InputOptimizationScope.Decision;
 
 /** RTK is a bounded formatter, never a tool executor. Storage always keeps the raw result. */
 @Component
@@ -38,10 +39,12 @@ public class RtkSearchModelView {
     }
 
     public record View(String content, String reason, int originalBytes, int modelBytes) { }
-    record Messages(List<JsonNode> messages, long originalBytes, long modelBytes, int selected, int skipped) { }
+    record Messages(List<JsonNode> messages, long originalBytes, long modelBytes, int selected, int skipped,
+            List<Decision> decisions) { }
 
     Messages apply(List<JsonNode> source, Map<String, View> cache) {
         var result = new ArrayList<JsonNode>(source.size());
+        var decisions = new ArrayList<Decision>();
         Map<String, String> tools = new HashMap<>();
         long original = 0, model = 0;
         int selected = 0, skipped = 0;
@@ -56,21 +59,26 @@ public class RtkSearchModelView {
             }
             String raw = message.path("content").asText();
             View view = cache.get(raw);
+            boolean firstProcessing = view == null;
             if (view == null) {
                 view = cache.size() < 64 ? render(raw) : unchanged(raw, "budget_exceeded");
                 // Diagnostic bytes describe this formatter only, never provider token savings.
-                LOG.debug("RTK search model view: reason={}, originalBytes={}, modelBytes={}",
-                        view.reason(), view.originalBytes(), view.modelBytes());
+                if (view.originalBytes() > 4096) {
+                    LOG.info("RTK search model view: reason={}, originalBytes={}, modelBytes={}",
+                            view.reason(), view.originalBytes(), view.modelBytes());
+                }
                 if (cache.size() < 64) cache.put(raw, view);
             }
             ObjectNode copy = message.deepCopy();
             copy.put("content", view.content());
             result.add(copy);
+            decisions.add(new Decision(message.path("toolCallId").asText(), "search_code", "RTK",
+                    view.reason(), view.originalBytes(), view.modelBytes(), firstProcessing));
             original += view.originalBytes();
             model += view.modelBytes();
             if ("selected".equals(view.reason())) selected++; else skipped++;
         }
-        return new Messages(List.copyOf(result), original, model, selected, skipped);
+        return new Messages(List.copyOf(result), original, model, selected, skipped, List.copyOf(decisions));
     }
 
     public View render(String raw) {
@@ -79,6 +87,7 @@ public class RtkSearchModelView {
         int size = bytes(raw);
         if (size <= 4096) return unchanged(raw, "below_threshold");
         if (size > MAX_BYTES) return unchanged(raw, "too_large");
+        boolean attempted = false;
         try {
             JsonNode source = JSON.readTree(raw);
             if (!fields(source, Set.of("query", "scope", "matches", "truncated"))
@@ -100,6 +109,7 @@ public class RtkSearchModelView {
                                 .add(match.path("preview"))).append('\n');
             }
             if (bytes(stdin.toString()) > MAX_BYTES) return unchanged(raw, "too_large");
+            attempted = true;
             String formatted = run(stdin.toString());
             if (!preserves(source.path("matches"), stdin.toString(), formatted)) {
                 return unchanged(raw, "information_loss");
@@ -116,7 +126,7 @@ public class RtkSearchModelView {
                     : unchanged(raw, "not_smaller");
         } catch (Exception failure) {
             if (failure instanceof InterruptedException) Thread.currentThread().interrupt();
-            return unchanged(raw, "adapter_failure");
+            return unchanged(raw, attempted ? "adapter_failure" : "unsupported_shape");
         }
     }
 

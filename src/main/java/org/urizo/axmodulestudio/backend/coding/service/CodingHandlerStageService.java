@@ -44,6 +44,8 @@ import org.urizo.axmodulestudio.backend.orchestration.service.ProfileModelBindin
 @ConditionalOnProperty(prefix = "ax.coding.model-turn-bridge", name = "enabled", havingValue = "true")
 public final class CodingHandlerStageService {
 
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(CodingHandlerStageService.class);
     /**
      * A complete code exchange already spends about seven turns - read_diff, read_file,
      * apply_patch, the post-change read_diff, the scans and the terminal reply - so a
@@ -601,6 +603,16 @@ public final class CodingHandlerStageService {
                             || turn == MAX_MODEL_TURNS) {
                         throw failure;
                     }
+                    // The refusal reason reaches the model as feedback and is then gone: a
+                    // refused call writes no coding_tool_execution row, because that row is
+                    // inserted only after the tool returns. Job c278deba lost 2,682 output
+                    // tokens to one refused apply_patch whose reason no record could name -
+                    // oldText matched the file exactly once, so the three replacement checks
+                    // and the whitespace bound were all ruled out after the fact and the
+                    // cause stayed unknown. This line is the only place the reason survives.
+                    LOG.warn("Coding tool call refused: job={} handler={} tool={} code={} reason={}",
+                            jobId, request.handlerKey(), call.name(), failure.code(),
+                            failure.getMessage());
                     refused = call;
                     refusal = failure;
                     break;
